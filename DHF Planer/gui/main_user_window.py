@@ -14,10 +14,12 @@ from database.db_manager import (
     get_all_shift_types, submit_user_request,
     get_wunschfrei_requests_by_user_for_month,
     get_wunschfrei_requests_for_month, get_unnotified_requests,
-    mark_requests_as_notified, get_all_requests_by_user, withdraw_wunschfrei_request
+    mark_requests_as_notified, get_all_requests_by_user, withdraw_wunschfrei_request,
+    get_unnotified_bug_reports_for_user, mark_bug_reports_as_notified
 )
 from .holiday_manager import HolidayManager
 from .request_config_manager import RequestConfigManager
+from .dialogs.bug_report_dialog import BugReportDialog
 
 STAFFING_RULES_FILE = 'min_staffing_rules.json'
 USER_TAB_ORDER_FILE = 'user_tab_order_config.json'
@@ -145,6 +147,24 @@ class MainUserWindow(tk.Toplevel):
         self.geometry("1200x800")
         self.state("zoomed")
 
+        style = ttk.Style(self)
+        try:
+            style.theme_use('clam')
+        except tk.TclError:
+            pass
+
+        style.configure("Blue.TButton",
+                        foreground="black",
+                        background="#007bff",
+                        font=("Segoe UI", 9, "bold"),
+                        bordercolor="#007bff",
+                        lightcolor="#007bff",
+                        darkcolor="#007bff",
+                        padding=5)
+        style.map("Blue.TButton",
+                  background=[('active', '#0056b3'), ('pressed', '#004085')],
+                  foreground=[('active', 'black'), ('pressed', 'black')])
+
         self.current_display_date = date.today()
         self.shift_types_data = {}
         self.shift_schedule_data = {}
@@ -161,10 +181,21 @@ class MainUserWindow(tk.Toplevel):
         self.notebook.pack(fill="both", expand=True, padx=10, pady=10)
 
         self.setup_tabs()
+        self.setup_footer()
 
         self.protocol("WM_DELETE_WINDOW", self.master.on_app_close)
 
-        self.after(100, self.check_for_notifications)
+        self.after(100, self.check_for_wunschfrei_notifications)
+        self.after(200, self.check_for_bug_report_notifications)
+
+    def setup_footer(self):
+        footer_frame = ttk.Frame(self, padding=5)
+        footer_frame.pack(fill="x", side="bottom")
+        ttk.Button(footer_frame, text="Bug / Fehler melden", command=self.open_bug_report_dialog,
+                   style="Blue.TButton").pack(side="right", padx=10)
+
+    def open_bug_report_dialog(self):
+        BugReportDialog(self, self.user_data['id'])
 
     def open_tab_order_window(self):
         TabOrderWindow(self, self.reorder_tabs)
@@ -214,7 +245,26 @@ class MainUserWindow(tk.Toplevel):
             if frame:
                 self.notebook.add(frame, text=tab_name)
 
-    def check_for_notifications(self):
+    def check_for_bug_report_notifications(self):
+        """Prüft auf neue Statusänderungen bei Bug-Reports und benachrichtigt den User."""
+        unnotified_reports = get_unnotified_bug_reports_for_user(self.user_data['id'])
+        if not unnotified_reports:
+            return
+
+        message_lines = ["Es gibt Neuigkeiten zu Ihren Fehlerberichten:"]
+        notified_ids = []
+
+        for report in unnotified_reports:
+            title = report['title']
+            status = report['status']
+            line = f"- Ihr Bericht '{title[:30]}...' hat jetzt den Status: {status}."
+            message_lines.append(line)
+            notified_ids.append(report['id'])
+
+        messagebox.showinfo("Status-Update für Fehlerberichte", "\n".join(message_lines), parent=self)
+        mark_bug_reports_as_notified(notified_ids)
+
+    def check_for_wunschfrei_notifications(self):
         unnotified = get_unnotified_requests(self.user_data['id'])
         if not unnotified:
             return

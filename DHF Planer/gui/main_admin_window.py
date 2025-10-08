@@ -8,7 +8,7 @@ import json
 from database.db_manager import (
     get_pending_requests, ROLE_HIERARCHY, get_all_shift_types,
     get_unread_admin_notifications, mark_admin_notifications_as_read,
-    get_pending_wunschfrei_requests
+    get_pending_wunschfrei_requests, get_open_bug_reports_count
 )
 from gui.holiday_manager import HolidayManager
 
@@ -20,6 +20,7 @@ from .dialogs.holiday_settings_window import HolidaySettingsWindow
 from .dialogs.min_staffing_window import MinStaffingWindow, load_staffing_rules
 from .dialogs.user_order_window import UserOrderWindow
 from .dialogs.shift_order_window import ShiftOrderWindow
+from .dialogs.bug_report_dialog import BugReportDialog
 
 # === IMPORTE für Tabs ===
 from .tabs.shift_plan_tab import ShiftPlanTab
@@ -29,6 +30,7 @@ from .tabs.shift_types_tab import ShiftTypesTab
 from .tabs.log_tab import LogTab
 from .tabs.requests_tab import RequestsTab
 from .tabs.wunschfrei_tab import WunschfreiTab
+from .tabs.bug_reports_tab import BugReportsTab
 
 SHIFT_FREQUENCY_FILE = 'shift_frequency.json'
 
@@ -43,7 +45,27 @@ class MainAdminWindow(tk.Toplevel):
         self.geometry("1200x800")
         self.state("zoomed")
 
-        # === Zentraler Daten-Zustand der App ===
+        style = ttk.Style(self)
+        try:
+            style.theme_use('clam')
+        except tk.TclError:
+            pass
+
+        style.configure("Header.TLabel", font=("Segoe UI", 10, "bold"))
+        style.configure("Alert.TLabel", font=("Segoe UI", 10, "bold"), foreground="red")
+
+        style.configure("Blue.TButton",
+                        foreground="black",
+                        background="#007bff",
+                        font=("Segoe UI", 9, "bold"),
+                        bordercolor="#007bff",
+                        lightcolor="#007bff",
+                        darkcolor="#007bff",
+                        padding=5)
+        style.map("Blue.TButton",
+                  background=[('active', '#0056b3'), ('pressed', '#004085')],
+                  foreground=[('active', 'black'), ('pressed', 'black')])
+
         self.current_display_date = date.today()
         self.user_data_store = {}
         self.dog_data_store = []
@@ -53,15 +75,14 @@ class MainAdminWindow(tk.Toplevel):
         self.shift_frequency = self.load_shift_frequency()
         self.tab_frames = {}
 
-        # === Initialisierung ===
         self._load_holidays_for_year(self.current_display_date.year)
         self.load_shift_types()
 
-        # === UI Aufbau ===
         self.setup_header()
         self.notebook = ttk.Notebook(self)
         self.notebook.pack(fill="both", expand=True, padx=10, pady=(0, 10))
         self.setup_tabs()
+        self.setup_footer()
 
         self.protocol("WM_DELETE_WINDOW", self.master.on_app_close)
         self.after(100, self.check_for_admin_notifications)
@@ -72,10 +93,6 @@ class MainAdminWindow(tk.Toplevel):
         header_frame.pack(fill="x", side="top")
         notification_frame = ttk.Frame(header_frame)
         notification_frame.pack(side="right", padx=10)
-
-        style = ttk.Style(self)
-        style.configure("Header.TLabel", font=("Segoe UI", 10, "bold"))
-        style.configure("Alert.TLabel", font=("Segoe UI", 10, "bold"), foreground="red")
 
         self.pending_urlaub_var = tk.StringVar()
         self.urlaub_label = ttk.Label(notification_frame, textvariable=self.pending_urlaub_var, style="Header.TLabel",
@@ -89,6 +106,12 @@ class MainAdminWindow(tk.Toplevel):
         self.wunschfrei_label.pack(side="right", padx=10)
         self.wunschfrei_label.bind("<Button-1>", lambda e: self.switch_to_tab("Offene Anfragen"))
 
+        self.pending_bugs_var = tk.StringVar()
+        self.bugs_label = ttk.Label(notification_frame, textvariable=self.pending_bugs_var,
+                                    style="Header.TLabel", cursor="hand2")
+        self.bugs_label.pack(side="right", padx=10)
+        self.bugs_label.bind("<Button-1>", lambda e: self.switch_to_tab("Bug Reports"))
+
         ttk.Button(header_frame, text="Reiter anpassen", command=self.open_tab_order_window).pack(side="right", padx=10)
 
     def setup_tabs(self):
@@ -99,9 +122,26 @@ class MainAdminWindow(tk.Toplevel):
             "Benutzerverwaltung": UserManagementTab(self.notebook, self),
             "Diensthunde": DogManagementTab(self.notebook, self),
             "Schichtarten": ShiftTypesTab(self.notebook, self),
-            "Protokoll": LogTab(self.notebook, self)
+            "Protokoll": LogTab(self.notebook, self),
+            "Bug Reports": BugReportsTab(self.notebook, self)
         }
         self.reorder_tabs(TabOrderManager.load_order(), set_active_tab=False)
+
+    def setup_footer(self):
+        footer_frame = ttk.Frame(self, padding=5)
+        footer_frame.pack(fill="x", side="bottom")
+        ttk.Button(footer_frame, text="Bug / Fehler melden", command=self.open_bug_report_dialog,
+                   style="Blue.TButton").pack(side="right", padx=10)
+
+    def refresh_bug_reports(self):
+        """Callback-Funktion zur Aktualisierung nach Bug-Meldung."""
+        if "Bug Reports" in self.tab_frames:
+            self.tab_frames["Bug Reports"].refresh_bug_trees()
+        self.update_notification_indicators()
+
+    def open_bug_report_dialog(self):
+        # Übergibt die refresh_bug_reports Methode als Callback
+        BugReportDialog(self, self.logged_in_user['id'], callback=self.refresh_bug_reports)
 
     def load_shift_frequency(self):
         if os.path.exists(SHIFT_FREQUENCY_FILE):
@@ -158,10 +198,13 @@ class MainAdminWindow(tk.Toplevel):
     def update_notification_indicators(self):
         num_wunschfrei = len(get_pending_wunschfrei_requests())
         num_urlaub = len(get_pending_requests())
+        num_bugs = get_open_bug_reports_count()
         self.pending_wunschfrei_var.set(f"🔔 Offene Anfragen: {num_wunschfrei}" if num_wunschfrei > 0 else "")
         self.wunschfrei_label.config(style="Alert.TLabel" if num_wunschfrei > 0 else "Header.TLabel")
         self.pending_urlaub_var.set(f"🔔 Offene Urlaubsanträge: {num_urlaub}" if num_urlaub > 0 else "")
         self.urlaub_label.config(style="Alert.TLabel" if num_urlaub > 0 else "Header.TLabel")
+        self.pending_bugs_var.set(f"🐞 Offene Bug Reports: {num_bugs}" if num_bugs > 0 else "")
+        self.bugs_label.config(style="Alert.TLabel" if num_bugs > 0 else "Header.TLabel")
 
     def check_for_admin_notifications(self):
         unread_notifications = get_unread_admin_notifications()
@@ -172,6 +215,7 @@ class MainAdminWindow(tk.Toplevel):
         messagebox.showinfo("Benachrichtigung", "\n".join(message_lines), parent=self)
         mark_admin_notifications_as_read(notified_ids)
         if "Protokoll" in self.tab_frames: self.tab_frames["Protokoll"].refresh_log_tab()
+        if "Bug Reports" in self.tab_frames: self.tab_frames["Bug Reports"].refresh_bug_trees()
 
     def open_tab_order_window(self):
         TabOrderWindow(self, self.reorder_tabs)
@@ -199,6 +243,7 @@ class MainAdminWindow(tk.Toplevel):
         if "Diensthunde" in self.tab_frames: self.tab_frames["Diensthunde"].refresh_dogs_list()
         if "Schichtplan" in self.tab_frames: self.tab_frames["Schichtplan"].build_shift_plan_grid(
             self.current_display_date.year, self.current_display_date.month)
+        if "Bug Reports" in self.tab_frames: self.tab_frames["Bug Reports"].refresh_bug_trees()
 
     def refresh_holidays_and_plan(self):
         self._load_holidays_for_year(self.current_display_date.year)

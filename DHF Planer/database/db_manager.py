@@ -142,6 +142,20 @@ def initialize_db():
                 timestamp TEXT NOT NULL
             );
         """)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS bug_reports (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                title TEXT NOT NULL,
+                description TEXT NOT NULL,
+                timestamp TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'Neu',
+                is_read INTEGER NOT NULL DEFAULT 0,
+                user_notified INTEGER NOT NULL DEFAULT 1,
+                archived INTEGER NOT NULL DEFAULT 0,
+                FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE
+            );
+        """)
 
         _add_column_if_not_exists(cursor, "users", "entry_date", "TEXT")
         _add_column_if_not_exists(cursor, "shift_types", "color", "TEXT DEFAULT '#FFFFFF'")
@@ -150,9 +164,10 @@ def initialize_db():
         _add_column_if_not_exists(cursor, "wunschfrei_requests", "notified", "INTEGER DEFAULT 0")
         _add_column_if_not_exists(cursor, "wunschfrei_requests", "rejection_reason", "TEXT")
         _add_column_if_not_exists(cursor, "wunschfrei_requests", "requested_shift", "TEXT")
-        # NEU: Spalten für die Schicht-Zeiten hinzufügen, falls sie fehlen
         _add_column_if_not_exists(cursor, "shift_types", "start_time", "TEXT")
         _add_column_if_not_exists(cursor, "shift_types", "end_time", "TEXT")
+        _add_column_if_not_exists(cursor, "bug_reports", "user_notified", "INTEGER NOT NULL DEFAULT 1")
+        _add_column_if_not_exists(cursor, "bug_reports", "archived", "INTEGER NOT NULL DEFAULT 0")
 
         conn.commit()
     finally:
@@ -205,16 +220,144 @@ def get_all_logs_formatted():
     try:
         cursor = conn.cursor()
         cursor.execute("""
-            SELECT 
-                a.timestamp, 
-                COALESCE(u.vorname || ' ' || u.name, 'Unbekannt') as user_name, 
-                a.action_type, 
-                a.details 
+            SELECT
+                a.timestamp,
+                COALESCE(u.vorname || ' ' || u.name, 'Unbekannt') as user_name,
+                a.action_type,
+                a.details
             FROM activity_log a
             LEFT JOIN users u ON a.user_id = u.id
             ORDER BY a.timestamp DESC
         """)
         return [dict(row) for row in cursor.fetchall()]
+    finally:
+        conn.close()
+
+
+def submit_bug_report(user_id, title, description):
+    conn = create_connection()
+    try:
+        cursor = conn.cursor()
+        timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        cursor.execute(
+            "INSERT INTO bug_reports (user_id, title, description, timestamp, user_notified) VALUES (?, ?, ?, ?, 1)",
+            (user_id, title, description, timestamp)
+        )
+
+        cursor.execute("SELECT role FROM users WHERE id = ?", (user_id,))
+        user_role = cursor.fetchone()['role']
+        if user_role not in ["Admin", "SuperAdmin"]:
+            _create_admin_notification(cursor, "Ein neuer Bug-Report wurde eingereicht.")
+
+        conn.commit()
+        return True, "Bug-Report erfolgreich übermittelt."
+    except sqlite3.Error as e:
+        return False, f"Datenbankfehler: {e}"
+    finally:
+        conn.close()
+
+
+def get_open_bug_reports_count():
+    """Zählt alle nicht erledigten und nicht archivierten Bug-Reports."""
+    conn = create_connection()
+    try:
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) FROM bug_reports WHERE status != 'Erledigt' AND archived = 0")
+        return cursor.fetchone()[0]
+    finally:
+        conn.close()
+
+
+def get_all_bug_reports():
+    """Holt alle Bug-Reports inklusive des Archivierungsstatus."""
+    conn = create_connection()
+    try:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT b.id, u.vorname, u.name, b.timestamp, b.title, b.description, b.status, b.archived
+            FROM bug_reports b
+            JOIN users u ON b.user_id = u.id
+            ORDER BY b.archived ASC, b.timestamp DESC
+        """)
+        return [dict(row) for row in cursor.fetchall()]
+    finally:
+        conn.close()
+
+
+def update_bug_report_status(bug_id, new_status):
+    conn = create_connection()
+    try:
+        cursor = conn.cursor()
+        cursor.execute(
+            "UPDATE bug_reports SET status = ?, user_notified = 0 WHERE id = ?",
+            (new_status, bug_id)
+        )
+        conn.commit()
+        return True, "Status aktualisiert."
+    except sqlite3.Error as e:
+        return False, f"Datenbankfehler: {e}"
+    finally:
+        conn.close()
+
+
+def archive_bug_report(bug_id):
+    """Setzt den 'archived' Status für einen Bug-Report auf 1."""
+    conn = create_connection()
+    try:
+        cursor = conn.cursor()
+        cursor.execute(
+            "UPDATE bug_reports SET archived = 1 WHERE id = ?",
+            (bug_id,)
+        )
+        conn.commit()
+        return True, "Bug-Report wurde archiviert."
+    except sqlite3.Error as e:
+        return False, f"Datenbankfehler: {e}"
+    finally:
+        conn.close()
+
+
+def unarchive_bug_report(bug_id):
+    """Setzt den 'archived' Status für einen Bug-Report auf 0 zurück."""
+    conn = create_connection()
+    try:
+        cursor = conn.cursor()
+        cursor.execute(
+            "UPDATE bug_reports SET archived = 0 WHERE id = ?",
+            (bug_id,)
+        )
+        conn.commit()
+        return True, "Bug-Report wurde wiederhergestellt."
+    except sqlite3.Error as e:
+        return False, f"Datenbankfehler: {e}"
+    finally:
+        conn.close()
+
+
+def get_unnotified_bug_reports_for_user(user_id):
+    conn = create_connection()
+    try:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT id, title, status FROM bug_reports WHERE user_id = ? AND user_notified = 0",
+            (user_id,)
+        )
+        return [dict(row) for row in cursor.fetchall()]
+    finally:
+        conn.close()
+
+
+def mark_bug_reports_as_notified(report_ids):
+    if not report_ids:
+        return
+    conn = create_connection()
+    try:
+        cursor = conn.cursor()
+        ids_tuple = tuple(report_ids)
+        placeholders = ', '.join('?' for _ in ids_tuple)
+        query = f"UPDATE bug_reports SET user_notified = 1 WHERE id IN ({placeholders})"
+        cursor.execute(query, ids_tuple)
+        conn.commit()
     finally:
         conn.close()
 
@@ -459,8 +602,8 @@ def get_shifts_for_month(year, month):
         end_date = date(year, month, calendar.monthrange(year, month)[1]).strftime('%Y-%m-%d')
 
         cursor.execute("""
-            SELECT user_id, shift_date, shift_abbrev 
-            FROM shift_schedule 
+            SELECT user_id, shift_date, shift_abbrev
+            FROM shift_schedule
             WHERE shift_date BETWEEN ? AND ?
         """, (start_date, end_date))
 
@@ -488,11 +631,11 @@ def get_daily_shift_counts_for_month(year, month):
         end_date = date(year, month, calendar.monthrange(year, month)[1]).strftime('%Y-%m-%d')
 
         cursor.execute("""
-            SELECT 
-                shift_date, 
-                shift_abbrev, 
+            SELECT
+                shift_date,
+                shift_abbrev,
                 COUNT(shift_abbrev) as count
-            FROM shift_schedule 
+            FROM shift_schedule
             WHERE shift_date BETWEEN ? AND ?
             GROUP BY shift_date, shift_abbrev
         """, (start_date, end_date))
@@ -517,7 +660,6 @@ def get_all_shift_types():
     conn = create_connection()
     try:
         cursor = conn.cursor()
-        # GEÄNDERT: Explizit alle Spalten inkl. der neuen Zeit-Spalten auswählen
         cursor.execute(
             "SELECT id, name, abbreviation, hours, description, color, start_time, end_time FROM shift_types ORDER BY abbreviation")
         return [dict(row) for row in cursor.fetchall()]
@@ -532,10 +674,9 @@ def add_shift_type(data):
     conn = create_connection()
     try:
         cursor = conn.cursor()
-        # GEÄNDERT: SQL-Statement um start_time und end_time erweitert
         cursor.execute(
-            """INSERT INTO shift_types 
-               (name, abbreviation, hours, description, color, start_time, end_time) 
+            """INSERT INTO shift_types
+               (name, abbreviation, hours, description, color, start_time, end_time)
                VALUES (:name, :abbreviation, :hours, :description, :color, :start_time, :end_time)""",
             data)
         conn.commit()
@@ -552,7 +693,6 @@ def update_shift_type(shift_type_id, data):
     conn = create_connection()
     try:
         cursor = conn.cursor()
-        # GEÄNDERT: SQL-Statement um start_time und end_time erweitert
         sql = """ UPDATE shift_types
                   SET name = :name,
                       abbreviation = :abbreviation,
@@ -563,7 +703,6 @@ def update_shift_type(shift_type_id, data):
                       end_time = :end_time
                   WHERE id = :id """
 
-        # Stelle sicher, dass die ID im data-Dictionary ist
         data['id'] = shift_type_id
 
         cursor.execute(sql, data)
@@ -725,9 +864,9 @@ def get_available_dogs():
         cursor.execute("""
             SELECT d.name FROM dogs d
             LEFT JOIN (
-                SELECT diensthund, COUNT(*) as assignment_count 
-                FROM users 
-                WHERE diensthund IS NOT NULL AND diensthund != '' 
+                SELECT diensthund, COUNT(*) as assignment_count
+                FROM users
+                WHERE diensthund IS NOT NULL AND diensthund != ''
                 GROUP BY diensthund
             ) AS assignments ON d.name = assignments.diensthund
             WHERE assignments.assignment_count < 2 OR assignments.assignment_count IS NULL
