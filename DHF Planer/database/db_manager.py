@@ -121,7 +121,8 @@ def initialize_db():
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 abbreviation TEXT NOT NULL UNIQUE,
                 sort_order INTEGER NOT NULL,
-                is_visible INTEGER DEFAULT 1
+                is_visible INTEGER DEFAULT 1,
+                check_for_understaffing INTEGER DEFAULT 0
             );
         """)
         cursor.execute("""
@@ -153,6 +154,7 @@ def initialize_db():
                 is_read INTEGER NOT NULL DEFAULT 0,
                 user_notified INTEGER NOT NULL DEFAULT 1,
                 archived INTEGER NOT NULL DEFAULT 0,
+                admin_notes TEXT,
                 FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE
             );
         """)
@@ -161,6 +163,7 @@ def initialize_db():
         _add_column_if_not_exists(cursor, "shift_types", "color", "TEXT DEFAULT '#FFFFFF'")
         _add_column_if_not_exists(cursor, "user_order", "is_visible", "INTEGER DEFAULT 1")
         _add_column_if_not_exists(cursor, "shift_order", "is_visible", "INTEGER DEFAULT 1")
+        _add_column_if_not_exists(cursor, "shift_order", "check_for_understaffing", "INTEGER DEFAULT 0")
         _add_column_if_not_exists(cursor, "wunschfrei_requests", "notified", "INTEGER DEFAULT 0")
         _add_column_if_not_exists(cursor, "wunschfrei_requests", "rejection_reason", "TEXT")
         _add_column_if_not_exists(cursor, "wunschfrei_requests", "requested_shift", "TEXT")
@@ -168,6 +171,8 @@ def initialize_db():
         _add_column_if_not_exists(cursor, "shift_types", "end_time", "TEXT")
         _add_column_if_not_exists(cursor, "bug_reports", "user_notified", "INTEGER NOT NULL DEFAULT 1")
         _add_column_if_not_exists(cursor, "bug_reports", "archived", "INTEGER NOT NULL DEFAULT 0")
+        _add_column_if_not_exists(cursor, "bug_reports", "admin_notes", "TEXT")
+
 
         conn.commit()
     finally:
@@ -274,10 +279,26 @@ def get_all_bug_reports():
     try:
         cursor = conn.cursor()
         cursor.execute("""
-            SELECT b.id, u.vorname, u.name, b.timestamp, b.title, b.description, b.status, b.archived
+            SELECT b.id, u.vorname, u.name, b.timestamp, b.title, b.description, b.status, b.archived, b.admin_notes
             FROM bug_reports b
             JOIN users u ON b.user_id = u.id
             ORDER BY b.archived ASC, b.timestamp DESC
+        """)
+        return [dict(row) for row in cursor.fetchall()]
+    finally:
+        conn.close()
+
+
+def get_visible_bug_reports():
+    """Holt alle nicht-archivierten Bug-Reports für die Benutzeransicht."""
+    conn = create_connection()
+    try:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT b.id, b.timestamp, b.title, b.description, b.status, b.admin_notes
+            FROM bug_reports b
+            WHERE b.archived = 0
+            ORDER BY b.timestamp DESC
         """)
         return [dict(row) for row in cursor.fetchall()]
     finally:
@@ -294,6 +315,22 @@ def update_bug_report_status(bug_id, new_status):
         )
         conn.commit()
         return True, "Status aktualisiert."
+    except sqlite3.Error as e:
+        return False, f"Datenbankfehler: {e}"
+    finally:
+        conn.close()
+
+
+def update_bug_report_notes(bug_id, notes):
+    conn = create_connection()
+    try:
+        cursor = conn.cursor()
+        cursor.execute(
+            "UPDATE bug_reports SET admin_notes = ? WHERE id = ?",
+            (notes, bug_id)
+        )
+        conn.commit()
+        return True, "Notizen gespeichert."
     except sqlite3.Error as e:
         return False, f"Datenbankfehler: {e}"
     finally:
@@ -739,7 +776,7 @@ def get_ordered_shift_abbrevs(include_hidden=False):
         cursor = conn.cursor()
         cursor.execute("SELECT * FROM shift_types")
         shift_types_data = {st['abbreviation']: dict(st) for st in cursor.fetchall()}
-        cursor.execute("SELECT abbreviation, sort_order, is_visible FROM shift_order")
+        cursor.execute("SELECT abbreviation, sort_order, is_visible, check_for_understaffing FROM shift_order")
         order_map = {row['abbreviation']: dict(row) for row in cursor.fetchall()}
         ordered_list = []
         all_relevant_abbrevs = set(shift_types_data.keys()) | {'T.', '6', 'N.', '24'}
@@ -750,16 +787,17 @@ def get_ordered_shift_abbrevs(include_hidden=False):
                 item = {'abbreviation': abbrev,
                         'name': f"({abbrev} - Regel)" if abbrev not in ['T.', '6', 'N.', '24'] else abbrev, 'hours': 0,
                         'description': f"Harte Regel für {abbrev}.", 'color': '#FFFFFF'}
-            order_data = order_map.get(abbrev, {'sort_order': 999999, 'is_visible': 1})
+            order_data = order_map.get(abbrev, {'sort_order': 999999, 'is_visible': 1, 'check_for_understaffing': 0})
             item['sort_order'] = order_data['sort_order']
             item['is_visible'] = order_data['is_visible']
+            item['check_for_understaffing'] = order_data['check_for_understaffing']
             if include_hidden or item['is_visible'] == 1:
                 ordered_list.append(item)
         ordered_list.sort(key=lambda x: x['sort_order'])
         return ordered_list
     except sqlite3.Error as e:
         print(f"Fehler beim Abrufen der Schichtreihenfolge: {e}")
-        return [dict(st, sort_order=999999, is_visible=1) for st in get_all_shift_types()]
+        return [dict(st, sort_order=999999, is_visible=1, check_for_understaffing=0) for st in get_all_shift_types()]
 
 
 def save_shift_order(order_data_list):
@@ -768,7 +806,7 @@ def save_shift_order(order_data_list):
         cursor = conn.cursor()
         cursor.execute("BEGIN TRANSACTION")
         cursor.execute("DELETE FROM shift_order")
-        cursor.executemany("INSERT INTO shift_order (abbreviation, sort_order, is_visible) VALUES (?, ?, ?)",
+        cursor.executemany("INSERT INTO shift_order (abbreviation, sort_order, is_visible, check_for_understaffing) VALUES (?, ?, ?, ?)",
                            order_data_list)
         conn.commit()
         return True, "Schichtreihenfolge erfolgreich gespeichert."

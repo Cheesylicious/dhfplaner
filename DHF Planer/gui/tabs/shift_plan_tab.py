@@ -97,6 +97,19 @@ class ShiftPlanTab(ttk.Frame):
         self.plan_grid_frame = ttk.Frame(self.inner_frame)
         self.plan_grid_frame.pack(fill="both", expand=True)
 
+        # Frame für den "Schichtplan Prüfen" Button und Ergebnisse
+        check_frame = ttk.Frame(main_view_container)
+        check_frame.pack(fill="x", pady=10)
+
+        button_subframe = ttk.Frame(check_frame)
+        button_subframe.pack()
+        ttk.Button(button_subframe, text="Schichtplan Prüfen", command=self.check_understaffing).pack(side="left", padx=5)
+        ttk.Button(button_subframe, text="Leeren", command=self.clear_understaffing_results).pack(side="left", padx=5)
+
+        # Ergebnis-Frame wird erstellt, aber noch NICHT gepackt/angezeigt.
+        self.understaffing_result_frame = ttk.Frame(main_view_container, padding="10")
+
+
     def build_shift_plan_grid(self, year, month):
         for widget in self.plan_grid_frame.winfo_children(): widget.destroy()
 
@@ -216,6 +229,7 @@ class ShiftPlanTab(ttk.Frame):
         self.canvas.config(scrollregion=self.canvas.bbox("all"))
 
     def show_previous_month(self):
+        self.clear_understaffing_results()
         current_date = self.app.current_display_date
         first_day_of_current_month = current_date.replace(day=1)
         last_day_of_previous_month = first_day_of_current_month - timedelta(days=1)
@@ -225,6 +239,7 @@ class ShiftPlanTab(ttk.Frame):
         self.build_shift_plan_grid(self.app.current_display_date.year, self.app.current_display_date.month)
 
     def show_next_month(self):
+        self.clear_understaffing_results()
         current_date = self.app.current_display_date
         days_in_month = calendar.monthrange(current_date.year, current_date.month)[1]
         first_day_of_next_month = current_date.replace(day=1) + timedelta(days=days_in_month)
@@ -490,3 +505,43 @@ class ShiftPlanTab(ttk.Frame):
             return max(s1_min, s2_min) < min(e1_min, e2_min)
         except (ValueError, TypeError):
             return False
+
+    def clear_understaffing_results(self):
+        # Blendet den Frame aus und entfernt ihn aus dem Layout
+        self.understaffing_result_frame.pack_forget()
+        # Zerstört die alten Ergebnisse, damit sie sich nicht ansammeln
+        for widget in self.understaffing_result_frame.winfo_children():
+            widget.destroy()
+
+    def check_understaffing(self):
+        # Zuerst alte Ergebnisse und den Frame entfernen
+        self.clear_understaffing_results()
+
+        year, month = self.app.current_display_date.year, self.app.current_display_date.month
+        days_in_month = calendar.monthrange(year, month)[1]
+        daily_counts = get_daily_shift_counts_for_month(year, month)
+        shifts_to_check = [s['abbreviation'] for s in get_ordered_shift_abbrevs(include_hidden=True) if s.get('check_for_understaffing')]
+
+        understaffing_found = False
+        for day in range(1, days_in_month + 1):
+            current_date = date(year, month, day)
+            date_str = current_date.strftime('%Y-%m-%d')
+            min_staffing = self.get_min_staffing_for_date(current_date)
+
+            for shift in shifts_to_check:
+                min_req = min_staffing.get(shift)
+                if min_req is not None:
+                    count = daily_counts.get(date_str, {}).get(shift, 0)
+                    if count < min_req:
+                        understaffing_found = True
+                        shift_name = self.app.shift_types_data.get(shift, {}).get('name', shift)
+                        ttk.Label(self.understaffing_result_frame,
+                                  text=f"Unterbesetzung am {current_date.strftime('%d.%m.%Y')}: Schicht '{shift_name}' ({shift}) - {count} von {min_req} Mitarbeitern anwesend.",
+                                  foreground="red", font=("Segoe UI", 12, "bold")).pack(anchor="w")
+
+        if not understaffing_found:
+            ttk.Label(self.understaffing_result_frame, text="Keine Unterbesetzungen gefunden.",
+                      foreground="green", font=("Segoe UI", 12, "bold")).pack(anchor="w")
+
+        # Den Frame (neu befüllt) wieder anzeigen.
+        self.understaffing_result_frame.pack(fill="x", pady=5)

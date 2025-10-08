@@ -20,6 +20,7 @@ from database.db_manager import (
 from .holiday_manager import HolidayManager
 from .request_config_manager import RequestConfigManager
 from .dialogs.bug_report_dialog import BugReportDialog
+from .tabs.user_bug_report_tab import UserBugReportTab # NEUER IMPORT
 
 STAFFING_RULES_FILE = 'min_staffing_rules.json'
 USER_TAB_ORDER_FILE = 'user_tab_order_config.json'
@@ -33,7 +34,7 @@ DEFAULT_RULES = {
 
 class TabOrderManager:
     """Verwaltet die Reihenfolge der Reiter im Benutzer-Fenster."""
-    DEFAULT_ORDER = ["Schichtplan", "Meine Anfragen", "Mein Urlaub"]
+    DEFAULT_ORDER = ["Schichtplan", "Meine Anfragen", "Mein Urlaub", "Bug-Reports"] # ERWEITERT
 
     @staticmethod
     def load_order():
@@ -228,7 +229,8 @@ class MainUserWindow(tk.Toplevel):
         self.tab_frames = {
             "Mein Urlaub": self.create_vacation_tab(),
             "Meine Anfragen": self.create_wunschfrei_tab(),
-            "Schichtplan": self.create_shift_plan_tab()
+            "Schichtplan": self.create_shift_plan_tab(),
+            "Bug-Reports": self.create_user_bug_report_tab() # NEUER TAB
         }
 
         saved_order = TabOrderManager.load_order()
@@ -354,6 +356,11 @@ class MainUserWindow(tk.Toplevel):
         self.tree.tag_configure("abgelehnt", background="lightcoral")
         self.load_requests()
         return vacation_frame
+
+    def create_user_bug_report_tab(self):
+        """Erstellt den Tab zur Anzeige von Bug-Reports für den Benutzer."""
+        frame = UserBugReportTab(self.notebook, self)
+        return frame
 
     def load_requests(self):
         for item in self.tree.get_children():

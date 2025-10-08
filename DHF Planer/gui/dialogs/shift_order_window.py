@@ -8,7 +8,7 @@ class ShiftOrderWindow(tk.Toplevel):
         super().__init__(master)
         self.callback = callback
         self.title("Schicht-Zählungsreihenfolge und Sichtbarkeit anpassen")
-        self.geometry("450x650")
+        self.geometry("550x650") # Breite angepasst
         self.transient(master)
         self.grab_set()
         main_frame = ttk.Frame(self, padding="15")
@@ -16,17 +16,19 @@ class ShiftOrderWindow(tk.Toplevel):
         main_frame.columnconfigure(0, weight=1)
         ttk.Label(main_frame,
                   text="Sortieren Sie die Schichtkürzel für die Zählungszeilen und blenden Sie nicht benötigte Zeilen aus.",
-                  wraplength=400, font=("Segoe UI", 10, "italic")).pack(pady=(0, 10), anchor="w")
-        columns = ("abbrev", "name", "is_visible")
+                  wraplength=500, font=("Segoe UI", 10, "italic")).pack(pady=(0, 10), anchor="w")
+        columns = ("abbrev", "name", "is_visible", "check_understaffing") # Neue Spalte
         self.shift_tree = ttk.Treeview(main_frame, columns=columns, show="headings", height=20)
         self.shift_tree.heading("abbrev", text="Kürzel")
         self.shift_tree.heading("name", text="Schichtname")
         self.shift_tree.heading("is_visible", text="Sichtbar")
+        self.shift_tree.heading("check_understaffing", text="Prüfen?") # Neuer Header
         self.shift_tree.column("abbrev", width=80, anchor="center")
         self.shift_tree.column("name", width=180, anchor="w")
         self.shift_tree.column("is_visible", width=80, anchor="center")
+        self.shift_tree.column("check_understaffing", width=80, anchor="center") # Neue Spaltenkonfiguration
         self.shift_tree.pack(fill="both", expand=True)
-        self.shift_tree.bind('<Button-1>', self.toggle_visibility_on_click)
+        self.shift_tree.bind('<Button-1>', self.toggle_on_click)
         self.populate_tree()
         button_frame = ttk.Frame(main_frame)
         button_frame.pack(fill="x", pady=10)
@@ -44,25 +46,38 @@ class ShiftOrderWindow(tk.Toplevel):
         for item in all_abbrevs_in_order:
             abbrev = item['abbreviation']
             is_visible = item.get('is_visible', 1) == 1
+            check_understaffing = item.get('check_for_understaffing', 0) == 1
             name = item.get('name', 'N/A')
-            checkbox_text = "Ja" if is_visible else "Nein (Ausgeblendet)"
+            visible_text = "Ja" if is_visible else "Nein (Ausgeblendet)"
+            check_text = "Ja" if check_understaffing else "Nein"
             tag = "visible" if is_visible else "hidden"
-            self.shift_tree.insert("", tk.END, iid=abbrev, values=(abbrev, name, checkbox_text), tags=(tag,))
+            self.shift_tree.insert("", tk.END, iid=abbrev, values=(abbrev, name, visible_text, check_text), tags=(tag,))
             self.shift_tree.tag_configure("hidden", foreground="grey", font=("Segoe UI", 10, "italic"))
 
-    def toggle_visibility_on_click(self, event):
+    def toggle_on_click(self, event):
         region = self.shift_tree.identify('region', event.x, event.y)
         if region != 'cell': return
-        column = self.shift_tree.identify_column(event.x)
+        column_name = self.shift_tree.heading(self.shift_tree.identify_column(event.x))['text']
         item_id = self.shift_tree.identify_row(event.y)
-        if self.shift_tree.heading(column)['text'] == 'Sichtbar':
-            current_values = self.shift_tree.item(item_id, 'values')
-            current_tag = self.shift_tree.item(item_id, 'tags')[0]
-            is_currently_visible = current_tag == 'visible'
-            new_visible = not is_currently_visible
-            new_text = "Ja" if new_visible else "Nein (Ausgeblendet)"
-            new_tag = "visible" if new_visible else "hidden"
-            self.shift_tree.item(item_id, values=(current_values[0], current_values[1], new_text), tags=(new_tag,))
+
+        if column_name in ['Sichtbar', 'Prüfen?']:
+            current_values = list(self.shift_tree.item(item_id, 'values'))
+            current_tags = list(self.shift_tree.item(item_id, 'tags'))
+
+            if column_name == 'Sichtbar':
+                is_currently_visible = current_tags[0] == 'visible'
+                new_visible = not is_currently_visible
+                new_text = "Ja" if new_visible else "Nein (Ausgeblendet)"
+                new_tag = "visible" if new_visible else "hidden"
+                current_values[2] = new_text
+                current_tags[0] = new_tag
+            elif column_name == 'Prüfen?':
+                is_currently_checked = current_values[3] == "Ja"
+                new_checked = not is_currently_checked
+                new_text = "Ja" if new_checked else "Nein"
+                current_values[3] = new_text
+
+            self.shift_tree.item(item_id, values=tuple(current_values), tags=tuple(current_tags))
 
     def move_item(self, direction):
         selection = self.shift_tree.selection()
@@ -80,14 +95,18 @@ class ShiftOrderWindow(tk.Toplevel):
             self.shift_tree.focus(item_id)
 
     def save_order(self):
-        ordered_abbrevs_and_visibility = []
+        ordered_data = []
         all_item_ids = self.shift_tree.get_children()
         for index, item_id in enumerate(all_item_ids):
-            is_visible = 1 if self.shift_tree.item(item_id, 'tags')[0] == 'visible' else 0
+            values = self.shift_tree.item(item_id, 'values')
+            tags = self.shift_tree.item(item_id, 'tags')
+            is_visible = 1 if tags[0] == 'visible' else 0
+            check_for_understaffing = 1 if values[3] == "Ja" else 0
             abbrev = item_id
             sort_order = index + 1
-            ordered_abbrevs_and_visibility.append((abbrev, sort_order, is_visible))
-        success, message = save_shift_order(ordered_abbrevs_and_visibility)
+            ordered_data.append((abbrev, sort_order, is_visible, check_for_understaffing))
+
+        success, message = save_shift_order(ordered_data)
         if success:
             messagebox.showinfo("Erfolg", "Schichtreihenfolge gespeichert.", parent=self)
             self.callback()
