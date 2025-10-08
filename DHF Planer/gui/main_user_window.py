@@ -11,19 +11,113 @@ from database.db_manager import (
     add_vacation_request, get_requests_by_user,
     get_shifts_for_month, get_ordered_users_for_schedule,
     get_daily_shift_counts_for_month, get_ordered_shift_abbrevs,
-    get_all_shift_types, add_wunschfrei_request,
+    get_all_shift_types, submit_user_request,
     get_wunschfrei_requests_by_user_for_month,
     get_wunschfrei_requests_for_month, get_unnotified_requests,
     mark_requests_as_notified, get_all_requests_by_user, withdraw_wunschfrei_request
 )
 from .holiday_manager import HolidayManager
+from .request_config_manager import RequestConfigManager
 
 STAFFING_RULES_FILE = 'min_staffing_rules.json'
+USER_TAB_ORDER_FILE = 'user_tab_order_config.json'
+
 DEFAULT_RULES = {
     "Colors": {"alert_bg": "#FF5555", "success_bg": "#90EE90", "overstaffed_bg": "#FFFF99"},
     "Mo-Do": {"T.": 1}, "Fr": {"T.": 1, "6": 1}, "Sa-So": {"T.": 2},
     "Holiday": {"T.": 2}, "Daily": {"N.": 2, "24": 2}
 }
+
+
+class TabOrderManager:
+    """Verwaltet die Reihenfolge der Reiter im Benutzer-Fenster."""
+    DEFAULT_ORDER = ["Schichtplan", "Meine Anfragen", "Mein Urlaub"]
+
+    @staticmethod
+    def load_order():
+        if not os.path.exists(USER_TAB_ORDER_FILE):
+            TabOrderManager.save_order(TabOrderManager.DEFAULT_ORDER)
+            return TabOrderManager.DEFAULT_ORDER
+        try:
+            with open(USER_TAB_ORDER_FILE, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except (json.JSONDecodeError, IOError):
+            return TabOrderManager.DEFAULT_ORDER
+
+    @staticmethod
+    def save_order(order_list):
+        try:
+            with open(USER_TAB_ORDER_FILE, 'w', encoding='utf-8') as f:
+                json.dump(order_list, f, indent=4)
+            return True
+        except IOError:
+            return False
+
+
+class TabOrderWindow(tk.Toplevel):
+    """Fenster zum Anpassen der Reiter-Reihenfolge."""
+
+    def __init__(self, master, callback):
+        super().__init__(master)
+        self.callback = callback
+        self.title("Reiter-Reihenfolge anpassen")
+        self.geometry("400x500")
+        self.transient(master)
+        self.grab_set()
+
+        main_frame = ttk.Frame(self, padding="15")
+        main_frame.pack(fill="both", expand=True)
+
+        ttk.Label(main_frame, text="Ändern Sie die Reihenfolge der Reiter im Hauptfenster.").pack(anchor="w",
+                                                                                                  pady=(0, 10))
+
+        list_frame = ttk.Frame(main_frame)
+        list_frame.pack(fill="both", expand=True)
+        list_frame.columnconfigure(0, weight=1)
+        list_frame.rowconfigure(0, weight=1)
+
+        self.tab_listbox = tk.Listbox(list_frame, selectmode="single")
+        self.tab_listbox.grid(row=0, column=0, sticky="nsew")
+
+        button_subframe = ttk.Frame(list_frame)
+        button_subframe.grid(row=0, column=1, sticky="ns", padx=(10, 0))
+
+        ttk.Button(button_subframe, text="↑ Hoch", command=lambda: self.move_item(-1)).pack(pady=2, fill="x")
+        ttk.Button(button_subframe, text="↓ Runter", command=lambda: self.move_item(1)).pack(pady=2, fill="x")
+
+        current_order = TabOrderManager.load_order()
+        for tab_name in current_order:
+            self.tab_listbox.insert(tk.END, tab_name)
+
+        button_bar = ttk.Frame(main_frame)
+        button_bar.pack(fill="x", pady=(15, 0))
+        button_bar.columnconfigure((0, 1), weight=1)
+
+        ttk.Button(button_bar, text="Speichern & Schließen", command=self.save_and_close).grid(row=0, column=0,
+                                                                                               sticky="ew", padx=(0, 5))
+        ttk.Button(button_bar, text="Abbrechen", command=self.destroy).grid(row=0, column=1, sticky="ew", padx=(5, 0))
+
+    def move_item(self, direction):
+        selection = self.tab_listbox.curselection()
+        if not selection: return
+        idx = selection[0]
+        new_idx = idx + direction
+        if not (0 <= new_idx < self.tab_listbox.size()): return
+
+        item_text = self.tab_listbox.get(idx)
+        self.tab_listbox.delete(idx)
+        self.tab_listbox.insert(new_idx, item_text)
+        self.tab_listbox.selection_set(new_idx)
+        self.tab_listbox.activate(new_idx)
+
+    def save_and_close(self):
+        new_order = list(self.tab_listbox.get(0, tk.END))
+        if TabOrderManager.save_order(new_order):
+            messagebox.showinfo("Gespeichert", "Die Reiter-Reihenfolge wurde aktualisiert.", parent=self)
+            self.callback(new_order)
+            self.destroy()
+        else:
+            messagebox.showerror("Fehler", "Die Reihenfolge konnte nicht gespeichert werden.", parent=self)
 
 
 def load_staffing_rules():
@@ -59,18 +153,66 @@ class MainUserWindow(tk.Toplevel):
         self._load_holidays_for_year(self.current_display_date.year)
         self.load_shift_types()
 
-        self.show_archived_var = tk.BooleanVar(value=False)
+        header_frame = ttk.Frame(self)
+        header_frame.pack(fill="x", padx=10, pady=(5, 0))
+        ttk.Button(header_frame, text="Reiter anpassen", command=self.open_tab_order_window).pack(side="right")
 
         self.notebook = ttk.Notebook(self)
         self.notebook.pack(fill="both", expand=True, padx=10, pady=10)
 
-        self.create_vacation_tab()
-        self.create_wunschfrei_tab()
-        self.create_shift_plan_tab()
+        self.setup_tabs()
 
         self.protocol("WM_DELETE_WINDOW", self.master.on_app_close)
 
         self.after(100, self.check_for_notifications)
+
+    def open_tab_order_window(self):
+        TabOrderWindow(self, self.reorder_tabs)
+
+    def reorder_tabs(self, new_order):
+        try:
+            selected_tab_name = self.notebook.tab(self.notebook.select(), "text")
+        except tk.TclError:
+            selected_tab_name = None
+
+        all_tabs = {}
+        for tab_id in self.notebook.tabs():
+            tab_name = self.notebook.tab(tab_id, "text")
+            all_tabs[tab_name] = self.notebook.nametowidget(tab_id)
+
+        for tab_id in list(self.notebook.tabs()):
+            self.notebook.forget(tab_id)
+
+        for tab_name in new_order:
+            if tab_name in all_tabs:
+                self.notebook.add(all_tabs[tab_name], text=tab_name)
+
+        if selected_tab_name:
+            for i, tab_name in enumerate(new_order):
+                if tab_name == selected_tab_name:
+                    self.notebook.select(i)
+                    break
+
+    def setup_tabs(self):
+        self.tab_frames = {
+            "Mein Urlaub": self.create_vacation_tab(),
+            "Meine Anfragen": self.create_wunschfrei_tab(),
+            "Schichtplan": self.create_shift_plan_tab()
+        }
+
+        saved_order = TabOrderManager.load_order()
+        final_order = []
+        existing_tabs = list(self.tab_frames.keys())
+        for tab_name in saved_order:
+            if tab_name in existing_tabs:
+                final_order.append(tab_name)
+                existing_tabs.remove(tab_name)
+        final_order.extend(existing_tabs)
+
+        for tab_name in final_order:
+            frame = self.tab_frames.get(tab_name)
+            if frame:
+                self.notebook.add(frame, text=tab_name)
 
     def check_for_notifications(self):
         unnotified = get_unnotified_requests(self.user_data['id'])
@@ -132,7 +274,6 @@ class MainUserWindow(tk.Toplevel):
 
     def create_vacation_tab(self):
         vacation_frame = ttk.Frame(self.notebook, padding="10")
-        self.notebook.add(vacation_frame, text="Mein Urlaub")
         self.remaining_vacation_days = self.user_data.get('urlaub_rest', 0)
         info_frame = ttk.LabelFrame(vacation_frame, text="Meine Übersicht", padding="10")
         info_frame.pack(fill="x", pady=(0, 10))
@@ -162,6 +303,7 @@ class MainUserWindow(tk.Toplevel):
         self.tree.tag_configure("ausstehend", background="khaki")
         self.tree.tag_configure("abgelehnt", background="lightcoral")
         self.load_requests()
+        return vacation_frame
 
     def load_requests(self):
         for item in self.tree.get_children():
@@ -189,50 +331,84 @@ class MainUserWindow(tk.Toplevel):
 
     def create_wunschfrei_tab(self):
         frame = ttk.Frame(self.notebook, padding="10")
-        self.notebook.add(frame, text="Meine Wunschfrei-Anträge")
+        columns = ("date", "request_type", "status")
 
-        main_pane = ttk.PanedWindow(frame, orient=tk.VERTICAL)
-        main_pane.pack(fill="both", expand=True)
+        # --- Top Section: Pending Requests ---
+        pending_frame = ttk.LabelFrame(frame, text="Offene Anträge", padding=10)
+        pending_frame.pack(fill="x", expand=False)
 
-        status_frame = ttk.LabelFrame(main_pane, text="Übersicht", padding="10")
-        main_pane.add(status_frame, weight=3)
+        pending_tree_frame = ttk.Frame(pending_frame)
+        pending_tree_frame.pack(fill="x", expand=True)
 
-        tree_frame = ttk.Frame(status_frame)
-        tree_frame.pack(fill="both", expand=True)
+        self.pending_requests_tree = ttk.Treeview(pending_tree_frame, columns=columns, show="headings", height=5)
+        self.pending_requests_tree.heading("date", text="Datum")
+        self.pending_requests_tree.heading("request_type", text="Anfrage")
+        self.pending_requests_tree.heading("status", text="Status")
+        self.pending_requests_tree.column("request_type", width=100, anchor="center")
+        self.pending_requests_tree.pack(fill="x", expand=True, side="left")
+        self.pending_requests_tree.tag_configure("Ausstehend", background="orange")
 
-        columns = ("date", "status")
-        self.wunschfrei_tree = ttk.Treeview(tree_frame, columns=columns, show="headings")
-        self.wunschfrei_tree.heading("date", text="Datum")
-        self.wunschfrei_tree.heading("status", text="Status")
-        self.wunschfrei_tree.pack(fill="both", expand=True, side="left")
+        pending_button_frame = ttk.Frame(pending_tree_frame)
+        pending_button_frame.pack(side="left", fill="y", padx=10)
+        self.withdraw_button = ttk.Button(pending_button_frame, text="Zurückziehen",
+                                          command=self.withdraw_selected_request)
+        self.withdraw_button.pack(pady=5)
 
-        self.wunschfrei_tree.tag_configure("Genehmigt", background="lightgreen")
-        self.wunschfrei_tree.tag_configure("Ausstehend", background="orange")
-        self.wunschfrei_tree.tag_configure("Abgelehnt", background="lightcoral")
+        # --- Toggle Button for Archive ---
+        self.archive_visible = tk.BooleanVar(value=True)
+        self.toggle_archive_button = ttk.Button(frame, text="Archiv ausblenden", command=self.toggle_archive_visibility)
+        self.toggle_archive_button.pack(fill="x", pady=10)
 
-        button_frame = ttk.Frame(tree_frame)
-        button_frame.pack(side="left", fill="y", padx=10)
-        ttk.Button(button_frame, text="Antrag zurückziehen", command=self.withdraw_selected_request).pack(pady=5)
+        # --- Bottom Section: Processed Requests (Archive) ---
+        self.archive_frame = ttk.Frame(frame)
+        self.archive_frame.pack(fill="both", expand=True)
 
-        archive_check = ttk.Checkbutton(status_frame, text="Archivierte Anträge anzeigen",
-                                        variable=self.show_archived_var, command=self.refresh_wunschfrei_tab)
-        archive_check.pack(anchor="w", pady=(10, 0))
+        processed_frame = ttk.LabelFrame(self.archive_frame, text="Bearbeitete Anträge (Archiv)", padding=10)
+        processed_frame.pack(fill="both", expand=True)
 
-        detail_frame = ttk.LabelFrame(main_pane, text="Details", padding="10")
-        main_pane.add(detail_frame, weight=1)
+        self.processed_requests_tree = ttk.Treeview(processed_frame, columns=columns, show="headings")
+        self.processed_requests_tree.heading("date", text="Datum")
+        self.processed_requests_tree.heading("request_type", text="Anfrage")
+        self.processed_requests_tree.heading("status", text="Status")
+        self.processed_requests_tree.column("request_type", width=100, anchor="center")
+        self.processed_requests_tree.pack(fill="both", expand=True)
 
+        self.processed_requests_tree.tag_configure("Genehmigt", background="lightgreen")
+        self.processed_requests_tree.tag_configure("Abgelehnt", background="lightcoral")
+
+        # --- Detail View for Rejection Reason ---
+        detail_frame = ttk.LabelFrame(frame, text="Details zum abgelehnten Antrag", padding=10)
+        detail_frame.pack(fill="x", pady=(10, 0))
         self.rejection_reason_var = tk.StringVar()
-        ttk.Label(detail_frame, text="Ablehnungsgrund:", font=("Segoe UI", 10, "bold")).pack(anchor="w")
         reason_label = ttk.Label(detail_frame, textvariable=self.rejection_reason_var, wraplength=400,
                                  font=("Segoe UI", 10, "italic"))
         reason_label.pack(anchor="w", pady=5, padx=5)
 
-        self.wunschfrei_tree.bind("<<TreeviewSelect>>", self.on_wunschfrei_selected)
-        self.refresh_wunschfrei_tab()
+        self.pending_requests_tree.bind("<<TreeviewSelect>>", self.on_wunschfrei_selected)
+        self.processed_requests_tree.bind("<<TreeviewSelect>>", self.on_wunschfrei_selected)
 
-    def on_wunschfrei_selected(self, event=None):
+        self.refresh_wunschfrei_tab()
+        return frame
+
+    def toggle_archive_visibility(self):
+        if self.archive_visible.get():
+            self.archive_frame.pack_forget()
+            self.toggle_archive_button.config(text="Archiv einblenden")
+            self.archive_visible.set(False)
+        else:
+            self.archive_frame.pack(fill="both", expand=True)
+            self.toggle_archive_button.config(text="Archiv ausblenden")
+            self.archive_visible.set(True)
+
+    def on_wunschfrei_selected(self, event):
         self.rejection_reason_var.set("")
-        selection = self.wunschfrei_tree.selection()
+
+        tree = event.widget
+        other_tree = self.processed_requests_tree if tree is self.pending_requests_tree else self.pending_requests_tree
+        if other_tree.selection():
+            other_tree.selection_remove(other_tree.selection())
+
+        selection = tree.selection()
         if not selection:
             return
 
@@ -244,56 +420,63 @@ class MainUserWindow(tk.Toplevel):
             self.rejection_reason_var.set(reason)
 
     def refresh_wunschfrei_tab(self):
-        for item in self.wunschfrei_tree.get_children():
-            self.wunschfrei_tree.delete(item)
+        for item in self.pending_requests_tree.get_children():
+            self.pending_requests_tree.delete(item)
+        for item in self.processed_requests_tree.get_children():
+            self.processed_requests_tree.delete(item)
 
         self.rejection_reason_var.set("")
         self.wunschfrei_data_store.clear()
 
-        show_all = self.show_archived_var.get()
         requests = get_all_requests_by_user(self.user_data['id'])
 
         for req in requests:
             self.wunschfrei_data_store[req['id']] = req
-            if not show_all and req['status'] != 'Ausstehend':
-                continue
 
             date_obj = datetime.strptime(req['request_date'], '%Y-%m-%d')
-            display_values = (date_obj.strftime('%d.%m.%Y'), req['status'])
-            self.wunschfrei_tree.insert("", tk.END, iid=req['id'], values=display_values, tags=(req['status'],))
+            request_type_text = req.get('requested_shift', 'Unbekannt')
+            if request_type_text == 'WF':
+                request_type_text = "Frei"
+            display_values = (date_obj.strftime('%d.%m.%Y'), request_type_text, req['status'])
 
-    def withdraw_selected_request(self):
-        selection = self.wunschfrei_tree.selection()
-        if not selection:
-            messagebox.showwarning("Keine Auswahl", "Bitte wählen Sie einen Antrag zum Zurückziehen aus.", parent=self)
+            if req['status'] == 'Ausstehend':
+                self.pending_requests_tree.insert("", tk.END, iid=req['id'], values=display_values,
+                                                  tags=(req['status'],))
+            else:  # Genehmigt oder Abgelehnt
+                self.processed_requests_tree.insert("", tk.END, iid=req['id'], values=display_values,
+                                                    tags=(req['status'],))
+
+    def _withdraw_request_by_id(self, request_id):
+        request_data = self.wunschfrei_data_store.get(request_id)
+        if not request_data:
+            messagebox.showerror("Fehler", "Antrag nicht gefunden.", parent=self)
             return
 
-        request_id = int(selection[0])
-        item = self.wunschfrei_tree.item(request_id)
-        status = item['values'][1]
-
-        if status not in ['Ausstehend', 'Genehmigt']:
-            messagebox.showwarning("Aktion nicht möglich",
-                                   "Nur ausstehende oder bereits genehmigte Anträge können zurückgezogen werden.",
+        status = request_data['status']
+        if status not in ['Ausstehend', 'Genehmigt', 'Abgelehnt']:
+            messagebox.showwarning("Aktion nicht möglich", "Dieser Antrag kann nicht zurückgezogen werden.",
                                    parent=self)
             return
 
-        msg = "Möchten Sie diesen Antrag wirklich zurückziehen?"
-        if status == 'Genehmigt':
-            msg += "\n\nIhr Dienstplan wird für diesen Tag geleert und der Admin informiert."
+        success, message = withdraw_wunschfrei_request(request_id, self.user_data['id'])
+        if success:
+            messagebox.showinfo("Erfolg", message, parent=self)
+            self.refresh_wunschfrei_tab()
+            self.build_shift_plan_grid(self.current_display_date.year, self.current_display_date.month)
+        else:
+            messagebox.showerror("Fehler", message, parent=self)
 
-        if messagebox.askyesno("Bestätigen", msg, parent=self):
-            success, message = withdraw_wunschfrei_request(request_id, self.user_data['id'])
-            if success:
-                messagebox.showinfo("Erfolg", message, parent=self)
-                self.refresh_wunschfrei_tab()
-                self.build_shift_plan_grid(self.current_display_date.year, self.current_display_date.month)
-            else:
-                messagebox.showerror("Fehler", message, parent=self)
+    def withdraw_selected_request(self):
+        selection = self.pending_requests_tree.selection()
+        if not selection:
+            messagebox.showwarning("Keine Auswahl", "Bitte wählen Sie einen offenen Antrag zum Zurückziehen aus.",
+                                   parent=self)
+            return
+        request_id = int(selection[0])
+        self._withdraw_request_by_id(request_id)
 
     def create_shift_plan_tab(self):
         self.plan_tab_frame = ttk.Frame(self.notebook, padding="10")
-        self.notebook.add(self.plan_tab_frame, text="Schichtplan")
         main_view_container = ttk.Frame(self.plan_tab_frame)
         main_view_container.pack(fill="both", expand=True)
         nav_frame = ttk.Frame(main_view_container)
@@ -323,35 +506,112 @@ class MainUserWindow(tk.Toplevel):
         self.plan_grid_frame = ttk.Frame(self.inner_frame)
         self.plan_grid_frame.pack(fill="both", expand=True)
         self.build_shift_plan_grid(self.current_display_date.year, self.current_display_date.month)
+        return self.plan_tab_frame
 
-    def on_wunschfrei_cell_click(self, event, user_id_in_row, day, year, month):
+    def _handle_user_request(self, year, month, day, request_type=None):
+        request_date = date(year, month, day)
+        date_str = request_date.strftime('%Y-%m-%d')
+        new_requested_shift = "WF" if request_type is None else request_type
+
+        existing_request = None
+        for req in self.wunschfrei_data_store.values():
+            if req['request_date'] == date_str:
+                existing_request = req
+                break
+
+        if existing_request:
+            if existing_request['status'] == 'Abgelehnt':
+                if new_requested_shift == 'WF' and existing_request.get('requested_shift') == 'WF':
+                    messagebox.showinfo("Aktion nicht möglich",
+                                        "Ein Wunschfrei-Antrag für diesen Tag wurde bereits abgelehnt. Bitte wählen Sie eine andere Art von Wunsch (z.B. Schichtwunsch) oder kontaktieren Sie einen Admin.",
+                                        parent=self)
+                    return
+
+                success_withdraw, msg_withdraw = withdraw_wunschfrei_request(existing_request['id'],
+                                                                             self.user_data['id'])
+                if not success_withdraw:
+                    messagebox.showerror("Fehler",
+                                         f"Der alte, abgelehnte Antrag konnte nicht überschrieben werden: {msg_withdraw}",
+                                         parent=self)
+                    return
+            else:
+                messagebox.showerror("Fehler",
+                                     "Für diesen Tag existiert bereits ein ausstehender oder genehmigter Antrag.",
+                                     parent=self)
+                return
+
+        if request_type is None:
+            month_name = date(year, month, 1).strftime('%B')
+            request_count = get_wunschfrei_requests_by_user_for_month(self.user_data['id'], year, month)
+            if request_count >= 3:
+                messagebox.showwarning("Limit erreicht",
+                                       f"Sie haben bereits das Maximum von 3 'Wunschfrei'-Anfragen für {month_name} {year} erreicht.",
+                                       parent=self)
+                return
+
+            msg = f"Möchten Sie für den {request_date.strftime('%d.%m.%Y')} 'Wunschfrei' beantragen?\n\nSie haben noch {3 - request_count} Anfrage(n) für diesen Monat frei."
+            if not messagebox.askyesno("Bestätigen", msg, parent=self):
+                return
+
+        success, message = submit_user_request(self.user_data['id'], date_str, requested_shift=new_requested_shift)
+        if success:
+            messagebox.showinfo("Erfolg", message, parent=self)
+            self.refresh_wunschfrei_tab()
+            self.build_shift_plan_grid(year, month)
+        else:
+            messagebox.showerror("Fehler", message, parent=self)
+
+    def on_user_cell_click(self, event, user_id_in_row, day, year, month):
         if user_id_in_row != self.user_data['id']:
             return
 
         request_date = date(year, month, day)
         if request_date < date.today():
             messagebox.showwarning("Aktion nicht erlaubt",
-                                   "Sie können nur für zukünftige Tage 'Wunschfrei' beantragen.", parent=self)
-            return
-
-        month_name = date(year, month, 1).strftime('%B')
-        request_count = get_wunschfrei_requests_by_user_for_month(self.user_data['id'], year, month)
-        if request_count >= 3:
-            messagebox.showwarning("Limit erreicht",
-                                   f"Sie haben bereits das Maximum von 3 'Wunschfrei'-Anfragen für {month_name} {year} erreicht.",
+                                   "Anfragen für vergangene Tage können nicht gestellt oder geändert werden.",
                                    parent=self)
             return
 
-        if messagebox.askyesno("Bestätigen",
-                               f"Möchten Sie für den {request_date.strftime('%d.%m.%Y')} 'Wunschfrei' beantragen?\n\nSie haben noch {3 - request_count} Anfrage(n) für diesen Monat frei.",
-                               parent=self):
-            success, message = add_wunschfrei_request(self.user_data['id'], request_date.strftime('%Y-%m-%d'))
-            if success:
-                messagebox.showinfo("Erfolg", message, parent=self)
-                self.build_shift_plan_grid(year, month)
-                self.refresh_wunschfrei_tab()
-            else:
-                messagebox.showerror("Fehler", message, parent=self)
+        date_str = request_date.strftime('%Y-%m-%d')
+        existing_request = None
+        for req in self.wunschfrei_data_store.values():
+            if req['request_date'] == date_str:
+                existing_request = req
+                break
+
+        if existing_request and existing_request['status'] in ['Ausstehend', 'Genehmigt']:
+            context_menu = tk.Menu(self, tearoff=0)
+            context_menu.add_command(label="Wunsch entfernen",
+                                     command=lambda: self._withdraw_request_by_id(existing_request['id']))
+            context_menu.post(event.x_root, event.y_root)
+            return
+
+        request_config = RequestConfigManager.load_config()
+        context_menu = tk.Menu(self, tearoff=0)
+
+        if request_config.get("WF", False):
+            context_menu.add_command(label="Wunschfrei beantragen",
+                                     command=lambda: self._handle_user_request(year, month, day, request_type=None))
+            context_menu.add_separator()
+
+        preferred_shifts = ["T.", "N.", "6", "24"]
+        for shift in preferred_shifts:
+            if request_config.get(shift, False):
+                if shift == "6":
+                    is_friday = request_date.weekday() == 4
+                    is_a_holiday = self.is_holiday(request_date)
+                    if not is_friday or is_a_holiday:
+                        continue
+
+                context_menu.add_command(label=f"Wunsch: '{shift}' eintragen",
+                                         command=lambda s=shift: self._handle_user_request(year, month, day,
+                                                                                           request_type=s))
+
+        if context_menu.index("end") is not None:
+            context_menu.post(event.x_root, event.y_root)
+        else:
+            messagebox.showinfo("Keine Aktionen", "Aktuell sind keine Anfragetypen für diesen Tag verfügbar.",
+                                parent=self)
 
     def build_shift_plan_grid(self, year, month):
         for widget in self.plan_grid_frame.winfo_children(): widget.destroy()
@@ -368,12 +628,14 @@ class MainUserWindow(tk.Toplevel):
         self.month_label_var.set(f"{month_name.capitalize()} {year}")
         day_map = {0: "Mo", 1: "Di", 2: "Mi", 3: "Do", 4: "Fr", 5: "Sa", 6: "So"}
         days_in_month = calendar.monthrange(year, month)[1]
-        header_bg, weekend_bg = "#E0E0E0", "#F0F0F0"
+
+        header_bg, weekend_bg_color = "#E0E0E0", "#EAF4FF"
         summary_bg = "#D0D0FF"
         color_rules = self.staffing_rules.get('Colors', DEFAULT_RULES['Colors'])
         alert_bg, success_bg, overstaffed_bg = color_rules.get('alert_bg'), color_rules.get(
             'success_bg'), color_rules.get('overstaffed_bg')
         MIN_NAME_WIDTH, MIN_DOG_WIDTH = 150, 100
+
         ttk.Label(self.plan_grid_frame, text="Mitarbeiter", font=("Segoe UI", 10, "bold"), background=header_bg,
                   padding=5, borderwidth=1, relief="solid", foreground="black").grid(row=0, column=0, columnspan=2,
                                                                                      sticky="nsew")
@@ -381,13 +643,19 @@ class MainUserWindow(tk.Toplevel):
                   borderwidth=1, relief="solid", foreground="black").grid(row=1, column=0, sticky="nsew")
         ttk.Label(self.plan_grid_frame, text="Diensthund", font=("Segoe UI", 9, "bold"), background=header_bg,
                   padding=5, borderwidth=1, relief="solid", foreground="black").grid(row=1, column=1, sticky="nsew")
+
         for day in range(1, days_in_month + 1):
             current_date = date(year, month, day)
             day_abbr = day_map[current_date.weekday()]
             is_weekend = current_date.weekday() >= 5
             is_holiday_check = self.is_holiday(current_date)
-            bg = weekend_bg if is_weekend else header_bg
-            if is_holiday_check: bg = "#FFD700"
+
+            bg = header_bg
+            if is_weekend and not is_holiday_check:
+                bg = weekend_bg_color
+            if is_holiday_check:
+                bg = "#FFD700"
+
             if is_weekend or is_holiday_check:
                 frame_h1 = tk.Frame(self.plan_grid_frame, bg="blue")
                 frame_h1.grid(row=0, column=day + 1, sticky="nsew")
@@ -408,52 +676,79 @@ class MainUserWindow(tk.Toplevel):
                                                                                                    sticky="nsew")
         current_row = 2
         for row_idx, user_data_row in enumerate(users):
+            user_id = user_data_row['id']
             user_name = f"{user_data_row['vorname']} {user_data_row['name']}"
             user_dog = user_data_row.get('diensthund', '---')
-            user_id_str = str(user_data_row['id'])
-            # KORRIGIERTE ZEILE
+            user_id_str = str(user_id)
+
+            row_bg_color = "#D4EDDA" if user_id == self.user_data['id'] else "white"
+
             ttk.Label(self.plan_grid_frame, text=user_name, font=("Segoe UI", 10, "bold"), padding=5, borderwidth=1,
-                      relief="solid", foreground="black", background="white").grid(row=current_row, column=0,
-                                                                                   sticky="nsew")
+                      relief="solid", foreground="black", background=row_bg_color).grid(row=current_row, column=0,
+                                                                                        sticky="nsew")
             ttk.Label(self.plan_grid_frame, text=user_dog, font=("Segoe UI", 10), padding=5, borderwidth=1,
-                      relief="solid", foreground="black", anchor="center", background="white").grid(row=current_row,
-                                                                                                    column=1,
-                                                                                                    sticky="nsew")
+                      relief="solid", foreground="black", anchor="center", background=row_bg_color).grid(
+                row=current_row,
+                column=1,
+                sticky="nsew")
             for day in range(1, days_in_month + 1):
                 col_idx = day + 1
                 current_date = date(year, month, day)
                 date_str = current_date.strftime('%Y-%m-%d')
-                shift = self.shift_schedule_data.get(user_id_str, {}).get(date_str, "")
 
-                wunschfrei_status = wunschfrei_data.get(user_id_str, {}).get(date_str)
-                if wunschfrei_status == 'Ausstehend':
-                    shift = 'WF'
-                elif wunschfrei_status == 'Genehmigt':
-                    shift = 'X'
+                base_shift = self.shift_schedule_data.get(user_id_str, {}).get(date_str, "")
+                display_shift = base_shift
+                request_info = wunschfrei_data.get(user_id_str, {}).get(date_str)
 
-                bg_color, text_color = color_map.get(shift, "white"), self.get_contrast_color(
-                    color_map.get(shift, "white"))
+                is_clickable = False
+                if user_id == self.user_data['id']:
+                    if request_info or not base_shift:
+                        is_clickable = True
+
+                if request_info:
+                    status, requested_shift = request_info
+                    if status == 'Ausstehend':
+                        display_shift = 'WF' if requested_shift == 'WF' else f"{requested_shift}?"
+                    elif status == 'Genehmigt' and requested_shift == 'WF':
+                        display_shift = 'X'
+
                 is_weekend, is_holiday_check = current_date.weekday() >= 5, self.is_holiday(current_date)
-                cursor_type = "hand2" if user_data_row['id'] == self.user_data['id'] else ""
+                bg_color = color_map.get(display_shift, "white")
+                if display_shift.endswith("?"):
+                    bg_color = color_map.get("WF", "orange")
+
+                if is_weekend and not is_holiday_check:
+                    bg_color = weekend_bg_color
+                if is_holiday_check:
+                    bg_color = "#FFD700"
+
+                if user_id == self.user_data['id'] and bg_color == "white":
+                    bg_color = "#E8F5E9"
+
+                text_color = self.get_contrast_color(bg_color)
+                cursor_type = "hand2" if is_clickable else ""
 
                 if is_weekend or is_holiday_check:
                     cell_frame = tk.Frame(self.plan_grid_frame, bg="blue")
                     cell_frame.grid(row=current_row, column=col_idx, sticky="nsew")
-                    label = ttk.Label(cell_frame, text=shift, background=bg_color, padding=5, anchor="center",
+                    label = ttk.Label(cell_frame, text=display_shift, background=bg_color, padding=5, anchor="center",
                                       foreground=text_color, cursor=cursor_type)
                     label.pack(fill="both", expand=True, padx=1, pady=1)
-                    label.bind("<Button-1>",
-                               lambda e, uid=user_data_row['id'], d=day, y=year, m=month: self.on_wunschfrei_cell_click(
-                                   e, uid, d, y, m))
-                    cell_frame.bind("<Button-1>", lambda e, uid=user_data_row['id'], d=day, y=year,
-                                                         m=month: self.on_wunschfrei_cell_click(e, uid, d, y, m))
+                    if is_clickable:
+                        label.bind("<Button-1>",
+                                   lambda e, uid=user_id, d=day, y=year, m=month: self.on_user_cell_click(
+                                       e, uid, d, y, m))
+                        cell_frame.bind("<Button-1>", lambda e, uid=user_id, d=day, y=year,
+                                                             m=month: self.on_user_cell_click(e, uid, d, y, m))
                 else:
-                    label = ttk.Label(self.plan_grid_frame, text=shift, background=bg_color, padding=5, borderwidth=1,
+                    label = ttk.Label(self.plan_grid_frame, text=display_shift, background=bg_color, padding=5,
+                                      borderwidth=1,
                                       relief="solid", anchor="center", foreground=text_color, cursor=cursor_type)
                     label.grid(row=current_row, column=col_idx, sticky="nsew")
-                    label.bind("<Button-1>",
-                               lambda e, uid=user_data_row['id'], d=day, y=year, m=month: self.on_wunschfrei_cell_click(
-                                   e, uid, d, y, m))
+                    if is_clickable:
+                        label.bind("<Button-1>",
+                                   lambda e, uid=user_id, d=day, y=year, m=month: self.on_user_cell_click(
+                                       e, uid, d, y, m))
             current_row += 1
         ttk.Label(self.plan_grid_frame, text="", background=header_bg, padding=2, borderwidth=0).grid(row=current_row,
                                                                                                       column=0,
@@ -479,16 +774,20 @@ class MainUserWindow(tk.Toplevel):
                 current_date = date(year, month, day)
                 count = daily_counts.get(current_date.strftime('%Y-%m-%d'), {}).get(abbrev, 0)
                 min_required = self.get_min_staffing_for_date(current_date).get(abbrev)
-                bg, text_color = summary_bg, "black"
+
+                bg = summary_bg
                 if min_required is not None:
                     if count < min_required:
-                        bg, text_color = alert_bg, "white"
+                        bg = alert_bg
                     elif count > min_required:
-                        bg, text_color = overstaffed_bg, "black"
+                        bg = overstaffed_bg
                     else:
-                        bg, text_color = success_bg, "black"
+                        bg = success_bg
+
+                text_color = self.get_contrast_color(bg)
                 display_text = f"{count}/{min_required}" if min_required is not None else str(count)
                 is_weekend, is_holiday_check = current_date.weekday() >= 5, self.is_holiday(current_date)
+
                 if is_weekend or is_holiday_check:
                     summary_frame = tk.Frame(self.plan_grid_frame, bg="blue")
                     summary_frame.grid(row=current_row, column=col_idx, sticky="nsew")
@@ -511,13 +810,13 @@ class MainUserWindow(tk.Toplevel):
         prev_month, prev_year = (current_month - 1, current_year) if current_month > 1 else (12, current_year - 1)
         if prev_year != current_year: self._load_holidays_for_year(prev_year)
         self.current_display_date = date(prev_year, prev_month, 1)
-        self.build_shift_plan_grid(prev_year, prev_month)
         self.refresh_wunschfrei_tab()
+        self.build_shift_plan_grid(prev_year, prev_month)
 
     def show_next_month(self):
         current_year, current_month = self.current_display_date.year, self.current_display_date.month
         next_month, next_year = (current_month + 1, current_year) if current_month < 12 else (1, current_year + 1)
         if next_year != current_year: self._load_holidays_for_year(next_year)
         self.current_display_date = date(next_year, next_month, 1)
-        self.build_shift_plan_grid(next_year, next_month)
         self.refresh_wunschfrei_tab()
+        self.build_shift_plan_grid(next_year, next_month)

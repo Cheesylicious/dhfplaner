@@ -66,6 +66,7 @@ def initialize_db():
                 status TEXT NOT NULL DEFAULT 'Ausstehend',
                 notified INTEGER DEFAULT 0,
                 rejection_reason TEXT,
+                requested_shift TEXT,
                 UNIQUE(user_id, request_date),
                 FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE
             );
@@ -90,7 +91,9 @@ def initialize_db():
                 abbreviation TEXT UNIQUE NOT NULL,
                 hours INTEGER NOT NULL,
                 description TEXT,
-                color TEXT DEFAULT '#FFFFFF'
+                color TEXT DEFAULT '#FFFFFF',
+                start_time TEXT,
+                end_time TEXT
             );
         """)
         cursor.execute("""
@@ -146,6 +149,10 @@ def initialize_db():
         _add_column_if_not_exists(cursor, "shift_order", "is_visible", "INTEGER DEFAULT 1")
         _add_column_if_not_exists(cursor, "wunschfrei_requests", "notified", "INTEGER DEFAULT 0")
         _add_column_if_not_exists(cursor, "wunschfrei_requests", "rejection_reason", "TEXT")
+        _add_column_if_not_exists(cursor, "wunschfrei_requests", "requested_shift", "TEXT")
+        # NEU: Spalten für die Schicht-Zeiten hinzufügen, falls sie fehlen
+        _add_column_if_not_exists(cursor, "shift_types", "start_time", "TEXT")
+        _add_column_if_not_exists(cursor, "shift_types", "end_time", "TEXT")
 
         conn.commit()
     finally:
@@ -212,13 +219,15 @@ def get_all_logs_formatted():
         conn.close()
 
 
-def add_wunschfrei_request(user_id, request_date_str):
+def submit_user_request(user_id, request_date_str, requested_shift=None):
+    """Speichert eine Benutzeranfrage (Wunschfrei oder Schichtpräferenz)."""
     conn = create_connection()
     try:
         cursor = conn.cursor()
+        shift_to_store = "WF" if requested_shift is None else requested_shift
         cursor.execute(
-            "INSERT INTO wunschfrei_requests (user_id, request_date) VALUES (?, ?)",
-            (user_id, request_date_str)
+            "INSERT INTO wunschfrei_requests (user_id, request_date, requested_shift) VALUES (?, ?, ?)",
+            (user_id, request_date_str, shift_to_store)
         )
         conn.commit()
         return True, "Anfrage erfolgreich gestellt."
@@ -246,9 +255,9 @@ def withdraw_wunschfrei_request(request_id, user_id):
         status = request_data['status']
         request_date = request_data['request_date']
 
-        if status not in ['Ausstehend', 'Genehmigt']:
+        if status not in ['Ausstehend', 'Genehmigt', 'Abgelehnt']:
             conn.rollback()
-            return False, "Nur ausstehende oder genehmigte Anträge können zurückgezogen werden."
+            return False, "Nur ausstehende, genehmigte oder abgelehnte Anträge können zurückgezogen werden."
 
         cursor.execute("DELETE FROM wunschfrei_requests WHERE id = ?", (request_id,))
 
@@ -257,20 +266,26 @@ def withdraw_wunschfrei_request(request_id, user_id):
         user = user_info_cursor.fetchone()
         user_name = f"{user['vorname']} {user['name']}" if user else "Unbekannter Benutzer"
 
+        date_formatted = datetime.strptime(request_date, '%Y-%m-%d').strftime('%d.%m.%Y')
+
         if status == 'Genehmigt':
-            cursor.execute("DELETE FROM shift_schedule WHERE user_id = ? AND shift_date = ? AND shift_abbrev = 'X'",
+            cursor.execute("DELETE FROM shift_schedule WHERE user_id = ? AND shift_date = ?",
                            (user_id, request_date))
-
-            details = f"Benutzer '{user_name}' hat genehmigten Antrag für {datetime.strptime(request_date, '%Y-%m-%d').strftime('%d.%m.%Y')} zurückgezogen."
-            _log_activity(cursor, user_id, "WUNSCHFREI_GENEHMIGT_ZURÜCKGEZOGEN", details)
+            details = f"Benutzer '{user_name}' hat genehmigten Antrag für {date_formatted} zurückgezogen."
+            _log_activity(cursor, user_id, "ANTRAG_GENEHMIGT_ZURÜCKGEZOGEN", details)
             _create_admin_notification(cursor, details)
-
+            msg = "Genehmigter Antrag wurde zurückgezogen."
         elif status == 'Ausstehend':
-            details = f"Benutzer '{user_name}' hat ausstehenden Antrag für {datetime.strptime(request_date, '%Y-%m-%d').strftime('%d.%m.%Y')} zurückgezogen."
-            _log_activity(cursor, user_id, "WUNSCHFREI_AUSSTEHEND_ZURÜCKGEZOGEN", details)
+            details = f"Benutzer '{user_name}' hat ausstehenden Antrag für {date_formatted} zurückgezogen."
+            _log_activity(cursor, user_id, "ANTRAG_AUSSTEHEND_ZURÜCKGEZOGEN", details)
+            msg = "Ausstehender Antrag wurde zurückgezogen."
+        elif status == 'Abgelehnt':
+            details = f"Benutzer '{user_name}' hat abgelehnten Antrag für {date_formatted} gelöscht."
+            _log_activity(cursor, user_id, "ANTRAG_ABGELEHNT_GELÖSCHT", details)
+            msg = "Abgelehnter Antrag wurde gelöscht."
 
         conn.commit()
-        return True, "Antrag erfolgreich zurückgezogen."
+        return True, msg
     except sqlite3.Error as e:
         conn.rollback()
         return False, f"Datenbankfehler: {e}"
@@ -278,7 +293,6 @@ def withdraw_wunschfrei_request(request_id, user_id):
         conn.close()
 
 
-# GEÄNDERT: Zählt nur noch Anträge, die nicht abgelehnt wurden
 def get_wunschfrei_requests_by_user_for_month(user_id, year, month):
     """Zählt die 'Wunschfrei'-Anfragen eines Benutzers für einen Monat, die NICHT abgelehnt wurden."""
     conn = create_connection()
@@ -287,7 +301,7 @@ def get_wunschfrei_requests_by_user_for_month(user_id, year, month):
         start_date = date(year, month, 1).strftime('%Y-%m-01')
         end_date = date(year, month, calendar.monthrange(year, month)[1]).strftime('%Y-%m-%d')
         cursor.execute(
-            "SELECT COUNT(*) FROM wunschfrei_requests WHERE user_id = ? AND request_date BETWEEN ? AND ? AND status != 'Abgelehnt'",
+            "SELECT COUNT(*) FROM wunschfrei_requests WHERE user_id = ? AND request_date BETWEEN ? AND ? AND status != 'Abgelehnt' AND requested_shift = 'WF'",
             (user_id, start_date, end_date)
         )
         return cursor.fetchone()[0]
@@ -300,13 +314,28 @@ def get_pending_wunschfrei_requests():
     try:
         cursor = conn.cursor()
         cursor.execute("""
-            SELECT wr.id, u.vorname, u.name, wr.request_date, wr.user_id
+            SELECT wr.id, u.vorname, u.name, wr.request_date, wr.user_id, wr.requested_shift
             FROM wunschfrei_requests wr
             JOIN users u ON wr.user_id = u.id
             WHERE wr.status = 'Ausstehend'
             ORDER BY wr.request_date ASC
         """)
         return [dict(row) for row in cursor.fetchall()]
+    finally:
+        conn.close()
+
+
+def get_wunschfrei_request_by_user_and_date(user_id, request_date_str):
+    """Holt eine spezifische 'Wunschfrei'-Anfrage anhand von Benutzer und Datum."""
+    conn = create_connection()
+    try:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT id, user_id, request_date, status, requested_shift FROM wunschfrei_requests WHERE user_id = ? AND request_date = ?",
+            (user_id, request_date_str)
+        )
+        row = cursor.fetchone()
+        return dict(row) if row else None
     finally:
         conn.close()
 
@@ -318,7 +347,7 @@ def get_wunschfrei_requests_for_month(year, month):
         start_date = date(year, month, 1).strftime('%Y-%m-01')
         end_date = date(year, month, calendar.monthrange(year, month)[1]).strftime('%Y-%m-%d')
         cursor.execute(
-            "SELECT user_id, request_date, status FROM wunschfrei_requests WHERE request_date BETWEEN ? AND ?",
+            "SELECT user_id, request_date, status, requested_shift FROM wunschfrei_requests WHERE request_date BETWEEN ? AND ?",
             (start_date, end_date)
         )
         requests = {}
@@ -326,7 +355,7 @@ def get_wunschfrei_requests_for_month(year, month):
             user_id_str = str(row['user_id'])
             if user_id_str not in requests:
                 requests[user_id_str] = {}
-            requests[user_id_str][row['request_date']] = row['status']
+            requests[user_id_str][row['request_date']] = (row['status'], row['requested_shift'])
         return requests
     finally:
         conn.close()
@@ -353,7 +382,7 @@ def get_all_requests_by_user(user_id):
     try:
         cursor = conn.cursor()
         cursor.execute(
-            "SELECT id, request_date, status, rejection_reason FROM wunschfrei_requests WHERE user_id = ? ORDER BY request_date DESC",
+            "SELECT id, request_date, status, rejection_reason, requested_shift FROM wunschfrei_requests WHERE user_id = ? ORDER BY request_date DESC",
             (user_id,)
         )
         return [dict(row) for row in cursor.fetchall()]
@@ -488,7 +517,9 @@ def get_all_shift_types():
     conn = create_connection()
     try:
         cursor = conn.cursor()
-        cursor.execute("SELECT * FROM shift_types ORDER BY abbreviation")
+        # GEÄNDERT: Explizit alle Spalten inkl. der neuen Zeit-Spalten auswählen
+        cursor.execute(
+            "SELECT id, name, abbreviation, hours, description, color, start_time, end_time FROM shift_types ORDER BY abbreviation")
         return [dict(row) for row in cursor.fetchall()]
     except sqlite3.Error as e:
         print(f"Fehler beim Abrufen der Schichtarten: {e}")
@@ -501,8 +532,11 @@ def add_shift_type(data):
     conn = create_connection()
     try:
         cursor = conn.cursor()
+        # GEÄNDERT: SQL-Statement um start_time und end_time erweitert
         cursor.execute(
-            "INSERT INTO shift_types (name, abbreviation, hours, description, color) VALUES (:name, :abbreviation, :hours, :description, :color)",
+            """INSERT INTO shift_types 
+               (name, abbreviation, hours, description, color, start_time, end_time) 
+               VALUES (:name, :abbreviation, :hours, :description, :color, :start_time, :end_time)""",
             data)
         conn.commit()
         return True, "Schichtart erfolgreich hinzugefügt."
@@ -515,13 +549,24 @@ def add_shift_type(data):
 
 
 def update_shift_type(shift_type_id, data):
-    data['id'] = shift_type_id
     conn = create_connection()
     try:
         cursor = conn.cursor()
-        cursor.execute(
-            "UPDATE shift_types SET name = :name, abbreviation = :abbreviation, hours = :hours, description = :description, color = :color WHERE id = :id",
-            data)
+        # GEÄNDERT: SQL-Statement um start_time und end_time erweitert
+        sql = """ UPDATE shift_types
+                  SET name = :name,
+                      abbreviation = :abbreviation,
+                      hours = :hours,
+                      description = :description,
+                      color = :color,
+                      start_time = :start_time,
+                      end_time = :end_time
+                  WHERE id = :id """
+
+        # Stelle sicher, dass die ID im data-Dictionary ist
+        data['id'] = shift_type_id
+
+        cursor.execute(sql, data)
         conn.commit()
         return True, "Schichtart erfolgreich aktualisiert."
     except sqlite3.IntegrityError:
