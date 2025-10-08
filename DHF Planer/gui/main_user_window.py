@@ -552,7 +552,16 @@ class MainUserWindow(tk.Toplevel):
         self.hsb.config(command=self.canvas.xview)
         self.inner_frame = ttk.Frame(self.canvas)
         self.canvas.create_window((0, 0), window=self.inner_frame, anchor="nw", tags="inner_frame")
-        self.inner_frame.bind("<Configure>", lambda e: self.canvas.configure(scrollregion=self.canvas.bbox("all")))
+
+        def _configure_inner_frame(event):
+            self.canvas.itemconfig('inner_frame', width=event.width)
+
+        def _configure_scrollregion(event):
+            self.canvas.configure(scrollregion=self.canvas.bbox("all"))
+
+        self.canvas.bind('<Configure>', _configure_inner_frame)
+        self.inner_frame.bind('<Configure>', _configure_scrollregion)
+
         self.plan_grid_frame = ttk.Frame(self.inner_frame)
         self.plan_grid_frame.pack(fill="both", expand=True)
         self.build_shift_plan_grid(self.current_display_date.year, self.current_display_date.month)
@@ -851,7 +860,8 @@ class MainUserWindow(tk.Toplevel):
             current_row += 1
         self.plan_grid_frame.grid_columnconfigure(0, weight=0, minsize=MIN_NAME_WIDTH)
         self.plan_grid_frame.grid_columnconfigure(1, weight=0, minsize=MIN_DOG_WIDTH)
-        for day_col in range(2, days_in_month + 2): self.plan_grid_frame.grid_columnconfigure(day_col, weight=1)
+        for day_col in range(2, days_in_month + 3):
+            self.plan_grid_frame.grid_columnconfigure(day_col, weight=1)
         self.inner_frame.update_idletasks()
         self.canvas.config(scrollregion=self.canvas.bbox("all"))
 

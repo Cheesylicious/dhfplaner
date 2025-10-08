@@ -19,7 +19,6 @@ class ShiftPlanTab(ttk.Frame):
 
         # UI State, spezifisch für diesen Tab
         self.grid_widgets = {}
-        self.color_map = {}
         self.violation_cells = set()
 
         # Daten, die für die aktuelle Ansicht des Tabs relevant sind
@@ -84,8 +83,17 @@ class ShiftPlanTab(ttk.Frame):
         vsb.config(command=self.canvas.yview)
         hsb.config(command=self.canvas.xview)
         self.inner_frame = ttk.Frame(self.canvas)
-        self.canvas.create_window((0, 0), window=self.inner_frame, anchor="nw")
-        self.inner_frame.bind("<Configure>", lambda e: self.canvas.configure(scrollregion=self.canvas.bbox("all")))
+        self.canvas.create_window((0, 0), window=self.inner_frame, anchor="nw", tags="inner_frame")
+
+        def _configure_inner_frame(event):
+            self.canvas.itemconfig('inner_frame', width=event.width)
+
+        def _configure_scrollregion(event):
+            self.canvas.configure(scrollregion=self.canvas.bbox("all"))
+
+        self.canvas.bind('<Configure>', _configure_inner_frame)
+        self.inner_frame.bind('<Configure>', _configure_scrollregion)
+
         self.plan_grid_frame = ttk.Frame(self.inner_frame)
         self.plan_grid_frame.pack(fill="both", expand=True)
 
@@ -93,10 +101,7 @@ class ShiftPlanTab(ttk.Frame):
         for widget in self.plan_grid_frame.winfo_children(): widget.destroy()
 
         self.grid_widgets = {'cells': {}, 'user_totals': {}, 'daily_counts': {}}
-        self.color_map = {"URLAUB": "mediumseagreen", "KRANK": "lightcoral", "FREI": "white", "WF": "orange",
-                          "X": "lightgreen"}
-        for abbrev, data in self.app.shift_types_data.items():
-            self.color_map[abbrev] = data.get('color', '#FFFFFF')
+        # Color map wird jetzt in apply_grid_colors dynamisch verwendet
 
         self.current_user_order = get_ordered_users_for_schedule(include_hidden=False)
         self.shift_schedule_data = get_shifts_for_month(year, month)
@@ -111,7 +116,7 @@ class ShiftPlanTab(ttk.Frame):
         header_bg, summary_bg = "#E0E0E0", "#D0D0FF"
         MIN_NAME_WIDTH, MIN_DOG_WIDTH = 150, 100
 
-        # Header-Zeilen (KORREKTUR: tk.Label statt ttk.Label für volle Farbkontrolle)
+        # Header-Zeilen
         tk.Label(self.plan_grid_frame, text="Mitarbeiter", font=("Segoe UI", 10, "bold"), bg=header_bg, fg="black",
                  padx=5, pady=5, bd=1, relief="solid").grid(row=0, column=0, columnspan=2, sticky="nsew")
         tk.Label(self.plan_grid_frame, text="Name", font=("Segoe UI", 9, "bold"), bg=header_bg, fg="black", padx=5,
@@ -159,10 +164,8 @@ class ShiftPlanTab(ttk.Frame):
                 if shift in self.app.shift_types_data:
                     total_hours += self.app.shift_types_data[shift].get('hours', 0)
 
-                # KORREKTUR: tk.Label statt ttk.Label
                 label = tk.Label(self.plan_grid_frame, text=shift, font=("Segoe UI", 10), bd=1, relief="solid",
                                  cursor="hand2")
-
                 label.grid(row=current_row, column=day + 1, sticky="nsew")
                 label.bind("<Button-1>",
                            lambda e, uid=user_id, d=day, y=year, m=month: self.on_grid_cell_click(e, uid, d, y, m))
@@ -196,7 +199,6 @@ class ShiftPlanTab(ttk.Frame):
                 min_required = self.get_min_staffing_for_date(date(year, month, day)).get(abbrev)
                 display_text = f"{count}/{min_required}" if min_required is not None else str(count)
 
-                # KORREKTUR: tk.Label statt ttk.Label
                 count_label = tk.Label(self.plan_grid_frame, text=display_text, font=("Segoe UI", 9), bd=1,
                                        relief="solid")
                 count_label.grid(row=current_row, column=day + 1, sticky="nsew")
@@ -208,6 +210,8 @@ class ShiftPlanTab(ttk.Frame):
         self.apply_grid_colors()
         self.plan_grid_frame.grid_columnconfigure(0, minsize=MIN_NAME_WIDTH)
         self.plan_grid_frame.grid_columnconfigure(1, minsize=MIN_DOG_WIDTH)
+        for day_col in range(2, days_in_month + 3):
+            self.plan_grid_frame.grid_columnconfigure(day_col, weight=1)
         self.inner_frame.update_idletasks()
         self.canvas.config(scrollregion=self.canvas.bbox("all"))
 
@@ -235,21 +239,53 @@ class ShiftPlanTab(ttk.Frame):
         days_in_month = calendar.monthrange(year, month)[1]
         weekend_bg, holiday_bg = "#EAF4FF", "#FFD700"
 
+        # Statische Farben für spezielle Schichten definieren
+        special_shifts = {
+            "URLAUB": {"bg": "mediumseagreen", "fg": "white"},
+            "KRANK": {"bg": "lightcoral", "fg": "black"},
+            "FREI": {"bg": "white", "fg": "black"},
+            "WF": {"bg": "orange", "fg": "black"}
+        }
+
         for user in self.current_user_order:
             user_id, user_id_str = user['id'], str(user['id'])
             for day in range(1, days_in_month + 1):
                 cell = self.grid_widgets['cells'].get(user_id_str, {}).get(day)
                 if not cell: continue
-                current_date = date(year, month, day)
-                shift = cell.cget("text")
-                bg = self.color_map.get(shift.replace("?", ""), "white")
-                if self.app.is_holiday(current_date):
-                    bg = holiday_bg
-                elif current_date.weekday() >= 5:
-                    bg = weekend_bg
-                if (user_id, day) in self.violation_cells: bg = "#FF5555"
-                cell.config(bg=bg, fg=self.app.get_contrast_color(bg))
 
+                current_date = date(year, month, day)
+                shift = cell.cget("text").replace("?", "")
+                shift_data = self.app.shift_types_data.get(shift)
+
+                bg_color, fg_color = "white", "black"
+
+                # Standard-Farb-Logik
+                if self.app.is_holiday(current_date):
+                    bg_color = holiday_bg
+                elif current_date.weekday() >= 5:
+                    bg_color = weekend_bg
+
+                # Schicht-spezifische Farben
+                if shift_data:
+                    bg_color = shift_data.get('color', bg_color)
+                    fg_color = shift_data.get('font_color', self.app.get_contrast_color(bg_color))
+                elif shift in special_shifts:
+                    bg_color = special_shifts[shift]["bg"]
+                    fg_color = special_shifts[shift]["fg"]
+
+                # Override für 'EU' und 'X'
+                if shift in ['EU', 'X'] and shift_data:
+                    bg_color = shift_data.get('color', bg_color)
+                    fg_color = shift_data.get('font_color', self.app.get_contrast_color(bg_color))
+
+                # Regelverstoß überschreibt alles
+                if (user_id, day) in self.violation_cells:
+                    bg_color = "#FF5555"
+                    fg_color = "white"
+
+                cell.config(bg=bg_color, fg=fg_color)
+
+        # Farben für die Zählungs-Zeilen
         rules = self.app.staffing_rules.get('Colors', {})
         daily_counts = get_daily_shift_counts_for_month(year, month)
         for abbrev, day_map in self.grid_widgets['daily_counts'].items():
@@ -311,14 +347,78 @@ class ShiftPlanTab(ttk.Frame):
             context_menu.post(event.x_root, event.y_root)
 
     def _save_shift_and_update_ui(self, user_id, date_str, old_shift, new_shift):
+        """Speichert die Schicht und aktualisiert nur die betroffenen UI-Teile."""
         success, message = save_shift_entry(user_id, date_str, new_shift)
         if success:
             if new_shift and new_shift != "FREI":
                 self.app.shift_frequency[new_shift] = self.app.shift_frequency.get(new_shift, 0) + 1
                 self.app.save_shift_frequency()
-            self.build_shift_plan_grid(self.app.current_display_date.year, self.app.current_display_date.month)
+
+            # Lokale Daten-Cache aktualisieren
+            user_id_str = str(user_id)
+            if user_id_str not in self.shift_schedule_data:
+                self.shift_schedule_data[user_id_str] = {}
+            if new_shift:
+                self.shift_schedule_data[user_id_str][date_str] = new_shift
+            elif date_str in self.shift_schedule_data[user_id_str]:
+                del self.shift_schedule_data[user_id_str][date_str]
+
+            self._update_ui_after_change(user_id, date_str, old_shift, new_shift)
         else:
             messagebox.showerror("Fehler", message, parent=self.app)
+
+    def _update_ui_after_change(self, user_id, date_str, old_shift, new_shift):
+        """Aktualisiert gezielt die UI-Komponenten nach einer Schichtänderung."""
+        year, month, day = map(int, date_str.split('-'))
+        user_id_str = str(user_id)
+
+        # 1. Zelle aktualisieren
+        cell_widget = self.grid_widgets['cells'][user_id_str][day]
+        cell_widget.config(text=new_shift)
+
+        # 2. Stunden-Summe des Mitarbeiters aktualisieren
+        self._update_user_total_hours(user_id_str)
+
+        # 3. Tägliche Zählungen aktualisieren
+        self._update_daily_counts_for_day(day, old_shift, new_shift)
+
+        # 4. Farb- und Regel-Logik anwenden
+        # Wir müssen die Farben für die geänderte Zelle und mögliche Nachbarn neu bewerten
+        self.apply_grid_colors()
+
+    def _update_user_total_hours(self, user_id_str):
+        """Berechnet die Gesamtstunden für einen Benutzer neu und aktualisiert das Label."""
+        total_hours = 0
+        year, month = self.app.current_display_date.year, self.app.current_display_date.month
+        days_in_month = calendar.monthrange(year, month)[1]
+
+        user_shifts = self.shift_schedule_data.get(user_id_str, {})
+        for day in range(1, days_in_month + 1):
+            date_str = date(year, month, day).strftime('%Y-%m-%d')
+            shift = user_shifts.get(date_str, "")
+            if shift in self.app.shift_types_data:
+                total_hours += self.app.shift_types_data[shift].get('hours', 0)
+
+        total_hours_label = self.grid_widgets['user_totals'].get(user_id_str)
+        if total_hours_label:
+            total_hours_label.config(text=str(total_hours))
+
+    def _update_daily_counts_for_day(self, day, old_shift, new_shift):
+        """Aktualisiert die Zähl-Labels für einen bestimmten Tag."""
+        year, month = self.app.current_display_date.year, self.app.current_display_date.month
+        current_date = date(year, month, day)
+        date_str = current_date.strftime('%Y-%m-%d')
+
+        # Aktuelle Zählungen für den Tag neu von der DB holen ist am einfachsten
+        daily_counts_for_day = get_daily_shift_counts_for_month(year, month).get(date_str, {})
+
+        for abbrev, day_map in self.grid_widgets['daily_counts'].items():
+            if day in day_map:
+                count_label = day_map[day]
+                count = daily_counts_for_day.get(abbrev, 0)
+                min_required = self.get_min_staffing_for_date(current_date).get(abbrev)
+                display_text = f"{count}/{min_required}" if min_required is not None else str(count)
+                count_label.config(text=display_text)
 
     def get_min_staffing_for_date(self, current_date):
         rules, min_staffing = self.app.staffing_rules, {}

@@ -3,6 +3,7 @@ import tkinter as tk
 from tkinter import ttk, messagebox, colorchooser
 from datetime import datetime
 
+
 class ShiftTypeDialog(tk.Toplevel):
     def __init__(self, admin_instance, callback_func, is_new, initial_data=None):
         super().__init__(admin_instance.master)
@@ -12,7 +13,7 @@ class ShiftTypeDialog(tk.Toplevel):
         self.initial_data = initial_data if initial_data is not None else {}
         self.result = None
         self.title("Neue Schichtart anlegen" if is_new else "Schichtart bearbeiten")
-        self.geometry("400x420")
+        self.geometry("400x450")
         self.transient(admin_instance)
         self.grab_set()
         self.protocol("WM_DELETE_WINDOW", self.cancel)
@@ -34,65 +35,77 @@ class ShiftTypeDialog(tk.Toplevel):
             "end_time": tk.StringVar(value=self.initial_data.get("end_time", "")),
             "description": tk.StringVar(value=self.initial_data.get("description", "")),
             "color": tk.StringVar(value=self.initial_data.get("color", "#FFFFFF")),
+            "font_color": tk.StringVar(value=self.initial_data.get("font_color", "#000000")),
         }
 
         labels = [
             "Art (Name):", "Abkürzung (max. 3 Zeichen):", "Stunden (pro Schicht):",
-            "Startzeit (HH:MM):", "Endzeit (HH:MM):", "Beschreibung:", "Farbe wählen:"
+            "Startzeit (HH:MM):", "Endzeit (HH:MM):", "Beschreibung:", "Hintergrundfarbe:", "Schriftfarbe:"
         ]
         keys = [
-            "name", "abbreviation", "hours", "start_time", "end_time", "description", "color"
+            "name", "abbreviation", "hours", "start_time", "end_time", "description", "color", "font_color"
         ]
         root = self.admin_instance.master
 
         for i, (label_text, key) in enumerate(zip(labels, keys)):
             ttk.Label(main_frame, text=label_text).grid(row=i, column=0, sticky="w", pady=5, padx=5)
-
             if key == "color":
                 color_frame = ttk.Frame(main_frame)
                 color_frame.grid(row=i, column=1, sticky="ew", pady=5, padx=5, columnspan=2)
-                self.color_preview = tk.Label(
-                    color_frame, textvariable=self.vars["color"], bg=self.vars[key].get(),
-                    relief="sunken", borderwidth=1, cursor="hand2",
-                    font=("Segoe UI", 10, "bold"), width=20
-                )
-                self.color_preview.config(fg=self.admin_instance.get_contrast_color(self.vars['color'].get()))
+                self.color_preview = tk.Label(color_frame, text=" Beispiel ", bg=self.vars[key].get(),
+                                              relief="sunken", borderwidth=1, cursor="hand2",
+                                              font=("Segoe UI", 10, "bold"), width=20)
                 self.color_preview.pack(side=tk.LEFT, fill="both", expand=True)
-                self.color_preview.bind("<Button-1>", lambda e: self.choose_color())
-                self.vars[key].trace_add('write', lambda *args: self.update_color_preview())
+                self.color_preview.bind("<Button-1>", lambda e, k=key, p=self.color_preview: self.choose_color(k, p))
+                self.vars[key].trace_add('write',
+                                         lambda *args, k=key, p=self.color_preview: self.update_color_preview(k, p))
+            elif key == "font_color":
+                font_color_frame = ttk.Frame(main_frame)
+                font_color_frame.grid(row=i, column=1, sticky="ew", pady=5, padx=5, columnspan=2)
+                self.font_color_preview = tk.Label(font_color_frame, text=" Beispiel ", bg="white",
+                                                   fg=self.vars[key].get(),
+                                                   relief="sunken", borderwidth=1, cursor="hand2",
+                                                   font=("Segoe UI", 10, "bold"), width=20)
+                self.font_color_preview.pack(side=tk.LEFT, fill="both", expand=True)
+                self.font_color_preview.bind("<Button-1>",
+                                             lambda e, k=key, p=self.font_color_preview: self.choose_color(k, p))
+                self.vars[key].trace_add('write',
+                                         lambda *args, k=key, p=self.font_color_preview: self.update_color_preview(k,
+                                                                                                                   p))
             else:
                 entry = tk.Entry(main_frame, textvariable=self.vars[key], width=40)
                 entry.grid(row=i, column=1, sticky="ew", pady=5, padx=5, columnspan=2)
-
                 if key == "abbreviation":
                     vcmd_abbrev = (root.register(self.validate_abbreviation), '%P')
                     entry.config(validate='key', vcmd=vcmd_abbrev)
-                    if not self.is_new:
-                        entry.config(state='readonly', disabledbackground="lightgrey")
+                    if not self.is_new: entry.config(state='readonly')
                 elif key == "hours":
                     vcmd_hours = (root.register(self.validate_hours), '%P')
                     entry.config(validate='key', vcmd=vcmd_hours)
                 elif key in ["start_time", "end_time"]:
                     vcmd_time = (root.register(self.validate_time), '%P')
                     entry.config(validate='key', vcmd=vcmd_time)
+        self.update_color_preview('color', self.color_preview)
 
-        self.update_color_preview()
-
-    def choose_color(self):
-        initial_color = self.vars['color'].get()
+    def choose_color(self, var_key, preview_widget):
+        initial_color = self.vars[var_key].get()
         color_code = colorchooser.askcolor(parent=self, title="Wähle eine Farbe", initialcolor=initial_color)
         if color_code and color_code[1]:
-            hex_code = color_code[1].upper()
-            self.vars['color'].set(hex_code)
-            self.color_preview.config(bg=hex_code, fg=self.admin_instance.get_contrast_color(hex_code))
+            self.vars[var_key].set(color_code[1].upper())
 
-    def update_color_preview(self):
-        color_val = self.vars['color'].get()
-        text_color = self.admin_instance.get_contrast_color(color_val)
+    def update_color_preview(self, var_key, preview_widget):
+        color_val = self.vars[var_key].get()
         try:
-            self.color_preview.config(bg=color_val, fg=text_color)
+            if var_key == 'color':
+                text_color = self.admin_instance.get_contrast_color(color_val)
+                preview_widget.config(bg=color_val, fg=text_color)
+            else:  # font_color
+                preview_widget.config(fg=color_val)
         except tk.TclError:
-            self.color_preview.config(bg="#FFFFFF", fg='black')
+            if var_key == 'color':
+                preview_widget.config(bg="#FFFFFF", fg='black')
+            else:
+                preview_widget.config(fg='#000000')
 
     def buttonbox(self, master):
         box = ttk.Frame(master, padding="10")
@@ -103,28 +116,17 @@ class ShiftTypeDialog(tk.Toplevel):
         box.pack(pady=(0, 10))
 
     def validate_abbreviation(self, P):
-        if P == "": return True
-        if len(P) > 3: return False
-        for char in P:
-            if not (char.isalnum() or char == '.'): return False
-        return True
+        return len(P) <= 3 and all(c.isalnum() or c == '.' for c in P)
 
     def validate_hours(self, P):
         return P.isdigit() or P == ""
 
     def validate_time(self, P):
-        if len(P) > 5:
-            return False
-        if P == "":
-            return True
-        if P.count(':') > 1:
-            return False
-        if not all(c.isdigit() or c == ':' for c in P):
-            return False
+        if P == "": return True
+        if len(P) > 5 or P.count(':') > 1 or not all(c.isdigit() or c == ':' for c in P): return False
         if ':' in P:
             parts = P.split(':')
-            if len(parts[0]) > 2 or len(parts[1]) > 2:
-                return False
+            if len(parts) != 2 or len(parts[0]) > 2 or len(parts[1]) > 2: return False
         elif len(P) > 2:
             return False
         return True
@@ -133,34 +135,27 @@ class ShiftTypeDialog(tk.Toplevel):
         data = {key: var.get().strip() for key, var in self.vars.items()}
         data['abbreviation'] = data['abbreviation'].upper()
         data['color'] = data['color'].upper()
+        data['font_color'] = data['font_color'].upper()
 
-        required_fields = ["name", "abbreviation", "hours", "color"]
-        if not all(data[f] for f in required_fields):
-            messagebox.showwarning("Eingabe fehlt",
-                                   "Felder (Name, Abkürzung, Stunden, Farbe) sind Pflichtfelder.", parent=self)
+        required_fields = ["name", "abbreviation", "hours"]
+        if not all(data.get(f) for f in required_fields):
+            messagebox.showwarning("Eingabe fehlt", "Name, Abkürzung und Stunden sind Pflichtfelder.", parent=self)
             return
 
         for time_key in ["start_time", "end_time"]:
-            time_val = data.get(time_key)
-            if time_val:
+            if data[time_key]:
                 try:
-                    datetime.strptime(time_val, '%H:%M')
+                    datetime.strptime(data[time_key], '%H:%M')
                 except ValueError:
-                    messagebox.showwarning("Falsches Format",
-                                           f"Die Eingabe für '{time_key}' ist ungültig. Bitte HH:MM verwenden.",
-                                           parent=self)
+                    messagebox.showwarning("Falsches Format", f"'{time_key}' muss im HH:MM Format sein.", parent=self)
                     return
 
-        color = data['color']
-        if not (color.startswith('#') and len(color) == 7 and all(c in '0123456789ABCDEF' for c in color[1:])):
-            messagebox.showwarning("Eingabe Fehler", "Interner Fehler: Ungültiger Hex-Code.", parent=self)
-            return
-
-        if not self.validate_abbreviation(data['abbreviation']):
-            messagebox.showwarning("Eingabe Fehler",
-                                   "Die Abkürzung ist ungültig. Max. 3 Zeichen (Buchstaben, Zahlen, Punkt).",
-                                   parent=self)
-            return
+        for color_key in ['color', 'font_color']:
+            color = data[color_key]
+            if not (color.startswith('#') and len(color) == 7 and all(
+                    c in '0123456789ABCDEF' for c in color[1:].upper())):
+                messagebox.showwarning("Eingabe Fehler", f"Ungültiger Hex-Code für {color_key}.", parent=self)
+                return
         try:
             data['hours'] = int(data['hours'])
         except ValueError:
