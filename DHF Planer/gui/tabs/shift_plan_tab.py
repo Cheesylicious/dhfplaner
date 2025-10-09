@@ -284,7 +284,7 @@ class ShiftPlanTab(ttk.Frame):
         all_abbrevs = list(self.app.shift_types_data.keys())
         menu_config = AdminMenuConfigManager.load_config(all_abbrevs)
         sorted_abbrevs = sorted(all_abbrevs, key=lambda s: self.app.shift_frequency.get(s, 0), reverse=True)
-        for abbrev in sorted(sorted_abbrevs):
+        for abbrev in sorted_abbrevs:
             if menu_config.get(abbrev, True):
                 name = self.app.shift_types_data[abbrev].get('name', abbrev)
                 count = self.app.shift_frequency.get(abbrev, 0)
@@ -301,6 +301,7 @@ class ShiftPlanTab(ttk.Frame):
 
         context_menu = tk.Menu(self, tearoff=0)
 
+        # --- KORREKTUR: Korrekter Tab-Name ---
         wunschfrei_tab = self.app.tab_frames.get("Wunschanfragen")
 
         if wunschfrei_tab:
@@ -380,8 +381,6 @@ class ShiftPlanTab(ttk.Frame):
         self.violation_cells.clear()
         year, month = self.app.current_display_date.year, self.app.current_display_date.month
         days_in_month = calendar.monthrange(year, month)[1]
-
-        # Sequenzregel (Nachtschicht)
         for user in self.current_user_order:
             user_id_str = str(user['id'])
             for day in range(1, days_in_month):
@@ -392,11 +391,6 @@ class ShiftPlanTab(ttk.Frame):
                 if shift1 == 'N.' and shift2 not in ['', 'FREI', 'N.']:
                     self.violation_cells.add((user['id'], day))
                     self.violation_cells.add((user['id'], day + 1))
-
-        # --- Diensthund-Konfliktprüfung (JETZT MIT FILTER) ---
-        NON_DUTY_SHIFTS = ["X", "EU", "U", "S", "KR",
-                           "R"]  # Genehmigter Wunschfrei, Erholungsurlaub, Urlaub, Krankheit, Reserve etc.
-
         for day in range(1, days_in_month + 1):
             date_str = date(year, month, day).strftime('%Y-%m-%d')
             dog_schedule = {}
@@ -404,12 +398,9 @@ class ShiftPlanTab(ttk.Frame):
                 dog = user.get('diensthund')
                 if dog and dog != '---':
                     shift = self.shift_schedule_data.get(str(user['id']), {}).get(date_str)
-
-                    # KORREKTUR: Nur Schichten, die eine aktive Dienstzeit darstellen, prüfen.
-                    if shift and shift not in NON_DUTY_SHIFTS:
+                    if shift:
                         if dog not in dog_schedule: dog_schedule[dog] = []
                         dog_schedule[dog].append((user['id'], shift))
-
             for dog, assignments in dog_schedule.items():
                 if len(assignments) > 1:
                     for i in range(len(assignments)):
@@ -418,70 +409,25 @@ class ShiftPlanTab(ttk.Frame):
                                 self.violation_cells.add((assignments[i][0], day))
                                 self.violation_cells.add((assignments[j][0], day))
 
-    def _get_shift_time_data(self, abbrev):
-        """Hilfsfunktion, um Schichtdaten mit robustem Zeitformat-Handling zu holen."""
-
-        # Standardzeiten für häufige hardcodierte Abkürzungen als Fallback
-        default_times = {
-            "6": {"start_time": "12:00", "end_time": "18:00"},
-            "T.": {"start_time": "06:00", "end_time": "18:00"},
-            "N.": {"start_time": "22:00", "end_time": "06:00"},
-            "24": {"start_time": "00:00", "end_time": "00:00"},
-        }
-
-        db_data = self.app.shift_types_data.get(abbrev, {})
-        hardcode_data = default_times.get(abbrev, {})
-
-        # Bevorzugt DB-Daten. Nur wenn DB-Daten fehlen (None/leer), wird Hardcode verwendet.
-        final_data = {
-            'start_time': db_data.get('start_time') if db_data.get('start_time') else hardcode_data.get('start_time'),
-            'end_time': db_data.get('end_time') if db_data.get('end_time') else hardcode_data.get('end_time')
-        }
-
-        return final_data
-
     def _check_time_overlap(self, shift1_abbrev, shift2_abbrev):
-
-        s1_data = self._get_shift_time_data(shift1_abbrev)
-        s2_data = self._get_shift_time_data(shift2_abbrev)
-
-        s1_start_val = s1_data.get('start_time')
-        s1_end_val = s1_data.get('end_time')
-        s2_start_val = s2_data.get('start_time')
-        s2_end_val = s2_data.get('end_time')
-
-        # 1. Prüfen, ob wir die Zeiten überhaupt haben
-        if not all([s1_start_val, s1_end_val, s2_start_val, s2_end_val]):
+        s1_data = self.app.shift_types_data.get(shift1_abbrev)
+        s2_data = self.app.shift_types_data.get(shift2_abbrev)
+        if not all([s1_data, s2_data, s1_data.get('start_time'), s1_data.get('end_time'), s2_data.get('start_time'),
+                    s2_data.get('end_time')]):
             return False
-
         try:
-            # Funktion zur korrekten Konvertierung in Minuten
-            def time_to_minutes(time_value):
-                # Wenn es ein String ist (z.B. Hardcode-Fallback)
-                if isinstance(time_value, str):
-                    t = datetime.strptime(time_value, '%H:%M').time()
-                    return t.hour * 60 + t.minute
-                # Wenn es ein datetime.time Objekt ist (häufiger MySQL-Rückgabewert)
-                elif isinstance(time_value, datetime.time):
-                    return time_value.hour * 60 + time_value.minute
-                # Wenn es ein timedelta Objekt ist
-                elif isinstance(time_value, timedelta):
-                    return int(time_value.total_seconds() / 60)
-                return 0
-
-            s1_min = time_to_minutes(s1_start_val)
-            e1_min = time_to_minutes(s1_end_val)
-            s2_min = time_to_minutes(s2_start_val)
-            e2_min = time_to_minutes(s2_end_val)
-
-            # 3. Endzeit für Schichten, die Mitternacht überschreiten, um 1440 Minuten (24h) erhöhen.
-            s1_end_adjusted = e1_min + 1440 if e1_min <= s1_min else e1_min
-            s2_end_adjusted = e2_min + 1440 if e2_min <= s2_min else e2_min
-
-            # 4. Die einzelne, robuste Überlappungsprüfung:
-            return max(s1_min, s2_min) < min(s1_end_adjusted, s2_end_adjusted)
-
-        except Exception:
+            s1 = datetime.strptime(s1_data['start_time'], '%H:%M').time()
+            e1 = datetime.strptime(s1_data['end_time'], '%H:%M').time()
+            s2 = datetime.strptime(s2_data['start_time'], '%H:%M').time()
+            e2 = datetime.strptime(s2_data['end_time'], '%H:%M').time()
+            s1_min = s1.hour * 60 + s1.minute
+            e1_min = e1.hour * 60 + e1.minute
+            s2_min = s2.hour * 60 + s2.minute
+            e2_min = e2.hour * 60 + e2.minute
+            if e1_min <= s1_min: e1_min += 24 * 60
+            if e2_min <= s2_min: e2_min += 24 * 60
+            return max(s1_min, s2_min) < min(e1_min, e2_min)
+        except (ValueError, TypeError):
             return False
 
     def clear_understaffing_results(self):

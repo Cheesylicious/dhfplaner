@@ -1,4 +1,4 @@
-# gui/main_admin_window.py (KORRIGIERT: reset_shift_frequency hinzugefügt)
+# gui/main_admin_window.py
 import tkinter as tk
 from tkinter import ttk, messagebox
 import json
@@ -12,7 +12,7 @@ from .tabs.shift_types_tab import ShiftTypesTab
 from .tabs.requests_tab import RequestsTab
 from .tabs.log_tab import LogTab
 from .tabs.bug_reports_tab import BugReportsTab
-from .tabs.vacation_requests_tab import VacationRequestsTab
+from .tabs.vacation_requests_tab import VacationRequestsTab  # <-- NEUER IMPORT
 from .dialogs.user_order_window import UserOrderWindow
 from .dialogs.shift_order_window import ShiftOrderWindow
 from .dialogs.min_staffing_window import MinStaffingWindow
@@ -23,10 +23,7 @@ from .dialogs.bug_report_dialog import BugReportDialog
 from .holiday_manager import HolidayManager
 from database.db_manager import (
     get_all_shift_types, get_pending_wunschfrei_requests, get_open_bug_reports_count,
-    get_pending_vacation_requests_count, ROLE_HIERARCHY,
-
-    # NEUE DB-KONFIGURATIONSFUNKTIONEN
-    load_staffing_rules, load_shift_frequency, load_holiday_config, save_shift_frequency
+    get_pending_vacation_requests_count
 )
 
 
@@ -58,7 +55,6 @@ class MainAdminWindow(tk.Toplevel):
 
         self.shift_types_data = {}
         self.staffing_rules = {}
-        self.holiday_config = {}
         self.current_display_date = date.today()
         self.current_year_holidays = {}
         self.shift_frequency = self.load_shift_frequency()
@@ -84,8 +80,8 @@ class MainAdminWindow(tk.Toplevel):
             "Mitarbeiter": UserManagementTab(self.notebook, self),
             "Diensthunde": DogManagementTab(self.notebook, self),
             "Schichtarten": ShiftTypesTab(self.notebook, self),
-            "Wunschanfragen": RequestsTab(self.notebook, self),
-            "Urlaubsanträge": VacationRequestsTab(self.notebook, self),
+            "Wunschanfragen": RequestsTab(self.notebook, self),  # Umbenannt für Klarheit
+            "Urlaubsanträge": VacationRequestsTab(self.notebook, self),  # NEUER TAB
             "Bug-Reports": BugReportsTab(self.notebook, self),
             "Logs": LogTab(self.notebook, self)
         }
@@ -115,6 +111,7 @@ class MainAdminWindow(tk.Toplevel):
         self.after(60000, self.check_for_updates)
 
     def update_tab_titles(self):
+        # Wunschanfragen
         pending_wunsch_count = len(get_pending_wunschfrei_requests())
         tab_text_wunsch = "Wunschanfragen"
         if pending_wunsch_count > 0:
@@ -122,6 +119,7 @@ class MainAdminWindow(tk.Toplevel):
         if "Wunschanfragen" in self.tab_frames:
             self.notebook.tab(self.tab_frames["Wunschanfragen"], text=tab_text_wunsch)
 
+        # Urlaubsanträge
         pending_urlaub_count = get_pending_vacation_requests_count()
         tab_text_urlaub = "Urlaubsanträge"
         if pending_urlaub_count > 0:
@@ -129,6 +127,7 @@ class MainAdminWindow(tk.Toplevel):
         if "Urlaubsanträge" in self.tab_frames:
             self.notebook.tab(self.tab_frames["Urlaubsanträge"], text=tab_text_urlaub)
 
+        # Bug-Reports
         open_bug_count = get_open_bug_reports_count()
         tab_text_bugs = "Bug-Reports"
         if open_bug_count > 0:
@@ -148,7 +147,7 @@ class MainAdminWindow(tk.Toplevel):
                 "text": f"{pending_wunsch_count} Offene Wunschanfrage(n)",
                 "bg": "orange",
                 "fg": "black",
-                "tab": "Wunschanfragen"
+                "tab": "Wunschanfragen"  # Korrigierter Tab-Name
             })
 
         pending_urlaub_count = get_pending_vacation_requests_count()
@@ -157,7 +156,7 @@ class MainAdminWindow(tk.Toplevel):
                 "text": f"{pending_urlaub_count} Offene Urlaubsanträge",
                 "bg": "lightblue",
                 "fg": "black",
-                "tab": "Urlaubsanträge"
+                "tab": "Urlaubsanträge"  # KORREKTUR: Zeigt auf den neuen Tab
             })
 
         open_bug_count = get_open_bug_reports_count()
@@ -186,10 +185,10 @@ class MainAdminWindow(tk.Toplevel):
         if tab_name in self.tab_frames:
             self.notebook.select(self.tab_frames[tab_name])
 
+    # ... (Rest der Datei bleibt unverändert) ...
     def load_all_data(self):
         self.load_shift_types()
         self.load_staffing_rules()
-        self.load_holiday_config()
         self._load_holidays_for_year(self.current_display_date.year)
 
     def refresh_all_tabs(self):
@@ -204,17 +203,14 @@ class MainAdminWindow(tk.Toplevel):
         self.shift_types_data = {st['abbreviation']: st for st in get_all_shift_types()}
 
     def load_staffing_rules(self):
-        """Lädt Personalregeln aus der Datenbank (ersetzt min_staffing_rules.json)."""
-        self.staffing_rules = load_staffing_rules()
-
-    def load_holiday_config(self):
-        """Lädt die Feiertags-Konfiguration (Bundesland etc.) aus der Datenbank (ersetzt holidays_config.json)."""
-        self.holiday_config = load_holiday_config()
+        try:
+            with open('min_staffing_rules.json', 'r', encoding='utf-8') as f:
+                self.staffing_rules = json.load(f)
+        except (FileNotFoundError, json.JSONDecodeError):
+            self.staffing_rules = {"Daily": {}, "Sa-So": {}, "Fr": {}, "Mo-Do": {}, "Holiday": {}, "Colors": {}}
 
     def _load_holidays_for_year(self, year):
-        """Lädt Feiertage basierend auf der geladenen Konfiguration."""
-        # Übergibt die Konfiguration an den HolidayManager
-        self.current_year_holidays = HolidayManager.get_holidays_for_year(year, self.holiday_config)
+        self.current_year_holidays = HolidayManager.get_holidays_for_year(year)
 
     def is_holiday(self, check_date):
         return check_date in self.current_year_holidays
@@ -230,42 +226,34 @@ class MainAdminWindow(tk.Toplevel):
             return 'black'
 
     def load_shift_frequency(self):
-        """Lädt Schichthäufigkeitszähler aus der Datenbank (ersetzt shift_frequency.json)."""
-        frequency = load_shift_frequency()
-        return defaultdict(int, frequency)
+        try:
+            with open('shift_frequency.json', 'r', encoding='utf-8') as f:
+                return defaultdict(int, json.load(f))
+        except (FileNotFoundError, json.JSONDecodeError):
+            return defaultdict(int)
 
     def save_shift_frequency(self):
-        """Speichert Schichthäufigkeitszähler in der Datenbank."""
-        if not save_shift_frequency(dict(self.shift_frequency)):
+        try:
+            with open('shift_frequency.json', 'w', encoding='utf-8') as f:
+                json.dump(self.shift_frequency, f, indent=4)
+        except IOError:
             messagebox.showwarning("Speicherfehler", "Die Schichthäufigkeit konnte nicht gespeichert werden.",
                                    parent=self)
 
-    def reset_shift_frequency(self):
-        """Setzt den Zähler für die Schichthäufigkeit zurück."""
-        if messagebox.askyesno("Bestätigen",
-                               "Möchten Sie den Zähler für die Schichthäufigkeit wirklich zurücksetzen? Dies kann nicht rückgängig gemacht werden.",
-                               parent=self):
-            self.shift_frequency = defaultdict(int)
-            self.save_shift_frequency()
-            messagebox.showinfo("Erfolg", "Der Zähler wurde erfolgreich zurückgesetzt.", parent=self)
-
-    def get_allowed_roles(self):
-        return ROLE_HIERARCHY
-
     def open_user_order_window(self):
-        UserOrderWindow(self, self.refresh_all_tabs)
+        UserOrderWindow(self)
 
     def open_shift_order_window(self):
-        ShiftOrderWindow(self, self.refresh_all_tabs)
+        ShiftOrderWindow(self)
 
     def open_staffing_rules_window(self):
-        MinStaffingWindow(self, self.refresh_all_tabs)
+        MinStaffingWindow(self)
 
     def open_holiday_settings_window(self):
-        HolidaySettingsWindow(self, self.current_display_date.year, self.refresh_all_tabs)
+        HolidaySettingsWindow(self)
 
     def open_request_settings_window(self):
-        RequestSettingsWindow(self, self.refresh_all_tabs)
+        RequestSettingsWindow(self)
 
     def open_planning_assistant_settings(self):
-        PlanningAssistantSettingsWindow(self, self.refresh_all_tabs)
+        PlanningAssistantSettingsWindow(self)

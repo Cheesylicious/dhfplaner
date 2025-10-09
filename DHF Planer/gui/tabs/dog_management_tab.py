@@ -91,43 +91,23 @@ class DogManagementTab(ttk.Frame):
         age = "Unbekannt"
         if dog_data.get("birth_date"):
             try:
-                # FIX: Handle if birth_date is already a date/datetime object
-                birth_date_data = dog_data["birth_date"]
-                if isinstance(birth_date_data, str):
-                    birth_date = datetime.strptime(birth_date_data, '%Y-%m-%d').date()
-                else:
-                    birth_date = birth_date_data.date() if isinstance(birth_date_data, datetime) else birth_date_data
-
+                birth_date = datetime.strptime(dog_data["birth_date"], '%Y-%m-%d').date()
                 age = f"{(date.today() - birth_date).days // 365} Jahre"
                 self.dog_detail_vars["Geburtsdatum"].set(birth_date.strftime('%d.%m.%Y'))
-            except (ValueError, TypeError, AttributeError):
-                pass  # Fehlerhafte Daten werden ignoriert
+            except (ValueError, TypeError):
+                pass
 
         self.dog_detail_vars["Name"].set(dog_data.get('name', '---'))
         self.dog_detail_vars["Rasse"].set(dog_data.get('breed', '---'))
         self.dog_detail_vars["Alter"].set(age)
         self.dog_detail_vars["Chipnummer"].set(dog_data.get('chip_number', '---'))
 
-        # FIX: Allgemeine Datumsformatierung mit Fehlerbehandlung für String/Date-Objekt
-        def safe_date_format(date_value):
-            if not date_value: return None
-            try:
-                if isinstance(date_value, str):
-                    date_obj = datetime.strptime(date_value, '%Y-%m-%d')
-                else:
-                    date_obj = date_value  # Ist bereits date/datetime
-                return date_obj.strftime('%d.%m.%Y')
-            except Exception:
-                return None
-
-        zugang = safe_date_format(dog_data.get('acquisition_date'))
-        if zugang: self.dog_detail_vars["Zugang"].set(zugang)
-
-        abgang = safe_date_format(dog_data.get('departure_date'))
-        if abgang: self.dog_detail_vars["Abgang"].set(abgang)
-
-        dpo = safe_date_format(dog_data.get('last_dpo_date'))
-        if dpo: self.dog_detail_vars["Letzte DPO"].set(dpo)
+        if dog_data.get('acquisition_date'): self.dog_detail_vars["Zugang"].set(
+            datetime.strptime(dog_data['acquisition_date'], '%Y-%m-%d').strftime('%d.%m.%Y'))
+        if dog_data.get('departure_date'): self.dog_detail_vars["Abgang"].set(
+            datetime.strptime(dog_data['departure_date'], '%Y-%m-%d').strftime('%d.%m.%Y'))
+        if dog_data.get('last_dpo_date'): self.dog_detail_vars["Letzte DPO"].set(
+            datetime.strptime(dog_data['last_dpo_date'], '%Y-%m-%d').strftime('%d.%m.%Y'))
 
         self.dog_detail_vars["Impfungen"].set(dog_data.get('vaccination_info', '---'))
 
