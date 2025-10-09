@@ -1,4 +1,4 @@
-# gui/main_admin_window.py (KORRIGIERT: get_allowed_roles Methode hinzugefügt)
+# gui/main_admin_window.py (KORRIGIERT: Konfigurations-Logik auf DB umgestellt)
 import tkinter as tk
 from tkinter import ttk, messagebox
 import json
@@ -23,7 +23,10 @@ from .dialogs.bug_report_dialog import BugReportDialog
 from .holiday_manager import HolidayManager
 from database.db_manager import (
     get_all_shift_types, get_pending_wunschfrei_requests, get_open_bug_reports_count,
-    get_pending_vacation_requests_count, ROLE_HIERARCHY  # <--- HINZUGEFÜGT
+    get_pending_vacation_requests_count, ROLE_HIERARCHY,
+
+    # NEUE DB-KONFIGURATIONSFUNKTIONEN
+    load_staffing_rules, load_shift_frequency, load_holiday_config, save_shift_frequency
 )
 
 
@@ -55,6 +58,7 @@ class MainAdminWindow(tk.Toplevel):
 
         self.shift_types_data = {}
         self.staffing_rules = {}
+        self.holiday_config = {}
         self.current_display_date = date.today()
         self.current_year_holidays = {}
         self.shift_frequency = self.load_shift_frequency()
@@ -111,7 +115,6 @@ class MainAdminWindow(tk.Toplevel):
         self.after(60000, self.check_for_updates)
 
     def update_tab_titles(self):
-        # Wunschanfragen
         pending_wunsch_count = len(get_pending_wunschfrei_requests())
         tab_text_wunsch = "Wunschanfragen"
         if pending_wunsch_count > 0:
@@ -119,7 +122,6 @@ class MainAdminWindow(tk.Toplevel):
         if "Wunschanfragen" in self.tab_frames:
             self.notebook.tab(self.tab_frames["Wunschanfragen"], text=tab_text_wunsch)
 
-        # Urlaubsanträge
         pending_urlaub_count = get_pending_vacation_requests_count()
         tab_text_urlaub = "Urlaubsanträge"
         if pending_urlaub_count > 0:
@@ -127,7 +129,6 @@ class MainAdminWindow(tk.Toplevel):
         if "Urlaubsanträge" in self.tab_frames:
             self.notebook.tab(self.tab_frames["Urlaubsanträge"], text=tab_text_urlaub)
 
-        # Bug-Reports
         open_bug_count = get_open_bug_reports_count()
         tab_text_bugs = "Bug-Reports"
         if open_bug_count > 0:
@@ -188,6 +189,7 @@ class MainAdminWindow(tk.Toplevel):
     def load_all_data(self):
         self.load_shift_types()
         self.load_staffing_rules()
+        self.load_holiday_config()
         self._load_holidays_for_year(self.current_display_date.year)
 
     def refresh_all_tabs(self):
@@ -202,14 +204,17 @@ class MainAdminWindow(tk.Toplevel):
         self.shift_types_data = {st['abbreviation']: st for st in get_all_shift_types()}
 
     def load_staffing_rules(self):
-        try:
-            with open('min_staffing_rules.json', 'r', encoding='utf-8') as f:
-                self.staffing_rules = json.load(f)
-        except (FileNotFoundError, json.JSONDecodeError):
-            self.staffing_rules = {"Daily": {}, "Sa-So": {}, "Fr": {}, "Mo-Do": {}, "Holiday": {}, "Colors": {}}
+        """Lädt Personalregeln aus der Datenbank (ersetzt min_staffing_rules.json)."""
+        self.staffing_rules = load_staffing_rules()
+
+    def load_holiday_config(self):
+        """Lädt die Feiertags-Konfiguration (Bundesland etc.) aus der Datenbank (ersetzt holidays_config.json)."""
+        self.holiday_config = load_holiday_config()
 
     def _load_holidays_for_year(self, year):
-        self.current_year_holidays = HolidayManager.get_holidays_for_year(year)
+        """Lädt Feiertage basierend auf der geladenen Konfiguration."""
+        # Übergibt die Konfiguration an den HolidayManager
+        self.current_year_holidays = HolidayManager.get_holidays_for_year(year, self.holiday_config)
 
     def is_holiday(self, check_date):
         return check_date in self.current_year_holidays
@@ -225,47 +230,33 @@ class MainAdminWindow(tk.Toplevel):
             return 'black'
 
     def load_shift_frequency(self):
-        try:
-            with open('shift_frequency.json', 'r', encoding='utf-8') as f:
-                return defaultdict(int, json.load(f))
-        except (FileNotFoundError, json.JSONDecodeError):
-            return defaultdict(int)
+        """Lädt Schichthäufigkeitszähler aus der Datenbank (ersetzt shift_frequency.json)."""
+        frequency = load_shift_frequency()
+        return defaultdict(int, frequency)
 
     def save_shift_frequency(self):
-        try:
-            with open('shift_frequency.json', 'w', encoding='utf-8') as f:
-                json.dump(self.shift_frequency, f, indent=4)
-        except IOError:
+        """Speichert Schichthäufigkeitszähler in der Datenbank."""
+        if not save_shift_frequency(dict(self.shift_frequency)):
             messagebox.showwarning("Speicherfehler", "Die Schichthäufigkeit konnte nicht gespeichert werden.",
                                    parent=self)
 
-    # --- NEU HINZUGEFÜGTE FUNKTION ---
     def get_allowed_roles(self):
-        """Gibt die Rollenhierarchie aus db_manager zurück."""
-        # Wird vom UserManagementTab zur Rollenauswahl benötigt.
         return ROLE_HIERARCHY
-    # -----------------------------------
 
     def open_user_order_window(self):
-        # Korrektur: Fügt den Callback hinzu, da das Fenster ihn erwartet
         UserOrderWindow(self, self.refresh_all_tabs)
 
     def open_shift_order_window(self):
-        # Korrektur: Fügt den Callback hinzu
         ShiftOrderWindow(self, self.refresh_all_tabs)
 
     def open_staffing_rules_window(self):
-        # Korrektur: Fügt den Callback hinzu
         MinStaffingWindow(self, self.refresh_all_tabs)
 
     def open_holiday_settings_window(self):
-        # Korrektur: Fügt das aktuelle Jahr und den Callback hinzu
         HolidaySettingsWindow(self, self.current_display_date.year, self.refresh_all_tabs)
 
     def open_request_settings_window(self):
-        # Korrektur: Fügt den Callback hinzu
         RequestSettingsWindow(self, self.refresh_all_tabs)
 
     def open_planning_assistant_settings(self):
-        # Korrektur: Fügt den Callback hinzu
         PlanningAssistantSettingsWindow(self, self.refresh_all_tabs)

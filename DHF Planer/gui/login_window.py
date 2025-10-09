@@ -4,7 +4,8 @@ from tkinter import ttk, messagebox
 from database.db_manager import check_login, get_user_count
 from .registration_window import RegistrationWindow
 
-__version__ = "1.0.0"
+# NEU: Importiere den UpdateManager und die globale Version
+from update_manager import UpdateManager, CURRENT_VERSION
 
 
 class LoginWindow(tk.Toplevel):
@@ -14,7 +15,9 @@ class LoginWindow(tk.Toplevel):
         self.login_callback = login_callback
         self.title("DHF-Planer - Login")
 
-        # --- KORREKTUR: ECHTER VOLLBILDMODUS ---
+        # NEU: Initialisiere den Update Manager
+        self.update_manager = UpdateManager(self)
+
         self.attributes('-fullscreen', True)
 
         self.configure(bg='#2c3e50')
@@ -31,6 +34,11 @@ class LoginWindow(tk.Toplevel):
         self.protocol("WM_DELETE_WINDOW", self.master.destroy)
         self.create_widgets(style)
 
+        # NEU: Prüfe beim Start automatisch auf Updates (stumm)
+        if self.update_manager.check_for_update(silent=True):
+            # Nur eine kurze Info, da der Button es sowieso anbietet
+            print("INFO: Ein Update ist verfügbar.")
+
     def create_widgets(self, style):
         wrapper_frame = ttk.Frame(self, style='TFrame')
         wrapper_frame.pack(expand=True)
@@ -38,7 +46,8 @@ class LoginWindow(tk.Toplevel):
         main_frame = ttk.Frame(wrapper_frame, padding="40", style='TFrame')
         main_frame.pack()
 
-        ttk.Label(main_frame, text=f"DHF Planer v{__version__}", font=("Segoe UI", 28, "bold")).pack(pady=(0, 40))
+        # FIX: Nutze die Version aus dem UpdateManager
+        ttk.Label(main_frame, text=f"DHF Planer v{CURRENT_VERSION}", font=("Segoe UI", 28, "bold")).pack(pady=(0, 40))
 
         form_frame = ttk.Frame(main_frame, style='TFrame')
         form_frame.pack(fill="x", pady=5)
@@ -71,7 +80,10 @@ class LoginWindow(tk.Toplevel):
 
         footer_frame = ttk.Frame(self, style='TFrame', padding=10)
         footer_frame.pack(side="bottom", fill="x")
-        update_button = ttk.Button(footer_frame, text="Update", command=self.check_for_updates, style='Small.TButton')
+
+        # FIX: Ruft die Update-Prüfung auf
+        update_button = ttk.Button(footer_frame, text="Update prüfen", command=self.check_for_updates,
+                                   style='Small.TButton')
         update_button.pack(side="right")
 
     def attempt_login(self, event=None):
@@ -88,7 +100,9 @@ class LoginWindow(tk.Toplevel):
         RegistrationWindow(self)
 
     def check_for_updates(self):
-        messagebox.showinfo("Update", "Diese Funktion ist noch nicht implementiert.", parent=self)
+        """Manuelle Prüfung beim Klicken des Buttons (ruft den UpdateManager auf)"""
+        # Aufruf mit silent=False, um Feedback zu geben
+        self.update_manager.check_for_update(silent=False)
 
     def clear_input_fields(self):
         self.vorname_entry.delete(0, tk.END)

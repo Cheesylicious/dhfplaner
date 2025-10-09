@@ -88,15 +88,12 @@ class UserEditWindow(tk.Toplevel):
         ttk.Entry(main_frame, textvariable=self.vars['password'], show="*").grid(row=row_index, column=1,
                                                                                  sticky="ew", pady=5, ipady=2)
         row_index += 1
-        # HINWEIS: Der 'Passwort zurücksetzen' Button wurde entfernt, da die Eingabe nun direkt möglich ist.
 
         button_bar = ttk.Frame(main_frame)
         button_bar.grid(row=row_index, column=0, columnspan=2, pady=(20, 0), sticky="ew")
         button_bar.columnconfigure((0, 1), weight=1)
         ttk.Button(button_bar, text="Speichern", command=self.save).grid(row=0, column=0, sticky="ew", padx=(0, 5))
         ttk.Button(button_bar, text="Abbrechen", command=self.destroy).grid(row=0, column=1, sticky="ew", padx=(5, 0))
-
-    # Die Methode reset_password() wird entfernt, da das Feld nun immer angezeigt wird.
 
     def save(self):
         updated_data = {key: var.get().strip() for key, var in self.vars.items()}
@@ -109,11 +106,9 @@ class UserEditWindow(tk.Toplevel):
             messagebox.showwarning("Eingabe fehlt", "Vorname und Name dürfen nicht leer sein.", parent=self)
             return
 
-        # NEUE PASSWORT-VALIDIERUNG:
         password_value = updated_data.get("password")
 
         if self.is_new:
-            # Beim Erstellen: Passwort muss zwingend vergeben werden.
             if not password_value:
                 messagebox.showwarning("Eingabe fehlt", "Bei neuen Benutzern muss ein Passwort vergeben werden.",
                                        parent=self)
@@ -123,7 +118,6 @@ class UserEditWindow(tk.Toplevel):
             if not password_value:
                 updated_data.pop('password', None)
 
-        # NEU: Validierung der Hund-Zuweisung
         new_dog = updated_data.get('diensthund')
         original_dog = self.user_data.get('diensthund')
 
@@ -135,7 +129,6 @@ class UserEditWindow(tk.Toplevel):
                                      parent=self)
                 return
 
-        # Korrigiere "Kein" zu einem leeren String für die Datenbank
         if updated_data.get('diensthund') == "Kein":
             updated_data['diensthund'] = ""
 

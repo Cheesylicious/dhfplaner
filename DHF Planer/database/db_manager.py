@@ -1,16 +1,18 @@
-# database/db_manager.py (MySQL Version - Datetime Konvertierung behoben)
+# database/db_manager.py (MySQL Version - Komplett mit Konfigurationsverwaltung)
 import mysql.connector
 from mysql.connector import errorcode
-# importiere KEINEN CursorDict hier, um Versionsprobleme zu vermeiden
-import hashlib
 from datetime import date, datetime
 import calendar
+import json
+import hashlib
+
+from collections import defaultdict
 
 # --- MySQL CONNECTION PARAMETERS ---
 DB_HOST = "127.0.0.1"
 DB_USER = "rebi"
 DB_PASS = "Qwe456ola!"
-DATABASE_NAME = 'dhfplaner_db'  # Datenbankname zur besseren Unterscheidung von SQLite
+DATABASE_NAME = 'dhfplaner_db'
 
 # --- Authentifizierungs-Plugin für ältere MySQL-Installationen fixiert ---
 AUTH_PLUGIN = 'caching_sha2_password'
@@ -20,8 +22,6 @@ ROLE_HIERARCHY = {"Gast": 1, "Benutzer": 2, "Admin": 3, "SuperAdmin": 4}
 # Globale Verbindungsvariablen
 _CONNECTION = None
 
-
-# _CURSOR_FACTORY wird nicht mehr benötigt
 
 def hash_password(password):
     return hashlib.sha256(password.encode('utf-8')).hexdigest()
@@ -34,13 +34,12 @@ def create_connection():
         if _CONNECTION and _CONNECTION.is_connected():
             return _CONNECTION
 
-        # Explizites Setzen des Plugins, um Fehler 2059 zu umgehen
         _CONNECTION = mysql.connector.connect(
             host=DB_HOST,
             user=DB_USER,
             password=DB_PASS,
             database=DATABASE_NAME,
-            auth_plugin=AUTH_PLUGIN  # NEU HINZUGEFÜGT
+            auth_plugin=AUTH_PLUGIN
         )
         return _CONNECTION
     except mysql.connector.Error as err:
@@ -49,17 +48,13 @@ def create_connection():
 
 
 def execute_query(query, params=None, fetch_one=False, fetch_all=False, commit=False):
-    """
-    Führt eine SQL-Abfrage aus. Verwendet %s als Platzhalter. (Funktion in der MySQL-Version nicht mehr primär genutzt,
-    aber als Fallback beibehalten. Die meisten Funktionen nutzen explizite Cursors.)
-    """
+    """Führt eine SQL-Abfrage aus. (Zurückgegeben wird ein Tupel-Cursor)"""
     conn = create_connection()
     if conn is None:
         return False, "Keine Datenbankverbindung."
 
     cursor = None
     try:
-        # Hier wird der Standard-Cursor verwendet, der Tupel zurückgibt.
         cursor = conn.cursor()
         cursor.execute(query, params or ())
 
@@ -85,15 +80,13 @@ def execute_query(query, params=None, fetch_one=False, fetch_all=False, commit=F
 def _create_database_if_not_exists():
     """Versucht, die Datenbank zu erstellen, falls sie nicht existiert."""
     try:
-        # Auch für die temporäre Verbindung muss das Plugin gesetzt werden!
         temp_conn = mysql.connector.connect(
             host=DB_HOST,
             user=DB_USER,
             password=DB_PASS,
-            auth_plugin=AUTH_PLUGIN  # NEU HINZUGEFÜGT
+            auth_plugin=AUTH_PLUGIN
         )
         temp_cursor = temp_conn.cursor()
-        # Erstellt die Datenbank, falls sie nicht existiert
         temp_cursor.execute(
             f"CREATE DATABASE IF NOT EXISTS {DATABASE_NAME} CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci")
         temp_conn.close()
@@ -107,7 +100,7 @@ def _create_database_if_not_exists():
 
 
 def _add_column_if_not_exists(cursor, table_name, column_name, column_type):
-    """(DEAKTIVIERT FÜR MYSQL) Die Spaltendefinitionen sind nun in initialize_db enthalten."""
+    """(DEAKTIVIERT FÜR MYSQL)"""
     pass
 
 
@@ -124,7 +117,7 @@ def initialize_db():
     try:
         cursor = conn.cursor()
 
-        # Alle CREATE TABLE Statements in MySQL-Dialekt konvertiert
+        # Bestehende Tabellen (hier gekürzt)
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS users (
                 id INT AUTO_INCREMENT PRIMARY KEY,
@@ -254,6 +247,29 @@ def initialize_db():
             );
         """)
 
+        # --- NEUE KONFIGURATIONSTABELLEN FÜR ZENTRALISIERUNG ---
+        # 1. Speicherung komplexer Regeln (Staffing, Holidays, Menu Config)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS config_general (
+                key_name VARCHAR(255) PRIMARY KEY,
+                value_json TEXT NOT NULL
+            );
+        """)
+        # 2. Speicherung von Zählern (shift_frequency.json)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS config_shift_frequency (
+                abbreviation VARCHAR(10) PRIMARY KEY,
+                count INT NOT NULL DEFAULT 0
+            );
+        """)
+        # 3. Speicherung von einfachen Key-Value-Einstellungen (request_config.json)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS config_request_settings (
+                setting_name VARCHAR(255) PRIMARY KEY,
+                setting_value VARCHAR(255) NOT NULL
+            );
+        """)
+
         conn.commit()
     except mysql.connector.Error as e:
         print(f"Initialisierungsfehler bei CREATE TABLE: {e}")
@@ -261,7 +277,145 @@ def initialize_db():
         cursor.close()
 
 
-# -------------------- ACTIVITY LOG & NOTIFICATIONS (MySQL implementation) --------------------
+# -------------------- KONFIGURATIONSMANAGEMENT (MySQL implementation) --------------------
+
+def load_general_config(key_name, default_value=None):
+    """Lädt eine Konfiguration, die als JSON-String in der DB gespeichert ist."""
+    conn = create_connection()
+    if conn is None: return default_value
+    try:
+        cursor = conn.cursor(dictionary=True)
+        cursor.execute("SELECT value_json FROM config_general WHERE key_name = %s", (key_name,))
+        row = cursor.fetchone()
+        if row:
+            return json.loads(row['value_json'])
+        return default_value
+    except (mysql.connector.Error, json.JSONDecodeError) as e:
+        print(f"Fehler beim Laden der Konfig '{key_name}': {e}")
+        return default_value
+    finally:
+        cursor.close()
+
+
+def save_general_config(key_name, config_data):
+    """Speichert eine Konfiguration als JSON-String in der DB."""
+    conn = create_connection()
+    if conn is None: return False
+    try:
+        cursor = conn.cursor()
+        value_json = json.dumps(config_data)
+
+        cursor.execute("""
+            REPLACE INTO config_general (key_name, value_json) VALUES (%s, %s)
+        """, (key_name, value_json))
+
+        conn.commit()
+        return True
+    except mysql.connector.Error as e:
+        conn.rollback()
+        print(f"Fehler beim Speichern der Konfig '{key_name}': {e}")
+        return False
+    finally:
+        cursor.close()
+
+
+# --- Spezifische Helfer für Staffing Rules (ersetzt min_staffing_rules.json) ---
+def load_staffing_rules():
+    default_rules = {"Daily": {}, "Sa-So": {}, "Fr": {}, "Mo-Do": {}, "Holiday": {}, "Colors": {}}
+    return load_general_config('min_staffing_rules', default_rules)
+
+
+def save_staffing_rules(rules_data):
+    return save_general_config('min_staffing_rules', rules_data)
+
+
+# --- Spezifische Helfer für Holidays (ersetzt holidays_config.json) ---
+def load_holiday_config():
+    default_config = {"state": "BB"}
+    return load_general_config('holidays_config', default_config)
+
+
+def save_holiday_config(config_data):
+    return save_general_config('holidays_config', config_data)
+
+
+# --- Spezifische Helfer für Request Settings (ersetzt request_config.json) ---
+def load_request_settings():
+    conn = create_connection()
+    default_settings = {"max_requests_per_month": "2", "max_total_requests": "3"}
+    if conn is None: return default_settings
+    try:
+        cursor = conn.cursor(dictionary=True)
+        cursor.execute("SELECT setting_name, setting_value FROM config_request_settings")
+
+        db_settings = {row['setting_name']: row['setting_value'] for row in cursor.fetchall()}
+        default_settings.update(db_settings)
+        return default_settings
+
+    except mysql.connector.Error as e:
+        print(f"Fehler beim Laden der Request Settings: {e}")
+        return default_settings
+    finally:
+        cursor.close()
+
+
+def save_request_setting(setting_name, setting_value):
+    conn = create_connection()
+    if conn is None: return False
+    try:
+        cursor = conn.cursor()
+        cursor.execute("""
+            REPLACE INTO config_request_settings (setting_name, setting_value) VALUES (%s, %s)
+        """, (setting_name, setting_value))
+        conn.commit()
+        return True
+    except mysql.connector.Error as e:
+        conn.rollback()
+        print(f"Fehler beim Speichern der Request Setting: {e}")
+        return False
+    finally:
+        cursor.close()
+
+
+# --- Spezifische Helfer für Shift Frequency (ersetzt shift_frequency.json) ---
+def load_shift_frequency():
+    """Lädt die Schichthäufigkeitszähler aus der DB."""
+    conn = create_connection()
+    if conn is None: return {}
+    try:
+        cursor = conn.cursor(dictionary=True)
+        cursor.execute("SELECT abbreviation, count FROM config_shift_frequency")
+        return {row['abbreviation']: row['count'] for row in cursor.fetchall()}
+    except mysql.connector.Error as e:
+        print(f"Fehler beim Laden der Schichthäufigkeit: {e}")
+        return {}
+    finally:
+        cursor.close()
+
+
+def save_shift_frequency(frequency_data):
+    """Speichert die Schichthäufigkeitszähler in der DB."""
+    conn = create_connection()
+    if conn is None: return False
+    try:
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM config_shift_frequency")
+
+        insert_data = [(abbrev, count) for abbrev, count in frequency_data.items()]
+        if insert_data:
+            cursor.executemany("INSERT INTO config_shift_frequency (abbreviation, count) VALUES (%s, %s)", insert_data)
+
+        conn.commit()
+        return True
+    except mysql.connector.Error as e:
+        conn.rollback()
+        print(f"Fehler beim Speichern der Schichthäufigkeit: {e}")
+        return False
+    finally:
+        cursor.close()
+
+
+# -------------------- ACTIVITY LOG & NOTIFICATIONS --------------------
 
 def _log_activity(cursor, user_id, action_type, details):
     timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
@@ -283,7 +437,6 @@ def get_unread_admin_notifications():
     conn = create_connection()
     if conn is None: return []
     try:
-        # Cursor mit dictionary=True anfordern
         cursor = conn.cursor(dictionary=True)
         cursor.execute("SELECT id, message FROM admin_notifications WHERE is_read = 0 ORDER BY timestamp ASC")
         return cursor.fetchall()
@@ -316,9 +469,7 @@ def get_all_logs_formatted():
     conn = create_connection()
     if conn is None: return []
     try:
-        # Cursor mit dictionary=True anfordern
         cursor = conn.cursor(dictionary=True)
-        # MySQL CONCAT für die Namenszusammenführung
         cursor.execute("""
             SELECT
                 a.timestamp,
@@ -331,7 +482,6 @@ def get_all_logs_formatted():
         """)
         results = cursor.fetchall()
 
-        # FIX: Konvertiere das MySQL datetime.datetime Objekt in einen String (wie von der GUI erwartet)
         for row in results:
             if row['timestamp']:
                 row['timestamp'] = row['timestamp'].strftime('%Y-%m-%d %H:%M:%S')
@@ -344,13 +494,11 @@ def get_all_logs_formatted():
         cursor.close()
 
 
-# -------------------- BUG REPORTS (MySQL implementation) --------------------
-
+# -------------------- BUG REPORTS --------------------
 def submit_bug_report(user_id, title, description):
     conn = create_connection()
     if conn is None: return False, "Keine Datenbankverbindung."
     try:
-        # Cursor mit dictionary=True anfordern
         cursor = conn.cursor(dictionary=True)
         timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         cursor.execute(
@@ -362,7 +510,6 @@ def submit_bug_report(user_id, title, description):
         user_role = cursor.fetchone()
 
         if user_role and user_role.get('role') not in ["Admin", "SuperAdmin"]:
-            # Erstelle einen neuen Standard-Cursor für die Log-Funktion, falls benötigt
             _create_admin_notification(conn.cursor(), "Ein neuer Bug-Report wurde eingereicht.")
 
         conn.commit()
@@ -394,7 +541,6 @@ def get_all_bug_reports():
     conn = create_connection()
     if conn is None: return []
     try:
-        # Cursor mit dictionary=True anfordern
         cursor = conn.cursor(dictionary=True)
         cursor.execute("""
             SELECT b.id, u.vorname, u.name, b.timestamp, b.title, b.description, b.status, b.archived, b.admin_notes
@@ -404,7 +550,6 @@ def get_all_bug_reports():
         """)
         results = cursor.fetchall()
 
-        # FIX: Konvertiere das MySQL datetime.datetime Objekt in einen String (wie von der GUI erwartet)
         for row in results:
             if row['timestamp']:
                 row['timestamp'] = row['timestamp'].strftime('%Y-%m-%d %H:%M:%S')
@@ -422,7 +567,6 @@ def get_visible_bug_reports():
     conn = create_connection()
     if conn is None: return []
     try:
-        # Cursor mit dictionary=True anfordern
         cursor = conn.cursor(dictionary=True)
         cursor.execute("""
             SELECT b.id, b.timestamp, b.title, b.description, b.status, b.admin_notes
@@ -432,7 +576,6 @@ def get_visible_bug_reports():
         """)
         results = cursor.fetchall()
 
-        # FIX: Konvertiere das MySQL datetime.datetime Objekt in einen String (wie von der GUI erwartet)
         for row in results:
             if row['timestamp']:
                 row['timestamp'] = row['timestamp'].strftime('%Y-%m-%d %H:%M:%S')
@@ -482,7 +625,6 @@ def update_bug_report_notes(bug_id, notes):
 
 
 def archive_bug_report(bug_id):
-    """Setzt den 'archived' Status für einen Bug-Report auf 1."""
     conn = create_connection()
     if conn is None: return False, "Keine Datenbankverbindung."
     try:
@@ -501,7 +643,6 @@ def archive_bug_report(bug_id):
 
 
 def unarchive_bug_report(bug_id):
-    """Setzt den 'archived' Status für einen Bug-Report auf 0 zurück."""
     conn = create_connection()
     if conn is None: return False, "Keine Datenbankverbindung."
     try:
@@ -520,7 +661,6 @@ def unarchive_bug_report(bug_id):
 
 
 def delete_bug_reports(report_ids):
-    """Löscht einen oder mehrere Bug-Reports endgültig aus der Datenbank."""
     if not report_ids:
         return False, "Keine IDs zum Löschen übergeben."
 
@@ -550,7 +690,6 @@ def get_unnotified_bug_reports_for_user(user_id):
     conn = create_connection()
     if conn is None: return []
     try:
-        # Cursor mit dictionary=True anfordern
         cursor = conn.cursor(dictionary=True)
         cursor.execute(
             "SELECT id, title, status FROM bug_reports WHERE user_id = %s AND user_notified = 0",
@@ -582,8 +721,7 @@ def mark_bug_reports_as_notified(report_ids):
         cursor.close()
 
 
-# -------------------- WUNSCHFREI & REQUESTS (MySQL implementation) --------------------
-
+# -------------------- WUNSCHFREI & REQUESTS --------------------
 def submit_user_request(user_id, request_date_str, requested_shift=None):
     """Speichert oder aktualisiert eine Benutzeranfrage (Wunschfrei oder Schichtpräferenz)."""
     conn = create_connection()
@@ -591,8 +729,6 @@ def submit_user_request(user_id, request_date_str, requested_shift=None):
     try:
         cursor = conn.cursor()
         shift_to_store = "WF" if requested_shift is None else requested_shift
-
-        # MySQL ON DUPLICATE KEY UPDATE für atomares UPDATE/INSERT
         cursor.execute("""
             INSERT INTO wunschfrei_requests (user_id, request_date, requested_shift, status, notified, rejection_reason)
             VALUES (%s, %s, %s, 'Ausstehend', 0, NULL)
@@ -616,7 +752,6 @@ def withdraw_wunschfrei_request(request_id, user_id):
     conn = create_connection()
     if conn is None: return False, "Keine Datenbankverbindung."
     try:
-        # Cursor mit dictionary=True anfordern
         cursor = conn.cursor(dictionary=True)
 
         cursor.execute("SELECT * FROM wunschfrei_requests WHERE id = %s AND user_id = %s", (request_id, user_id))
@@ -633,22 +768,18 @@ def withdraw_wunschfrei_request(request_id, user_id):
             conn.rollback()
             return False, "Nur ausstehende, genehmigte oder abgelehnte Anträge können zurückgezogen werden."
 
-        # Delete the request
         cursor.execute("DELETE FROM wunschfrei_requests WHERE id = %s", (request_id,))
 
-        # Get user info for logging
         cursor.execute("SELECT vorname, name FROM users WHERE id = %s", (user_id,))
         user = cursor.fetchone()
         user_name = f"{user['vorname']} {user['name']}" if user else "Unbekannter Benutzer"
 
         date_formatted = datetime.strptime(request_date, '%Y-%m-%d').strftime('%d.%m.%Y')
 
-        # Logging based on status
         if status == 'Genehmigt':
             cursor.execute("DELETE FROM shift_schedule WHERE user_id = %s AND shift_date = %s",
                            (user_id, request_date))
             details = f"Benutzer '{user_name}' hat genehmigten Antrag für {date_formatted} zurückgezogen."
-            # Hier muss ein Standard-Cursor verwendet werden, da _log_activity dies erwartet
             _log_activity(conn.cursor(), user_id, "ANTRAG_GENEHMIGT_ZURÜCKGEZOGEN", details)
             _create_admin_notification(conn.cursor(), details)
             msg = "Genehmigter Antrag wurde zurückgezogen."
@@ -694,7 +825,6 @@ def get_pending_wunschfrei_requests():
     conn = create_connection()
     if conn is None: return []
     try:
-        # Cursor mit dictionary=True anfordern
         cursor = conn.cursor(dictionary=True)
         cursor.execute("""
             SELECT wr.id, u.vorname, u.name, wr.request_date, wr.user_id, wr.requested_shift
@@ -703,7 +833,6 @@ def get_pending_wunschfrei_requests():
             WHERE wr.status = 'Ausstehend'
             ORDER BY wr.request_date ASC
         """)
-        # Konvertiere MySQL Date-Objekte in Strings
         results = cursor.fetchall()
         for row in results:
             if row['request_date']:
@@ -721,7 +850,6 @@ def get_wunschfrei_request_by_user_and_date(user_id, request_date_str):
     conn = create_connection()
     if conn is None: return None
     try:
-        # Cursor mit dictionary=True anfordern
         cursor = conn.cursor(dictionary=True)
         cursor.execute(
             "SELECT id, user_id, request_date, status, requested_shift FROM wunschfrei_requests WHERE user_id = %s AND request_date = %s",
@@ -742,7 +870,6 @@ def get_wunschfrei_requests_for_month(year, month):
     conn = create_connection()
     if conn is None: return {}
     try:
-        # Cursor mit dictionary=True anfordern
         cursor = conn.cursor(dictionary=True)
         start_date = date(year, month, 1).strftime('%Y-%m-%d')
         end_date = date(year, month, calendar.monthrange(year, month)[1]).strftime('%Y-%m-%d')
@@ -755,7 +882,6 @@ def get_wunschfrei_requests_for_month(year, month):
             user_id_str = str(row['user_id'])
             if user_id_str not in requests:
                 requests[user_id_str] = {}
-            # Konvertiere MySQL Date-Objekte in Strings
             date_str = row['request_date'].strftime('%Y-%m-%d') if row['request_date'] else None
             requests[user_id_str][date_str] = (row['status'], row['requested_shift'])
         return requests
@@ -788,7 +914,6 @@ def get_all_requests_by_user(user_id):
     conn = create_connection()
     if conn is None: return []
     try:
-        # Cursor mit dictionary=True anfordern
         cursor = conn.cursor(dictionary=True)
         cursor.execute(
             "SELECT id, request_date, status, rejection_reason, requested_shift FROM wunschfrei_requests WHERE user_id = %s ORDER BY request_date DESC",
@@ -810,7 +935,6 @@ def get_unnotified_requests(user_id):
     conn = create_connection()
     if conn is None: return []
     try:
-        # Cursor mit dictionary=True anfordern
         cursor = conn.cursor(dictionary=True)
         cursor.execute(
             "SELECT id, request_date, status, rejection_reason FROM wunschfrei_requests WHERE user_id = %s AND notified = 0 AND status != 'Ausstehend'",
@@ -846,8 +970,7 @@ def mark_requests_as_notified(request_ids):
         cursor.close()
 
 
-# -------------------- SHIFT SCHEDULE (MySQL implementation) --------------------
-
+# -------------------- SHIFT SCHEDULE --------------------
 def save_shift_entry(user_id, shift_date_str, shift_abbrev):
     conn = create_connection()
     if conn is None: return False, "Keine Datenbankverbindung."
@@ -858,7 +981,6 @@ def save_shift_entry(user_id, shift_date_str, shift_abbrev):
             cursor.execute("DELETE FROM shift_schedule WHERE user_id = %s AND shift_date = %s",
                            (user_id, shift_date_str))
         else:
-            # MySQL ON DUPLICATE KEY UPDATE für atomares UPDATE/INSERT
             cursor.execute("""
                 INSERT INTO shift_schedule (user_id, shift_date, shift_abbrev)
                 VALUES (%s, %s, %s)
@@ -866,7 +988,6 @@ def save_shift_entry(user_id, shift_date_str, shift_abbrev):
                     shift_abbrev = VALUES(shift_abbrev);
             """, (user_id, shift_date_str, shift_abbrev))
 
-        # Lösche zugehörige wunschfrei_requests, wenn es kein temporärer 'X' Override ist
         if shift_abbrev != 'X':
             cursor.execute("DELETE FROM wunschfrei_requests WHERE user_id = %s AND request_date = %s",
                            (user_id, shift_date_str))
@@ -885,7 +1006,6 @@ def get_shifts_for_month(year, month):
     conn = create_connection()
     if conn is None: return {}
     try:
-        # Cursor mit dictionary=True anfordern
         cursor = conn.cursor(dictionary=True)
         start_date = date(year, month, 1).strftime('%Y-%m-%d')
         end_date = date(year, month, calendar.monthrange(year, month)[1]).strftime('%Y-%m-%d')
@@ -902,7 +1022,6 @@ def get_shifts_for_month(year, month):
             if user_id not in shifts:
                 shifts[user_id] = {}
 
-            # Konvertiere MySQL Date-Objekte in Strings
             date_str = row['shift_date'].strftime('%Y-%m-%d') if row['shift_date'] else None
             shifts[user_id][date_str] = row['shift_abbrev']
 
@@ -919,7 +1038,6 @@ def get_daily_shift_counts_for_month(year, month):
     conn = create_connection()
     if conn is None: return {}
     try:
-        # Cursor mit dictionary=True anfordern
         cursor = conn.cursor(dictionary=True)
         start_date = date(year, month, 1).strftime('%Y-%m-%d')
         end_date = date(year, month, calendar.monthrange(year, month)[1]).strftime('%Y-%m-%d')
@@ -936,7 +1054,6 @@ def get_daily_shift_counts_for_month(year, month):
 
         daily_counts = {}
         for row in cursor.fetchall():
-            # Konvertiere MySQL Date-Objekte in Strings
             shift_date = row['shift_date'].strftime('%Y-%m-%d') if row['shift_date'] else None
             if shift_date not in daily_counts:
                 daily_counts[shift_date] = {}
@@ -951,13 +1068,11 @@ def get_daily_shift_counts_for_month(year, month):
         cursor.close()
 
 
-# -------------------- SHIFT TYPES (MySQL implementation) --------------------
-
+# -------------------- SHIFT TYPES --------------------
 def get_all_shift_types():
     conn = create_connection()
     if conn is None: return []
     try:
-        # Cursor mit dictionary=True anfordern
         cursor = conn.cursor(dictionary=True)
         cursor.execute(
             "SELECT id, name, abbreviation, hours, description, color, start_time, end_time FROM shift_types ORDER BY abbreviation")
@@ -1023,7 +1138,6 @@ def delete_shift_type(shift_type_id):
     conn = create_connection()
     if conn is None: return False, "Keine Datenbankverbindung."
     try:
-        # Cursor mit dictionary=True anfordern
         cursor = conn.cursor(dictionary=True)
 
         cursor.execute("SELECT abbreviation FROM shift_types WHERE id = %s", (shift_type_id,))
@@ -1032,7 +1146,6 @@ def delete_shift_type(shift_type_id):
         cursor.execute("DELETE FROM shift_types WHERE id = %s", (shift_type_id,))
 
         if abbrev:
-            # Hier muss ein Standard-Cursor verwendet werden, also neuen Cursor erstellen
             order_cursor = conn.cursor()
             order_cursor.execute("DELETE FROM shift_order WHERE abbreviation = %s", (abbrev['abbreviation'],))
             order_cursor.close()
@@ -1050,7 +1163,6 @@ def get_ordered_shift_abbrevs(include_hidden=False):
     conn = create_connection()
     if conn is None: return []
     try:
-        # Cursor mit dictionary=True anfordern
         cursor = conn.cursor(dictionary=True)
         cursor.execute("SELECT * FROM shift_types")
         shift_types_data = {st['abbreviation']: dict(st) for st in cursor.fetchall()}
@@ -1107,13 +1219,11 @@ def save_shift_order(order_data_list):
         cursor.close()
 
 
-# -------------------- DOGS (MySQL implementation) --------------------
-
+# -------------------- DOGS --------------------
 def get_all_dogs():
     conn = create_connection()
     if conn is None: return []
     try:
-        # Cursor mit dictionary=True anfordern
         cursor = conn.cursor(dictionary=True)
         cursor.execute("SELECT * FROM dogs ORDER BY name")
         return cursor.fetchall()
@@ -1168,7 +1278,6 @@ def delete_dog(dog_id):
     conn = create_connection()
     if conn is None: return False
     try:
-        # Cursor mit dictionary=True anfordern
         cursor = conn.cursor(dictionary=True)
 
         cursor.execute("SELECT name FROM dogs WHERE id = %s", (dog_id,))
@@ -1176,7 +1285,6 @@ def delete_dog(dog_id):
 
         if dog_name_row:
             dog_name = dog_name_row['name']
-            # Hier muss ein Standard-Cursor verwendet werden, also neuen Cursor erstellen
             user_cursor = conn.cursor()
             user_cursor.execute("UPDATE users SET diensthund = '' WHERE diensthund = %s", (dog_name,))
             user_cursor.close()
@@ -1196,7 +1304,6 @@ def get_dog_handlers(dog_name):
     conn = create_connection()
     if conn is None: return []
     try:
-        # Cursor mit dictionary=True anfordern
         cursor = conn.cursor(dictionary=True)
         cursor.execute("SELECT id, vorname, name FROM users WHERE diensthund = %s", (dog_name,))
         return cursor.fetchall()
@@ -1224,7 +1331,6 @@ def get_available_dogs():
     conn = create_connection()
     if conn is None: return []
     try:
-        # Cursor mit dictionary=True anfordern
         cursor = conn.cursor(dictionary=True)
         cursor.execute("""
             SELECT d.name FROM dogs d
@@ -1259,8 +1365,7 @@ def assign_dog(dog_name, user_id):
         cursor.close()
 
 
-# -------------------- USERS (MySQL implementation) --------------------
-
+# -------------------- USERS --------------------
 def get_user_count():
     conn = create_connection()
     if conn is None: return 0
@@ -1297,9 +1402,7 @@ def check_login(vorname, name, password):
     conn = create_connection()
     if conn is None: return None
     try:
-        # Cursor mit dictionary=True anfordern
         cursor = conn.cursor(dictionary=True)
-        # MySQL LOWER() für case-insensitive comparison
         cursor.execute("SELECT * FROM users WHERE LOWER(vorname) = LOWER(%s) AND LOWER(name) = LOWER(%s)",
                        (vorname, name))
         user = cursor.fetchone()
@@ -1317,7 +1420,6 @@ def get_all_users():
     conn = create_connection()
     if conn is None: return {}
     try:
-        # Cursor mit dictionary=True anfordern
         cursor = conn.cursor(dictionary=True)
         cursor.execute("SELECT * FROM users ORDER BY name")
         users = cursor.fetchall()
@@ -1340,7 +1442,6 @@ def get_ordered_users_for_schedule(include_hidden=False):
             query += " WHERE COALESCE(uo.is_visible, 1) = 1"
         query += " ORDER BY sort_order ASC, u.name ASC"
 
-        # Cursor mit dictionary=True anfordern
         cursor = conn.cursor(dictionary=True)
         cursor.execute(query)
 
@@ -1377,10 +1478,22 @@ def update_user(user_id, data):
         cursor = conn.cursor()
         data['urlaub_rest'] = data.get('urlaub_gesamt', 30)
 
-        cursor.execute(
-            "UPDATE users SET vorname = %s, name = %s, geburtstag = %s, telefon = %s, diensthund = %s, urlaub_gesamt = %s, urlaub_rest = %s, role = %s, entry_date = %s WHERE id = %s",
-            (data['vorname'], data['name'], data['geburtstag'], data['telefon'], data['diensthund'],
-             data['urlaub_gesamt'], data['urlaub_rest'], data['role'], data['entry_date'], user_id))
+        # SQL-Query wird dynamisch erstellt, um optional das Passwort zu ändern
+        fields = ['vorname', 'name', 'geburtstag', 'telefon', 'diensthund', 'urlaub_gesamt', 'urlaub_rest', 'role',
+                  'entry_date']
+        values = [data['vorname'], data['name'], data['geburtstag'], data['telefon'], data['diensthund'],
+                  data['urlaub_gesamt'], data['urlaub_rest'], data['role'], data['entry_date']]
+
+        if 'password' in data and data['password']:
+            fields.append('password_hash')
+            values.append(hash_password(data['password']))
+
+        values.append(user_id)
+
+        set_clause = ', '.join([f"{field} = %s" for field in fields])
+        sql = f"UPDATE users SET {set_clause} WHERE id = %s"
+
+        cursor.execute(sql, tuple(values))
         conn.commit()
         return True
     except mysql.connector.Error as e:
@@ -1415,7 +1528,6 @@ def delete_user(user_id):
     try:
         cursor = conn.cursor()
 
-        # MySQL's ON DELETE CASCADE sollte die zugehörigen Einträge löschen
         cursor.execute("DELETE FROM users WHERE id = %s", (user_id,))
 
         conn.commit()
@@ -1427,8 +1539,6 @@ def delete_user(user_id):
     finally:
         cursor.close()
 
-
-# -------------------- VACATION REQUESTS (MySQL implementation) --------------------
 
 def add_vacation_request(user_id, start_date, end_date):
     conn = create_connection()
@@ -1453,7 +1563,6 @@ def get_requests_by_user(user_id):
     conn = create_connection()
     if conn is None: return []
     try:
-        # Cursor mit dictionary=True anfordern
         cursor = conn.cursor(dictionary=True)
         cursor.execute("SELECT * FROM vacation_requests WHERE user_id = %s ORDER BY start_date DESC", (user_id,))
         results = cursor.fetchall()
@@ -1475,7 +1584,6 @@ def get_pending_vacation_requests():
     conn = create_connection()
     if conn is None: return []
     try:
-        # Cursor mit dictionary=True anfordern
         cursor = conn.cursor(dictionary=True)
         cursor.execute(
             """SELECT vr.id, u.vorname, u.name, vr.start_date, vr.end_date, vr.status 
