@@ -44,6 +44,7 @@ def initialize_db():
                 urlaub_gesamt INTEGER DEFAULT 30,
                 urlaub_rest INTEGER DEFAULT 30,
                 entry_date TEXT,
+                has_seen_tutorial INTEGER DEFAULT 0,
                 UNIQUE (vorname, name)
             );
         """)
@@ -56,6 +57,7 @@ def initialize_db():
                 status TEXT NOT NULL,
                 request_date TEXT NOT NULL,
                 archived INTEGER DEFAULT 0,
+                user_notified INTEGER DEFAULT 1,
                 FOREIGN KEY (user_id) REFERENCES users (id)
             );
         """)
@@ -175,6 +177,8 @@ def initialize_db():
         _add_column_if_not_exists(cursor, "bug_reports", "admin_notes", "TEXT")
         _add_column_if_not_exists(cursor, "users", "has_seen_tutorial", "INTEGER DEFAULT 0")
         _add_column_if_not_exists(cursor, "vacation_requests", "archived", "INTEGER DEFAULT 0")
+        _add_column_if_not_exists(cursor, "vacation_requests", "user_notified", "INTEGER DEFAULT 1")
+
 
         conn.commit()
     finally:
@@ -971,6 +975,19 @@ def get_user_count():
         conn.close()
 
 
+def get_user_by_id(user_id):
+    """ Holt einen einzelnen Benutzer anhand seiner ID. """
+    conn = create_connection()
+    try:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM users WHERE id = ?", (user_id,))
+        user = cursor.fetchone()
+        return dict(user) if user else None
+    finally:
+        if conn:
+            conn.close()
+
+
 def add_user(vorname, name, password):
     conn = create_connection()
     try:
@@ -1121,17 +1138,18 @@ def get_all_vacation_requests_for_admin():
     try:
         cursor = conn.cursor()
         cursor.execute("""
-            SELECT vr.id, u.vorname, u.name, vr.start_date, vr.end_date, vr.status, vr.archived 
-            FROM vacation_requests vr 
-            JOIN users u ON vr.user_id = u.id 
-            ORDER BY 
+            SELECT vr.id, u.id as user_id, u.vorname, u.name, vr.start_date, vr.end_date, vr.status, vr.archived
+            FROM vacation_requests vr
+            JOIN users u ON vr.user_id = u.id
+            ORDER BY
                 vr.archived,
                 CASE vr.status
                     WHEN 'Ausstehend' THEN 1
                     WHEN 'Genehmigt' THEN 2
-                    WHEN 'Abgelehnt' THEN 3
-                    ELSE 4
-                END, 
+                    WHEN 'Storniert' THEN 3
+                    WHEN 'Abgelehnt' THEN 4
+                    ELSE 5
+                END,
                 vr.request_date ASC
         """)
         return [dict(row) for row in cursor.fetchall()]
@@ -1140,10 +1158,11 @@ def get_all_vacation_requests_for_admin():
 
 
 def update_vacation_request_status(request_id, new_status):
+    """Aktualisiert nur den Status eines Urlaubsantrags und setzt den Notified-Flag."""
     conn = create_connection()
     try:
         cursor = conn.cursor()
-        cursor.execute("UPDATE vacation_requests SET status = ? WHERE id = ?", (new_status, request_id))
+        cursor.execute("UPDATE vacation_requests SET status = ?, user_notified = 0 WHERE id = ?", (new_status, request_id))
         conn.commit()
         return True, "Urlaubsstatus erfolgreich aktualisiert."
     except sqlite3.Error as e:
@@ -1153,7 +1172,62 @@ def update_vacation_request_status(request_id, new_status):
         conn.close()
 
 
-def archive_vacation_request(request_id, admin_id):
+def approve_vacation_request(request_id, admin_id):
+    """
+    Genehmigt einen Urlaubsantrag, aktualisiert den Status und trägt die
+    Urlaubstage ('U') in den Schichtplan ein.
+    """
+    conn = create_connection()
+    try:
+        cursor = conn.cursor()
+        cursor.execute("BEGIN TRANSACTION")
+
+        # Antragsdetails holen
+        cursor.execute("SELECT * FROM vacation_requests WHERE id = ?", (request_id,))
+        request_data = cursor.fetchone()
+        if not request_data:
+            conn.rollback()
+            return False, "Antrag nicht gefunden."
+
+        # Status auf 'Genehmigt' setzen und für Benachrichtigung markieren
+        cursor.execute("UPDATE vacation_requests SET status = 'Genehmigt', user_notified = 0 WHERE id = ?", (request_id,))
+
+        # Urlaubstage in den Schichtplan eintragen
+        user_id = request_data['user_id']
+        start_date = datetime.strptime(request_data['start_date'], '%Y-%m-%d').date()
+        end_date = datetime.strptime(request_data['end_date'], '%Y-%m-%d').date()
+
+        current_date = start_date
+        while current_date <= end_date:
+            date_str = current_date.strftime('%Y-%m-%d')
+            # Bestehenden Eintrag überschreiben oder neuen einfügen
+            cursor.execute("""
+                INSERT INTO shift_schedule (user_id, shift_date, shift_abbrev)
+                VALUES (?, ?, 'U')
+                ON CONFLICT(user_id, shift_date) DO UPDATE SET shift_abbrev = 'U';
+            """, (user_id, date_str))
+            current_date += timedelta(days=1)
+
+        _log_activity(cursor, admin_id, "URLAUB_GENEHMIGT",
+                      f"Admin (ID: {admin_id}) hat Urlaubsantrag (ID: {request_id}) für Benutzer (ID: {user_id}) genehmigt.")
+
+        conn.commit()
+        return True, "Urlaubsantrag genehmigt und im Plan eingetragen."
+    except sqlite3.Error as e:
+        conn.rollback()
+        return False, f"Datenbankfehler: {e}"
+    except Exception as e:
+        conn.rollback()
+        return False, f"Ein unerwarteter Fehler ist aufgetreten: {e}"
+    finally:
+        conn.close()
+
+
+def cancel_vacation_request(request_id, admin_id):
+    """
+    Storniert einen GENEHMIGTEN Urlaubsantrag. Ändert den Status zu 'Storniert',
+    entfernt die Urlaubstage aus dem Plan und benachrichtigt den Benutzer.
+    """
     conn = create_connection()
     try:
         cursor = conn.cursor()
@@ -1163,26 +1237,47 @@ def archive_vacation_request(request_id, admin_id):
         request_data = cursor.fetchone()
         if not request_data:
             return False, "Antrag nicht gefunden."
+        if request_data['status'] != 'Genehmigt':
+            return False, "Nur bereits genehmigte Anträge können storniert werden."
 
+        # Status auf 'Storniert' setzen und für Benachrichtigung markieren
+        cursor.execute("UPDATE vacation_requests SET status = 'Storniert', user_notified = 0 WHERE id = ?", (request_id,))
+
+        # Urlaubstage ('U') aus dem Schichtplan entfernen
         user_id = request_data['user_id']
-
-        cursor.execute("UPDATE vacation_requests SET archived = 1 WHERE id = ?", (request_id,))
-
         start_date = datetime.strptime(request_data['start_date'], '%Y-%m-%d').date()
         end_date = datetime.strptime(request_data['end_date'], '%Y-%m-%d').date()
+
         current_date = start_date
         while current_date <= end_date:
-            cursor.execute("DELETE FROM shift_schedule WHERE user_id = ? AND shift_date = ?",
+            cursor.execute("DELETE FROM shift_schedule WHERE user_id = ? AND shift_date = ? AND shift_abbrev = 'U'",
                            (user_id, current_date.strftime('%Y-%m-%d')))
             current_date += timedelta(days=1)
 
-        _log_activity(cursor, admin_id, "URLAUB_ARCHIVIERT",
-                      f"Admin (ID: {admin_id}) hat Urlaubsantrag (ID: {request_id}) für Benutzer (ID: {user_id}) archiviert.")
+        _log_activity(cursor, admin_id, "URLAUB_STORNIERT",
+                      f"Admin (ID: {admin_id}) hat Urlaubsantrag (ID: {request_id}) für Benutzer (ID: {user_id}) storniert.")
         conn.commit()
-        return True, "Urlaubsantrag wurde archiviert und die Schichten entfernt."
+        return True, "Urlaub wurde storniert und aus dem Plan entfernt."
     except sqlite3.Error as e:
         conn.rollback()
         return False, f"Datenbankfehler: {e}"
+    finally:
+        conn.close()
+
+
+def archive_vacation_request(request_id, admin_id):
+    """Archiviert einen Urlaubsantrag, ohne den Status oder Plan zu ändern."""
+    conn = create_connection()
+    try:
+        cursor = conn.cursor()
+        cursor.execute("UPDATE vacation_requests SET archived = 1 WHERE id = ?", (request_id,))
+        _log_activity(cursor, admin_id, "URLAUB_ARCHIVIERT",
+                      f"Admin (ID: {admin_id}) hat Urlaubsantrag (ID: {request_id}) archiviert.")
+        conn.commit()
+        return True, "Urlaubsantrag wurde archiviert."
+    except sqlite3.Error as e:
+        conn.rollback()
+        return False, f"Datenbankfehler beim Archivieren: {e}"
     finally:
         conn.close()
 
@@ -1235,5 +1330,34 @@ def set_user_tutorial_seen(user_id):
     except sqlite3.Error as e:
         print(f"DB-Fehler beim Setzen des Tutorial-Status: {e}")
         return False
+    finally:
+        conn.close()
+
+
+def get_unnotified_vacation_requests_for_user(user_id):
+    """Holt alle Urlaubsanträge für einen Benutzer, über die er noch nicht benachrichtigt wurde."""
+    conn = create_connection()
+    try:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT id, start_date, end_date, status FROM vacation_requests WHERE user_id = ? AND user_notified = 0",
+            (user_id,)
+        )
+        return [dict(row) for row in cursor.fetchall()]
+    finally:
+        conn.close()
+
+
+def mark_vacation_requests_as_notified(request_ids):
+    """Markiert Urlaubsanträge als 'vom Benutzer gesehen'."""
+    if not request_ids:
+        return
+    conn = create_connection()
+    try:
+        cursor = conn.cursor()
+        placeholders = ', '.join('?' for _ in request_ids)
+        query = f"UPDATE vacation_requests SET user_notified = 1 WHERE id IN ({placeholders})"
+        cursor.execute(query, request_ids)
+        conn.commit()
     finally:
         conn.close()

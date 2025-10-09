@@ -132,7 +132,7 @@ class MainAdminWindow(tk.Toplevel):
         ShiftTypesTab(self, self.refresh_all_tabs)
 
     def open_bug_report_dialog(self):
-        BugReportDialog(self, self.user_data['id'])
+        BugReportDialog(self, self.user_data['id'], self.check_for_updates)
 
     def logout(self):
         self.withdraw()
@@ -229,6 +229,7 @@ class MainAdminWindow(tk.Toplevel):
                 tab.refresh_plan()
             elif hasattr(tab, 'refresh_data'):
                 tab.refresh_data()
+        self.check_for_updates()
 
     def load_shift_types(self):
         self.shift_types_data = {st['abbreviation']: st for st in get_all_shift_types()}

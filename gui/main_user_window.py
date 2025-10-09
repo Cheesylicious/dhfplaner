@@ -15,7 +15,8 @@ from .dialogs.tutorial_window import TutorialWindow
 from .holiday_manager import HolidayManager
 from database.db_manager import (
     get_all_shift_types, get_unnotified_requests, mark_requests_as_notified,
-    get_unnotified_bug_reports_for_user, mark_bug_reports_as_notified
+    get_unnotified_bug_reports_for_user, mark_bug_reports_as_notified,
+    get_unnotified_vacation_requests_for_user, mark_vacation_requests_as_notified
 )
 
 USER_TAB_ORDER_FILE = 'user_tab_order_config.json'
@@ -161,15 +162,16 @@ class MainUserWindow(tk.Toplevel):
         self.setup_footer()
 
         self.protocol("WM_DELETE_WINDOW", self.master.on_app_close)
-        self.after(100, self.check_for_wunschfrei_notifications)
-        self.after(200, self.check_for_bug_report_notifications)
+        self.after(500, self.check_all_notifications)
 
     def setup_tabs(self):
+        # KORREKTUR: Die Tabs erhalten jetzt die 'user_data' statt des ganzen Fensters 'self'
+        # Der Schichtplan-Tab ist eine Ausnahme, da er Zugriff auf Methoden wie is_holiday() etc. benötigt.
         self.tab_frames = {
             "Schichtplan": UserShiftPlanTab(self.notebook, self),
-            "Meine Anfragen": MyRequestsTab(self.notebook, self),
-            "Mein Urlaub": VacationTab(self.notebook, self),
-            "Bug-Reports": UserBugReportTab(self.notebook, self)
+            "Meine Anfragen": MyRequestsTab(self.notebook, self.user_data),
+            "Mein Urlaub": VacationTab(self.notebook, self.user_data),
+            "Bug-Reports": UserBugReportTab(self.notebook, self.user_data)
         }
         saved_order = TabOrderManager.load_order()
         final_order = []
@@ -223,31 +225,62 @@ class MainUserWindow(tk.Toplevel):
         if selected_tab_name in new_order:
             self.notebook.select(new_order.index(selected_tab_name))
 
-    def check_for_bug_report_notifications(self):
-        unnotified_reports = get_unnotified_bug_reports_for_user(self.user_data['id'])
-        if not unnotified_reports: return
-        message_lines = ["Es gibt Neuigkeiten zu Ihren Fehlerberichten:"]
-        notified_ids = [report['id'] for report in unnotified_reports]
-        for report in unnotified_reports:
-            title = report['title']
-            status = report['status']
-            message_lines.append(f"- Ihr Bericht '{title[:30]}...' hat jetzt den Status: {status}.")
-        messagebox.showinfo("Status-Update für Fehlerberichte", "\n".join(message_lines), parent=self)
-        mark_bug_reports_as_notified(notified_ids)
+    def check_all_notifications(self):
+        """Prüft alle Benachrichtigungstypen in einer Funktion."""
+        all_messages = []
+        tabs_to_refresh = []
 
-    def check_for_wunschfrei_notifications(self):
-        unnotified = get_unnotified_requests(self.user_data['id'])
-        if not unnotified: return
-        message_lines = ["Sie haben Neuigkeiten zu Ihren 'Wunschfrei'-Anträgen:"]
-        notified_ids = [req['id'] for req in unnotified]
-        for req in unnotified:
-            req_date = datetime.strptime(req['request_date'], '%Y-%m-%d').strftime('%d.%m.%Y')
-            status_line = f"- Ihr Antrag für den {req_date} wurde {req['status']}."
-            if req['status'] == 'Abgelehnt' and req.get('rejection_reason'):
-                status_line += f" Grund: {req['rejection_reason']}"
-            message_lines.append(status_line)
-        messagebox.showinfo("Benachrichtigung", "\n".join(message_lines), parent=self)
-        mark_requests_as_notified(notified_ids)
+        # 1. Wunschfrei-Anfragen
+        unnotified_requests = get_unnotified_requests(self.user_data['id'])
+        if unnotified_requests:
+            message_lines = ["Sie haben Neuigkeiten zu Ihren 'Wunschfrei'-Anträgen:"]
+            notified_ids = [req['id'] for req in unnotified_requests]
+            for req in unnotified_requests:
+                req_date = datetime.strptime(req['request_date'], '%Y-%m-%d').strftime('%d.%m.%Y')
+                status_line = f"- Ihr Antrag für den {req_date} wurde {req['status']}."
+                if req['status'] == 'Abgelehnt' and req.get('rejection_reason'):
+                    status_line += f" Grund: {req['rejection_reason']}"
+                message_lines.append(status_line)
+            all_messages.append("\n".join(message_lines))
+            mark_requests_as_notified(notified_ids)
+            tabs_to_refresh.append("Meine Anfragen")
+
+        # 2. Urlaubsanträge
+        unnotified_vacation = get_unnotified_vacation_requests_for_user(self.user_data['id'])
+        if unnotified_vacation:
+            message_lines = ["Es gibt Neuigkeiten zu Ihren Urlaubsanträgen:"]
+            notified_ids = [req['id'] for req in unnotified_vacation]
+            for req in unnotified_vacation:
+                start = datetime.strptime(req['start_date'], '%Y-%m-%d').strftime('%d.%m')
+                end = datetime.strptime(req['end_date'], '%Y-%m-%d').strftime('%d.%m.%Y')
+                message_lines.append(f"- Ihr Urlaub von {start} bis {end} wurde {req['status']}.")
+            all_messages.append("\n".join(message_lines))
+            mark_vacation_requests_as_notified(notified_ids)
+            tabs_to_refresh.append("Mein Urlaub")
+
+        # 3. Bug-Reports
+        unnotified_reports = get_unnotified_bug_reports_for_user(self.user_data['id'])
+        if unnotified_reports:
+            message_lines = ["Es gibt Neuigkeiten zu Ihren Fehlerberichten:"]
+            notified_ids = [report['id'] for report in unnotified_reports]
+            for report in unnotified_reports:
+                title = report['title']
+                status = report['status']
+                message_lines.append(f"- Ihr Bericht '{title[:30]}...' hat jetzt den Status: {status}.")
+            all_messages.append("\n".join(message_lines))
+            mark_bug_reports_as_notified(notified_ids)
+            tabs_to_refresh.append("Bug-Reports")
+
+        # Wenn es Nachrichten gibt, zeige sie an und lade die Tabs neu
+        if all_messages:
+            messagebox.showinfo("Benachrichtigungen", "\n\n".join(all_messages), parent=self)
+            if self.winfo_exists():
+                if "Meine Anfragen" in tabs_to_refresh and "Meine Anfragen" in self.tab_frames:
+                    self.tab_frames["Meine Anfragen"].refresh_data()
+                if "Mein Urlaub" in tabs_to_refresh and "Mein Urlaub" in self.tab_frames:
+                    self.tab_frames["Mein Urlaub"].refresh_data()
+                if "Bug-Reports" in tabs_to_refresh and "Bug-Reports" in self.tab_frames:
+                    self.tab_frames["Bug-Reports"].load_reports()
 
     def _load_holidays_for_year(self, year):
         self.current_year_holidays = HolidayManager.get_holidays_for_year(year)
