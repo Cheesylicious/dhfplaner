@@ -1,7 +1,8 @@
 # gui/tabs/user_management_tab.py
 import tkinter as tk
 from tkinter import ttk, messagebox
-from datetime import datetime
+# Importiere 'date' zusätzlich zu 'datetime' für MySQL-Objekte
+from datetime import datetime, date
 
 from database.db_manager import (
     get_all_users, update_user, create_user_by_admin, delete_user, ROLE_HIERARCHY
@@ -41,6 +42,11 @@ class UserManagementTab(ttk.Frame):
 
         self.refresh_user_tree()
 
+    # FIX 1: Hinzufügen des erwarteten Alias, damit das Hauptfenster die Aktualisierung findet
+    def refresh_data(self):
+        """Alias für refresh_user_tree, wird von MainAdminWindow.refresh_all_tabs erwartet."""
+        self.refresh_user_tree()
+
     def refresh_user_tree(self):
         for item in self.user_tree.get_children():
             self.user_tree.delete(item)
@@ -51,11 +57,20 @@ class UserManagementTab(ttk.Frame):
             values_for_all_columns = []
             for col_key in all_columns:
                 value = data.get(col_key, "")
-                if col_key == 'entry_date' and value:
-                    try:
-                        value = datetime.strptime(value, '%Y-%m-%d').strftime('%d.%m.%Y')
-                    except (ValueError, TypeError):
-                        pass
+
+                # FIX 2: Bessere Handhabung der Datums-/Zeitwerte, die als Python-Objekte von MySQL kommen können.
+                if col_key in ['geburtstag', 'entry_date']:
+                    # Wenn das Datum als natives datetime/date Objekt von MySQL kommt
+                    if isinstance(value, (datetime, date)):
+                        value = value.strftime('%Y-%m-%d')
+
+                    if value:
+                        try:
+                            # Parst von YYYY-MM-DD (DB-Format) zu DD.MM.YYYY (Anzeige-Format)
+                            value = datetime.strptime(value, '%Y-%m-%d').strftime('%d.%m.%Y')
+                        except (ValueError, TypeError):
+                            pass
+
                 values_for_all_columns.append(value)
             self.user_tree.insert("", tk.END, values=values_for_all_columns, iid=user_id)
 
@@ -76,18 +91,29 @@ class UserManagementTab(ttk.Frame):
         selected_id = self.user_tree.selection()[0]
         user_data_to_edit = self.app.user_data_store.get(selected_id)
 
-        is_super_admin = self.app.logged_in_user['role'] == "SuperAdmin"
+        # FIX: Verwende self.app.user_data
+        is_super_admin = self.app.user_data['role'] == "SuperAdmin"
+        logged_in_id = str(self.app.user_data['id'])
+
+        # FIX 3: Überarbeitete Logik, um Bearbeiten von niedrigeren Rollen zu erlauben, aber Selbstedition für Admins zu blocken
         if not is_super_admin:
-            if str(self.app.logged_in_user['id']) == selected_id:
+
+            # 1. Blockiert, wenn ein Nicht-SuperAdmin sein EIGENES Konto bearbeiten will (verwenden Sie Profil)
+            if logged_in_id == selected_id:
                 messagebox.showerror("Zugriff verweigert",
                                      "Sie können Ihr eigenes Konto nicht über diese Maske bearbeiten.", parent=self.app)
                 return
-            admin_level = ROLE_HIERARCHY.get(self.app.logged_in_user['role'], 0)
+
+            # 2. Blockiert Bearbeiten von Gleichrangigen/Höheren (Admin kann Admin oder SuperAdmin nicht bearbeiten)
+            admin_level = ROLE_HIERARCHY.get(self.app.user_data['role'], 0)
             target_level = ROLE_HIERARCHY.get(user_data_to_edit['role'], 0)
+
             if admin_level <= target_level:
                 messagebox.showerror("Zugriff verweigert",
                                      "Sie können nur Benutzer mit einer niedrigeren Rolle bearbeiten.", parent=self.app)
                 return
+
+        # Anmerkung: SuperAdmins überspringen diesen Block und können sich selbst und alle anderen bearbeiten, was korrekt ist.
 
         if user_data_to_edit:
             UserEditWindow(self.app, selected_id, user_data_to_edit, self.update_user_data, is_new=False,
@@ -121,7 +147,8 @@ class UserManagementTab(ttk.Frame):
         selected_id = self.user_tree.selection()[0]
         user_to_delete = self.app.user_data_store.get(selected_id)
 
-        admin_level = ROLE_HIERARCHY.get(self.app.logged_in_user['role'], 0)
+        # FIX: Verwende self.app.user_data
+        admin_level = ROLE_HIERARCHY.get(self.app.user_data['role'], 0)
         target_level = ROLE_HIERARCHY.get(user_to_delete['role'], 0)
 
         if admin_level <= target_level:

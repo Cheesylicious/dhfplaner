@@ -1,4 +1,4 @@
-# gui/main_admin_window.py
+# gui/main_admin_window.py (KORRIGIERT: get_allowed_roles Methode hinzugefügt)
 import tkinter as tk
 from tkinter import ttk, messagebox
 import json
@@ -12,7 +12,7 @@ from .tabs.shift_types_tab import ShiftTypesTab
 from .tabs.requests_tab import RequestsTab
 from .tabs.log_tab import LogTab
 from .tabs.bug_reports_tab import BugReportsTab
-from .tabs.vacation_requests_tab import VacationRequestsTab  # <-- NEUER IMPORT
+from .tabs.vacation_requests_tab import VacationRequestsTab
 from .dialogs.user_order_window import UserOrderWindow
 from .dialogs.shift_order_window import ShiftOrderWindow
 from .dialogs.min_staffing_window import MinStaffingWindow
@@ -23,7 +23,7 @@ from .dialogs.bug_report_dialog import BugReportDialog
 from .holiday_manager import HolidayManager
 from database.db_manager import (
     get_all_shift_types, get_pending_wunschfrei_requests, get_open_bug_reports_count,
-    get_pending_vacation_requests_count
+    get_pending_vacation_requests_count, ROLE_HIERARCHY  # <--- HINZUGEFÜGT
 )
 
 
@@ -80,8 +80,8 @@ class MainAdminWindow(tk.Toplevel):
             "Mitarbeiter": UserManagementTab(self.notebook, self),
             "Diensthunde": DogManagementTab(self.notebook, self),
             "Schichtarten": ShiftTypesTab(self.notebook, self),
-            "Wunschanfragen": RequestsTab(self.notebook, self),  # Umbenannt für Klarheit
-            "Urlaubsanträge": VacationRequestsTab(self.notebook, self),  # NEUER TAB
+            "Wunschanfragen": RequestsTab(self.notebook, self),
+            "Urlaubsanträge": VacationRequestsTab(self.notebook, self),
             "Bug-Reports": BugReportsTab(self.notebook, self),
             "Logs": LogTab(self.notebook, self)
         }
@@ -147,7 +147,7 @@ class MainAdminWindow(tk.Toplevel):
                 "text": f"{pending_wunsch_count} Offene Wunschanfrage(n)",
                 "bg": "orange",
                 "fg": "black",
-                "tab": "Wunschanfragen"  # Korrigierter Tab-Name
+                "tab": "Wunschanfragen"
             })
 
         pending_urlaub_count = get_pending_vacation_requests_count()
@@ -156,7 +156,7 @@ class MainAdminWindow(tk.Toplevel):
                 "text": f"{pending_urlaub_count} Offene Urlaubsanträge",
                 "bg": "lightblue",
                 "fg": "black",
-                "tab": "Urlaubsanträge"  # KORREKTUR: Zeigt auf den neuen Tab
+                "tab": "Urlaubsanträge"
             })
 
         open_bug_count = get_open_bug_reports_count()
@@ -185,7 +185,6 @@ class MainAdminWindow(tk.Toplevel):
         if tab_name in self.tab_frames:
             self.notebook.select(self.tab_frames[tab_name])
 
-    # ... (Rest der Datei bleibt unverändert) ...
     def load_all_data(self):
         self.load_shift_types()
         self.load_staffing_rules()
@@ -240,20 +239,33 @@ class MainAdminWindow(tk.Toplevel):
             messagebox.showwarning("Speicherfehler", "Die Schichthäufigkeit konnte nicht gespeichert werden.",
                                    parent=self)
 
+    # --- NEU HINZUGEFÜGTE FUNKTION ---
+    def get_allowed_roles(self):
+        """Gibt die Rollenhierarchie aus db_manager zurück."""
+        # Wird vom UserManagementTab zur Rollenauswahl benötigt.
+        return ROLE_HIERARCHY
+    # -----------------------------------
+
     def open_user_order_window(self):
-        UserOrderWindow(self)
+        # Korrektur: Fügt den Callback hinzu, da das Fenster ihn erwartet
+        UserOrderWindow(self, self.refresh_all_tabs)
 
     def open_shift_order_window(self):
-        ShiftOrderWindow(self)
+        # Korrektur: Fügt den Callback hinzu
+        ShiftOrderWindow(self, self.refresh_all_tabs)
 
     def open_staffing_rules_window(self):
-        MinStaffingWindow(self)
+        # Korrektur: Fügt den Callback hinzu
+        MinStaffingWindow(self, self.refresh_all_tabs)
 
     def open_holiday_settings_window(self):
-        HolidaySettingsWindow(self)
+        # Korrektur: Fügt das aktuelle Jahr und den Callback hinzu
+        HolidaySettingsWindow(self, self.current_display_date.year, self.refresh_all_tabs)
 
     def open_request_settings_window(self):
-        RequestSettingsWindow(self)
+        # Korrektur: Fügt den Callback hinzu
+        RequestSettingsWindow(self, self.refresh_all_tabs)
 
     def open_planning_assistant_settings(self):
-        PlanningAssistantSettingsWindow(self)
+        # Korrektur: Fügt den Callback hinzu
+        PlanningAssistantSettingsWindow(self, self.refresh_all_tabs)

@@ -1,10 +1,9 @@
-# gui/user_edit_window.py
+# gui/user_edit_window.py (KORRIGIERT: Passwort-Feld auch beim Bearbeiten sichtbar)
 import tkinter as tk
 from tkinter import ttk, messagebox
 from datetime import datetime
 from tkcalendar import DateEntry
 from .column_manager import ColumnManager
-# NEUE IMPORTE
 from database.db_manager import get_available_dogs, get_dog_assignment_count
 
 
@@ -15,7 +14,9 @@ class UserEditWindow(tk.Toplevel):
         self.user_data = user_data
         self.callback = callback
         self.is_new = is_new
-        self.allowed_roles = allowed_roles
+
+        # Sortiere die Rollen nach Hierarchie-Level, um sie in der Combobox korrekt anzuzeigen
+        self.allowed_roles_sorted = sorted(allowed_roles.keys(), key=lambda k: allowed_roles[k], reverse=True)
 
         self.title(
             "Neuen Benutzer anlegen" if self.is_new else f"Benutzer bearbeiten: {self.user_data['vorname']} {self.user_data['name']}")
@@ -47,26 +48,21 @@ class UserEditWindow(tk.Toplevel):
                 date_val = None
                 if self.user_data.get(key):
                     try:
-                        date_val = datetime.strptime(self.user_data.get(key), '%Y-%m-%d').date()
+                        date_val = datetime.strptime(str(self.user_data.get(key)), '%Y-%m-%d').date()
                     except (ValueError, TypeError):
                         pass
                 widget = DateEntry(main_frame, date_pattern='dd.mm.yyyy', date=date_val, foreground="black",
                                    headersforeground="black")
                 self.widgets[key] = widget
 
-            # GEÄNDERT: Spezielle Logik für das "Diensthund"-Feld
             elif key == 'diensthund':
                 self.vars['diensthund'] = tk.StringVar(value=self.user_data.get('diensthund', ''))
-
-                # Hole die Liste der verfügbaren Hunde
                 dog_options = get_available_dogs()
                 current_dog = self.user_data.get('diensthund')
 
-                # Füge den aktuellen Hund des Benutzers hinzu, falls er nicht in der Liste ist
-                if current_dog and current_dog not in dog_options:
+                if current_dog and current_dog not in dog_options and current_dog != 'Kein' and current_dog != '---':
                     dog_options.append(current_dog)
 
-                # Füge eine Option hinzu, um die Zuweisung aufzuheben
                 dog_options.insert(0, "Kein")
 
                 widget = ttk.Combobox(main_frame, textvariable=self.vars['diensthund'], values=sorted(dog_options),
@@ -74,9 +70,10 @@ class UserEditWindow(tk.Toplevel):
 
             elif key == 'role':
                 self.vars['role'] = tk.StringVar(value=self.user_data.get('role', 'Benutzer'))
-                widget = ttk.Combobox(main_frame, textvariable=self.vars['role'], values=self.allowed_roles,
+
+                widget = ttk.Combobox(main_frame, textvariable=self.vars['role'], values=self.allowed_roles_sorted,
                                       state="readonly")
-                if not self.allowed_roles: widget.config(state="disabled")
+                if not self.allowed_roles_sorted: widget.config(state="disabled")
 
             else:
                 self.vars[key] = tk.StringVar(value=str(self.user_data.get(key, "")))
@@ -85,18 +82,13 @@ class UserEditWindow(tk.Toplevel):
             widget.grid(row=row_index, column=1, sticky="ew", pady=5, ipady=2)
             row_index += 1
 
-        if self.is_new:
-            ttk.Label(main_frame, text="Passwort:").grid(row=row_index, column=0, sticky="w", pady=5, padx=(0, 10))
-            self.vars['password'] = tk.StringVar()
-            ttk.Entry(main_frame, textvariable=self.vars['password'], show="*").grid(row=row_index, column=1,
-                                                                                     sticky="ew", pady=5, ipady=2)
-            row_index += 1
-        else:
-            ttk.Button(main_frame, text="Passwort zurücksetzen", command=self.reset_password).grid(row=row_index,
-                                                                                                   column=0,
-                                                                                                   columnspan=2,
-                                                                                                   pady=15)
-            row_index += 1
+        # NEU: Passwort-Feld wird IMMER angezeigt (für Neueingabe oder Bearbeitung)
+        ttk.Label(main_frame, text="Passwort:").grid(row=row_index, column=0, sticky="w", pady=5, padx=(0, 10))
+        self.vars['password'] = tk.StringVar()
+        ttk.Entry(main_frame, textvariable=self.vars['password'], show="*").grid(row=row_index, column=1,
+                                                                                 sticky="ew", pady=5, ipady=2)
+        row_index += 1
+        # HINWEIS: Der 'Passwort zurücksetzen' Button wurde entfernt, da die Eingabe nun direkt möglich ist.
 
         button_bar = ttk.Frame(main_frame)
         button_bar.grid(row=row_index, column=0, columnspan=2, pady=(20, 0), sticky="ew")
@@ -104,8 +96,7 @@ class UserEditWindow(tk.Toplevel):
         ttk.Button(button_bar, text="Speichern", command=self.save).grid(row=0, column=0, sticky="ew", padx=(0, 5))
         ttk.Button(button_bar, text="Abbrechen", command=self.destroy).grid(row=0, column=1, sticky="ew", padx=(5, 0))
 
-    def reset_password(self):
-        messagebox.showinfo("Info", "Passwort-Reset-Funktion noch nicht implementiert.", parent=self)
+    # Die Methode reset_password() wird entfernt, da das Feld nun immer angezeigt wird.
 
     def save(self):
         updated_data = {key: var.get().strip() for key, var in self.vars.items()}
@@ -118,17 +109,25 @@ class UserEditWindow(tk.Toplevel):
             messagebox.showwarning("Eingabe fehlt", "Vorname und Name dürfen nicht leer sein.", parent=self)
             return
 
-        if self.is_new and not updated_data.get("password"):
-            messagebox.showwarning("Eingabe fehlt", "Bei neuen Benutzern muss ein Passwort vergeben werden.",
-                                   parent=self)
-            return
+        # NEUE PASSWORT-VALIDIERUNG:
+        password_value = updated_data.get("password")
+
+        if self.is_new:
+            # Beim Erstellen: Passwort muss zwingend vergeben werden.
+            if not password_value:
+                messagebox.showwarning("Eingabe fehlt", "Bei neuen Benutzern muss ein Passwort vergeben werden.",
+                                       parent=self)
+                return
+        else:
+            # Beim Bearbeiten: Ist das Feld leer, wird das Passwort NICHT in updated_data aufgenommen und daher nicht geändert.
+            if not password_value:
+                updated_data.pop('password', None)
 
         # NEU: Validierung der Hund-Zuweisung
         new_dog = updated_data.get('diensthund')
         original_dog = self.user_data.get('diensthund')
 
-        # Prüfe nur, wenn sich die Zuweisung ändert und es nicht "Kein" ist
-        if new_dog and new_dog != "Kein" and new_dog != original_dog:
+        if new_dog and new_dog != "Kein" and new_dog != original_dog and new_dog != '---':
             assignment_count = get_dog_assignment_count(new_dog)
             if assignment_count >= 2:
                 messagebox.showerror("Fehler",
