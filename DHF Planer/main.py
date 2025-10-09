@@ -1,62 +1,44 @@
 # main.py
 import tkinter as tk
 from tkinter import messagebox
-import locale  # NEU: Import für Spracheinstellungen
-
-# NEU: Setze die Sprache für Zeitformate auf Deutsch
-# Das sorgt dafür, dass die Monatsnamen korrekt angezeigt werden.
-try:
-    locale.setlocale(locale.LC_TIME, 'de_DE.UTF-8')
-except locale.Error:
-    try:
-        locale.setlocale(locale.LC_TIME, 'German')
-    except locale.Error:
-        print("Deutsche Lokale konnte nicht gesetzt werden. Monatsnamen könnten auf Englisch sein.")
-
-# Prüfen, ob tkcalendar installiert ist
-try:
-    from tkcalendar import DateEntry
-except ImportError:
-    messagebox.showerror(
-        "Fehlende Bibliothek",
-        "Die Bibliothek 'tkcalendar' wird benötigt.\n\nBitte installieren Sie sie mit dem Befehl:\n\npip install tkcalendar"
-    )
-    exit()
-
 from gui.login_window import LoginWindow
-from gui.main_user_window import MainUserWindow
 from gui.main_admin_window import MainAdminWindow
-from database.db_manager import initialize_db
+from gui.main_user_window import MainUserWindow
+from database.db_manager import initialize_db, set_user_tutorial_seen # <-- NEUER IMPORT
 
-
-class Application(tk.Tk):
-    """Die Hauptklasse, die die Anwendung steuert."""
-
+class App(tk.Tk):
     def __init__(self):
         super().__init__()
+        self.withdraw()
         initialize_db()
 
-        self.withdraw()
         self.login_window = LoginWindow(self, self.on_login_success)
+        self.current_main_window = None
         self.protocol("WM_DELETE_WINDOW", self.on_app_close)
 
     def on_login_success(self, user_data):
-        """Wird aufgerufen, wenn der Login erfolgreich war."""
-        if self.login_window:
-            self.login_window.destroy()
-            self.login_window = None
+        self.login_window.withdraw()
 
-        if user_data["role"] == "SuperAdmin":
-            MainAdminWindow(self, user_data)
+        if self.current_main_window:
+            self.current_main_window.destroy()
+
+        if user_data['role'] in ["Admin", "SuperAdmin"]:
+            self.current_main_window = MainAdminWindow(self, user_data)
         else:
-            MainUserWindow(self, user_data)
+            self.current_main_window = MainUserWindow(self, user_data)
+
+        # --- NEUE TUTORIAL-LOGIK ---
+        # Prüft, ob der Benutzer das Tutorial noch nicht gesehen hat und kein Admin ist
+        if user_data.get('has_seen_tutorial', 0) == 0 and 'show_tutorial' in dir(self.current_main_window):
+            self.current_main_window.show_tutorial()  # Zeigt das Tutorial an (blockierend)
+            set_user_tutorial_seen(user_data['id'])    # Markiert das Tutorial als gesehen in der DB
+            # Aktualisiert die user_data im Speicher des Fensters
+            self.current_main_window.user_data['has_seen_tutorial'] = 1
 
     def on_app_close(self):
-        """Beendet die Anwendung sauber."""
-        if messagebox.askokcancel("Beenden", "Möchten Sie das Programm wirklich beenden?"):
+        if messagebox.askokcancel("Beenden", "Möchten Sie die Anwendung wirklich beenden?"):
             self.destroy()
 
-
 if __name__ == "__main__":
-    app = Application()
+    app = App()
     app.mainloop()

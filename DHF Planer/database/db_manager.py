@@ -172,7 +172,7 @@ def initialize_db():
         _add_column_if_not_exists(cursor, "bug_reports", "user_notified", "INTEGER NOT NULL DEFAULT 1")
         _add_column_if_not_exists(cursor, "bug_reports", "archived", "INTEGER NOT NULL DEFAULT 0")
         _add_column_if_not_exists(cursor, "bug_reports", "admin_notes", "TEXT")
-
+        _add_column_if_not_exists(cursor, "users", "has_seen_tutorial", "INTEGER DEFAULT 0")
 
         conn.commit()
     finally:
@@ -371,6 +371,31 @@ def unarchive_bug_report(bug_id):
         conn.close()
 
 
+def delete_bug_reports(report_ids):
+    """Löscht einen oder mehrere Bug-Reports endgültig aus der Datenbank."""
+    if not report_ids:
+        return False, "Keine IDs zum Löschen übergeben."
+
+    conn = create_connection()
+    try:
+        cursor = conn.cursor()
+        placeholders = ', '.join('?' for _ in report_ids)
+        query = f"DELETE FROM bug_reports WHERE id IN ({placeholders})"
+        cursor.execute(query, report_ids)
+        conn.commit()
+
+        if cursor.rowcount > 0:
+            return True, f"{cursor.rowcount} Bug-Report(s) endgültig gelöscht."
+        else:
+            return False, "Keine passenden Bug-Reports zum Löschen gefunden."
+
+    except sqlite3.Error as e:
+        conn.rollback()
+        return False, f"Datenbankfehler: {e}"
+    finally:
+        conn.close()
+
+
 def get_unnotified_bug_reports_for_user(user_id):
     conn = create_connection()
     try:
@@ -400,19 +425,24 @@ def mark_bug_reports_as_notified(report_ids):
 
 
 def submit_user_request(user_id, request_date_str, requested_shift=None):
-    """Speichert eine Benutzeranfrage (Wunschfrei oder Schichtpräferenz)."""
+    """Speichert oder aktualisiert eine Benutzeranfrage (Wunschfrei oder Schichtpräferenz)."""
     conn = create_connection()
     try:
         cursor = conn.cursor()
         shift_to_store = "WF" if requested_shift is None else requested_shift
-        cursor.execute(
-            "INSERT INTO wunschfrei_requests (user_id, request_date, requested_shift) VALUES (?, ?, ?)",
-            (user_id, request_date_str, shift_to_store)
-        )
+
+        cursor.execute("""
+            INSERT INTO wunschfrei_requests (user_id, request_date, requested_shift, status, notified, rejection_reason)
+            VALUES (?, ?, ?, 'Ausstehend', 0, NULL)
+            ON CONFLICT(user_id, request_date) DO UPDATE SET
+                requested_shift = excluded.requested_shift,
+                status = 'Ausstehend',
+                notified = 0,
+                rejection_reason = NULL;
+        """, (user_id, request_date_str, shift_to_store))
+
         conn.commit()
-        return True, "Anfrage erfolgreich gestellt."
-    except sqlite3.IntegrityError:
-        return False, "Für diesen Tag wurde bereits eine Anfrage gestellt."
+        return True, "Anfrage erfolgreich gestellt oder aktualisiert."
     except sqlite3.Error as e:
         return False, f"Datenbankfehler: {e}"
     finally:
@@ -806,8 +836,9 @@ def save_shift_order(order_data_list):
         cursor = conn.cursor()
         cursor.execute("BEGIN TRANSACTION")
         cursor.execute("DELETE FROM shift_order")
-        cursor.executemany("INSERT INTO shift_order (abbreviation, sort_order, is_visible, check_for_understaffing) VALUES (?, ?, ?, ?)",
-                           order_data_list)
+        cursor.executemany(
+            "INSERT INTO shift_order (abbreviation, sort_order, is_visible, check_for_understaffing) VALUES (?, ?, ?, ?)",
+            order_data_list)
         conn.commit()
         return True, "Schichtreihenfolge erfolgreich gespeichert."
     except sqlite3.Error as e:
@@ -983,11 +1014,11 @@ def get_all_users():
 def get_ordered_users_for_schedule(include_hidden=False):
     conn = create_connection()
     try:
-        cursor = conn.cursor()
         query = "SELECT u.*, COALESCE(uo.sort_order, 999999) AS sort_order, COALESCE(uo.is_visible, 1) AS is_visible FROM users u LEFT JOIN user_order uo ON u.id = uo.user_id"
         if not include_hidden:
             query += " WHERE COALESCE(uo.is_visible, 1) = 1"
         query += " ORDER BY sort_order ASC, u.name ASC"
+        cursor = conn.cursor()
         cursor.execute(query)
         return [dict(row) for row in cursor.fetchall()]
     except sqlite3.Error as e:
@@ -1083,12 +1114,56 @@ def get_requests_by_user(user_id):
         conn.close()
 
 
-def get_pending_requests():
+def get_pending_vacation_requests():
     conn = create_connection()
     try:
         cursor = conn.cursor()
         cursor.execute(
             "SELECT vr.id, u.vorname, u.name, vr.start_date, vr.end_date, vr.status FROM vacation_requests vr JOIN users u ON vr.user_id = u.id WHERE vr.status = 'Ausstehend' ORDER BY vr.request_date ASC")
         return [dict(row) for row in cursor.fetchall()]
+    finally:
+        conn.close()
+
+
+def update_vacation_request_status(request_id, new_status):
+    conn = create_connection()
+    try:
+        cursor = conn.cursor()
+        cursor.execute("UPDATE vacation_requests SET status = ? WHERE id = ?", (new_status, request_id))
+        conn.commit()
+        return True, "Urlaubsstatus erfolgreich aktualisiert."
+    except sqlite3.Error as e:
+        conn.rollback()
+        return False, f"Datenbankfehler: {e}"
+    finally:
+        conn.close()
+
+
+def get_pending_vacation_requests_count():
+    """Zählt die Anzahl der ausstehenden Urlaubsanträge."""
+    conn = create_connection()
+    try:
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) FROM vacation_requests WHERE status = 'Ausstehend'")
+        count = cursor.fetchone()[0]
+        return count
+    except sqlite3.Error as e:
+        print(f"Fehler beim Zählen der Urlaubsanträge: {e}")
+        return 0
+    finally:
+        conn.close()
+
+
+def set_user_tutorial_seen(user_id):
+    """Setzt das Flag, dass der Benutzer das Tutorial gesehen hat."""
+    conn = create_connection()
+    try:
+        cursor = conn.cursor()
+        cursor.execute("UPDATE users SET has_seen_tutorial = 1 WHERE id = ?", (user_id,))
+        conn.commit()
+        return True
+    except sqlite3.Error as e:
+        print(f"DB-Fehler beim Setzen des Tutorial-Status: {e}")
+        return False
     finally:
         conn.close()

@@ -2,221 +2,231 @@
 import tkinter as tk
 from tkinter import ttk, messagebox
 from datetime import datetime
-
-from database import db_manager
+from database.db_manager import (
+    get_all_bug_reports, update_bug_report_status, archive_bug_report,
+    unarchive_bug_report, update_bug_report_notes, delete_bug_reports
+)
 
 
 class BugReportsTab(ttk.Frame):
-    def __init__(self, master):
+    def __init__(self, master, app):
         super().__init__(master)
-        self.bug_reports_data = {}
-        self.selected_bug_id = None
+        self.app = app
+        self.reports_data = {}
+        self.selected_report_id = None
         self.setup_ui()
-        self.load_bug_reports()
+        self.refresh_data()
 
     def setup_ui(self):
-        main_pane = ttk.PanedWindow(self, orient=tk.HORIZONTAL)
-        main_pane.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        main_frame = ttk.Frame(self, padding="10")
+        main_frame.pack(fill="both", expand=True)
+        main_frame.grid_rowconfigure(0, weight=1)
+        main_frame.grid_columnconfigure(0, weight=3)
+        main_frame.grid_columnconfigure(1, weight=2)
 
-        # Linke Seite: Liste der Bug-Reports
-        list_frame = ttk.Frame(main_pane, padding=5)
-        self.setup_ui_list(list_frame)
-        main_pane.add(list_frame, weight=1)
+        # linke Seite: Treeview
+        tree_frame = ttk.Frame(main_frame)
+        tree_frame.grid(row=0, column=0, sticky="nsew", padx=(0, 10))
+        tree_frame.grid_rowconfigure(1, weight=1)
+        tree_frame.grid_columnconfigure(0, weight=1)
 
-        # Rechte Seite: Details des ausgewählten Reports
-        details_frame = ttk.Frame(main_pane, padding=10)
-        self.setup_ui_details(details_frame)
-        main_pane.add(details_frame, weight=2)
+        filter_frame = ttk.Frame(tree_frame)
+        filter_frame.grid(row=0, column=0, sticky="ew", pady=(0, 5))
+        self.show_archived_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(filter_frame, text="Archivierte anzeigen", variable=self.show_archived_var,
+                        command=self.refresh_data).pack(side="left")
 
-    def setup_ui_list(self, parent):
-        ttk.Label(parent, text="Alle Bug-Meldungen", font=("Segoe UI", 12, "bold")).pack(anchor="w", pady=(0, 5))
+        # --- LÖSCHEN-BUTTON IMMER AKTIV ---
+        self.delete_button = ttk.Button(filter_frame, text="Markierte löschen", command=self.delete_selected_reports)
+        self.delete_button.pack(side="left", padx=20)
 
-        tree_frame = ttk.Frame(parent)
-        tree_frame.pack(fill=tk.BOTH, expand=True)
+        ttk.Button(filter_frame, text="Aktualisieren", command=self.refresh_data).pack(side="right")
 
-        cols = ("gemeldet_am", "gemeldet_von", "titel", "status", "archiviert")
-        self.tree = ttk.Treeview(tree_frame, columns=cols, show="headings")
-
-        # Spalten-Konfiguration
-        self.tree.heading("gemeldet_am", text="Gemeldet am")
-        self.tree.column("gemeldet_am", width=120, anchor=tk.W)
-        self.tree.heading("gemeldet_von", text="Gemeldet von")
-        self.tree.column("gemeldet_von", width=120, anchor=tk.W)
-        self.tree.heading("titel", text="Titel")
-        self.tree.column("titel", width=200, anchor=tk.W)
+        self.tree = ttk.Treeview(tree_frame, columns=("user", "timestamp", "title", "status"), show="headings",
+                                 selectmode="extended")
+        self.tree.grid(row=1, column=0, sticky="nsew")
+        self.tree.heading("user", text="Benutzer")
+        self.tree.heading("timestamp", text="Zeitpunkt")
+        self.tree.heading("title", text="Titel")
         self.tree.heading("status", text="Status")
-        self.tree.column("status", width=80, anchor=tk.CENTER)
-        self.tree.heading("archiviert", text="Archiviert")
-        self.tree.column("archiviert", width=80, anchor=tk.CENTER)
-
-        self.tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        self.tree.column("user", width=150)
+        self.tree.column("timestamp", width=140)
+        self.tree.column("status", width=100)
 
         vsb = ttk.Scrollbar(tree_frame, orient="vertical", command=self.tree.yview)
-        vsb.pack(side=tk.RIGHT, fill=tk.Y)
+        vsb.grid(row=1, column=1, sticky="ns")
         self.tree.configure(yscrollcommand=vsb.set)
 
-        self.tree.bind("<<TreeviewSelect>>", self.on_bug_select)
+        self.tree.bind("<<TreeviewSelect>>", self.on_report_selected)
 
-        self.tree.tag_configure("archived", foreground="grey")
+        # rechte Seite: Details
+        details_frame = ttk.LabelFrame(main_frame, text="Details und Bearbeitung", padding="10")
+        details_frame.grid(row=0, column=1, sticky="nsew")
+        details_frame.grid_rowconfigure(4, weight=1)  # Zeile für Notizen wächst
+        details_frame.grid_columnconfigure(1, weight=1)
 
-    def setup_ui_details(self, parent):
-        parent.columnconfigure(1, weight=1)
+        ttk.Label(details_frame, text="Titel:").grid(row=0, column=0, sticky="w", pady=2)
+        self.title_var = tk.StringVar()
+        ttk.Label(details_frame, textvariable=self.title_var, wraplength=400).grid(row=0, column=1, sticky="w", pady=2)
 
-        # Titel
-        ttk.Label(parent, text="Details zur Meldung", font=("Segoe UI", 12, "bold")).grid(row=0, column=0, columnspan=2,
-                                                                                          sticky="w", pady=(0, 10))
+        ttk.Label(details_frame, text="Beschreibung:").grid(row=1, column=0, sticky="nw", pady=2)
+        self.description_text = tk.Text(details_frame, height=8, wrap="word", state="disabled", relief="solid",
+                                        borderwidth=1, font=("Segoe UI", 9))
+        self.description_text.grid(row=1, column=1, sticky="nsew", pady=2)
 
-        # Felder
-        self.detail_title_var = tk.StringVar()
-        self.detail_user_var = tk.StringVar()
-        self.detail_timestamp_var = tk.StringVar()
+        # --- ANPASSUNG: WIEDER COMBOBOX FÜR STATUS ---
+        ttk.Label(details_frame, text="Status:").grid(row=2, column=0, sticky="w", pady=5)
+        self.status_combobox = ttk.Combobox(details_frame,
+                                            values=["Neu", "In Bearbeitung", "Warte auf Rückmeldung", "Erledigt"],
+                                            state="readonly")
+        self.status_combobox.grid(row=2, column=1, sticky="ew", pady=5)
+        self.status_combobox.bind("<<ComboboxSelected>>", self.on_status_changed)
+        # --- ENDE ANPASSUNG ---
 
-        ttk.Label(parent, text="Titel:").grid(row=1, column=0, sticky="nw")
-        ttk.Label(parent, textvariable=self.detail_title_var, wraplength=500).grid(row=1, column=1, sticky="w", pady=2)
-        ttk.Label(parent, text="Gemeldet von:").grid(row=2, column=0, sticky="nw")
-        ttk.Label(parent, textvariable=self.detail_user_var).grid(row=2, column=1, sticky="w", pady=2)
-        ttk.Label(parent, text="Zeitpunkt:").grid(row=3, column=0, sticky="nw")
-        ttk.Label(parent, textvariable=self.detail_timestamp_var).grid(row=3, column=1, sticky="w", pady=2)
+        ttk.Label(details_frame, text="Admin-Notizen:").grid(row=3, column=0, sticky="nw", pady=2)
+        self.notes_text = tk.Text(details_frame, height=10, wrap="word", relief="solid", borderwidth=1,
+                                  font=("Segoe UI", 9))
+        self.notes_text.grid(row=4, column=0, columnspan=2, sticky="nsew", pady=(2, 5))
 
-        # Beschreibung
-        ttk.Label(parent, text="Beschreibung:").grid(row=4, column=0, sticky="nw", pady=(10, 0))
-        self.description_text = tk.Text(parent, height=8, width=60, wrap=tk.WORD, relief=tk.SOLID, borderwidth=1)
-        self.description_text.grid(row=5, column=0, columnspan=2, sticky="nsew", pady=2)
-        self.description_text.config(state=tk.DISABLED)
+        button_bar = ttk.Frame(details_frame)
+        button_bar.grid(row=5, column=0, columnspan=2, sticky="ew", pady=(10, 0))
+        self.save_notes_button = ttk.Button(button_bar, text="Notizen speichern", command=self.save_notes)
+        self.save_notes_button.pack(side="left")
+        self.archive_button = ttk.Button(button_bar, text="Archivieren", command=self.toggle_archive_status)
+        self.archive_button.pack(side="right")
 
-        # Admin-Notizen
-        ttk.Label(parent, text="Admin-Notizen (für alle sichtbar):").grid(row=6, column=0, sticky="nw", pady=(10, 0))
-        self.admin_notes_text = tk.Text(parent, height=8, width=60, wrap=tk.WORD, relief=tk.SOLID, borderwidth=1,
-                                        bg="#FFFFE0")
-        self.admin_notes_text.grid(row=7, column=0, columnspan=2, sticky="nsew", pady=2)
+    def refresh_data(self):
+        selected_ids = self.tree.selection()
+        for item in self.tree.get_children():
+            self.tree.delete(item)
+        self.reports_data.clear()
 
-        parent.rowconfigure(5, weight=1)
-        parent.rowconfigure(7, weight=1)
-
-        # Aktionen
-        actions_frame = ttk.Frame(parent)
-        actions_frame.grid(row=8, column=0, columnspan=2, sticky="ew", pady=(15, 0))
-
-        ttk.Button(actions_frame, text="Notizen speichern", command=self.save_admin_notes).pack(side=tk.LEFT,
-                                                                                                padx=(0, 10))
-
-        ttk.Label(actions_frame, text="Status ändern:").pack(side=tk.LEFT)
-        self.status_var = tk.StringVar()
-        status_options = ["Neu", "In Bearbeitung", "Auf Rückmeldung warten", "Erledigt"]
-        status_menu = ttk.OptionMenu(actions_frame, self.status_var, "", *status_options, command=self.update_status)
-        status_menu.pack(side=tk.LEFT, padx=5)
-
-        self.archive_button = ttk.Button(actions_frame, text="Archivieren", command=self.toggle_archive_status)
-        self.archive_button.pack(side=tk.RIGHT)
-
-    def load_bug_reports(self):
-        for i in self.tree.get_children():
-            self.tree.delete(i)
-
-        reports = db_manager.get_all_bug_reports()
-        self.bug_reports_data.clear()
+        reports = get_all_bug_reports()
+        show_archived = self.show_archived_var.get()
 
         for report in reports:
             report_id = report['id']
-            self.bug_reports_data[str(report_id)] = report
+            self.reports_data[report_id] = report
 
-            ts = datetime.strptime(report['timestamp'], '%Y-%m-%d %H:%M:%S').strftime('%d.%m.%Y %H:%M')
-            reporter = f"{report['vorname']} {report['name']}"
-            is_archived = "Ja" if report['archived'] else "Nein"
-            tags = ("archived",) if report['archived'] else ()
+            if not show_archived and report['archived']:
+                continue
 
-            self.tree.insert("", "end", iid=report_id,
-                             values=(ts, reporter, report['title'], report['status'], is_archived), tags=tags)
+            user = f"{report['vorname']} {report['name']}"
+            try:
+                ts = datetime.strptime(report['timestamp'], '%Y-%m-%d %H:%M:%S').strftime('%d.%m.%Y %H:%M')
+            except ValueError:
+                ts = report['timestamp']
 
-        self.clear_details()
+            values = (user, ts, report['title'], report['status'])
+            tag = "archived" if report['archived'] else ""
+            self.tree.insert("", tk.END, iid=report_id, values=values, tags=(tag,))
 
-    def on_bug_select(self, event):
+        self.tree.tag_configure("archived", foreground="grey")
+
+        if selected_ids:
+            try:
+                self.tree.selection_set(selected_ids)
+            except tk.TclError:
+                self.clear_details()
+        else:
+            self.clear_details()
+
+    def on_report_selected(self, event):
         selection = self.tree.selection()
-        if not selection:
-            return
-
-        self.selected_bug_id = int(selection[0])
-        self.display_bug_details(self.selected_bug_id)
-
-    def display_bug_details(self, bug_id):
-        bug = self.bug_reports_data.get(str(bug_id))
-        if not bug:
+        if len(selection) != 1:
+            self.selected_report_id = None
             self.clear_details()
             return
 
-        self.detail_title_var.set(bug.get('title', 'N/A'))
-        reporter = f"{bug.get('vorname', '')} {bug.get('name', '')}"
-        self.detail_user_var.set(reporter)
-        ts = datetime.strptime(bug['timestamp'], '%Y-%m-%d %H:%M:%S').strftime('%d.%m.%Y um %H:%M Uhr')
-        self.detail_timestamp_var.set(ts)
+        self.selected_report_id = int(selection[0])
+        report = self.reports_data.get(self.selected_report_id)
 
-        self.description_text.config(state=tk.NORMAL)
-        self.description_text.delete("1.0", tk.END)
-        self.description_text.insert(tk.END, bug.get('description', ''))
-        self.description_text.config(state=tk.DISABLED)
+        if report:
+            self.title_var.set(report.get('title', ''))
 
-        self.admin_notes_text.delete("1.0", tk.END)
-        self.admin_notes_text.insert(tk.END, bug.get('admin_notes') or '')
+            self.description_text.config(state="normal")
+            self.description_text.delete("1.0", tk.END)
+            self.description_text.insert("1.0", report.get('description', ''))
+            self.description_text.config(state="disabled")
 
-        self.status_var.set(bug.get('status', ''))
+            self.status_combobox.set(report.get('status', ''))
 
-        archive_text = "Wiederherstellen" if bug.get('archived') else "Archivieren"
-        self.archive_button.config(text=archive_text)
+            self.notes_text.delete("1.0", tk.END)
+            admin_notes = report.get('admin_notes')
+            if admin_notes is not None:
+                self.notes_text.insert("1.0", admin_notes)
+
+            if report.get('archived'):
+                self.archive_button.config(text="Wiederherstellen")
+            else:
+                self.archive_button.config(text="Archivieren")
 
     def clear_details(self):
-        self.selected_bug_id = None
-        self.detail_title_var.set("")
-        self.detail_user_var.set("")
-        self.detail_timestamp_var.set("")
-        self.description_text.config(state=tk.NORMAL)
+        self.selected_report_id = None
+        self.title_var.set("")
+        self.status_combobox.set("")
+        self.description_text.config(state="normal")
         self.description_text.delete("1.0", tk.END)
-        self.description_text.config(state=tk.DISABLED)
-        self.admin_notes_text.delete("1.0", tk.END)
-        self.status_var.set("")
+        self.description_text.config(state="disabled")
+        self.notes_text.delete("1.0", tk.END)
         self.archive_button.config(text="Archivieren")
+        # self.tree.selection_set() # Auswahl nicht mehr automatisch löschen
 
-    def save_admin_notes(self):
-        if self.selected_bug_id is None:
-            messagebox.showwarning("Keine Auswahl", "Bitte wählen Sie zuerst eine Meldung aus.", parent=self)
+    def on_status_changed(self, event):
+        if not self.selected_report_id:
             return
-
-        notes = self.admin_notes_text.get("1.0", tk.END).strip()
-        success, message = db_manager.update_bug_report_notes(self.selected_bug_id, notes)
-
+        new_status = self.status_combobox.get()
+        success, message = update_bug_report_status(self.selected_report_id, new_status)
         if success:
-            messagebox.showinfo("Erfolg", "Notizen erfolgreich gespeichert.", parent=self)
-            self.load_bug_reports()
+            self.refresh_data()
+            self.app.check_for_updates()
         else:
-            messagebox.showerror("Fehler", f"Fehler beim Speichern der Notizen:\n{message}", parent=self)
+            messagebox.showerror("Fehler", message, parent=self)
 
-    def update_status(self, *args):
-        if self.selected_bug_id is None:
-            return  # Verhindert Ausführung, wenn keine Auswahl getroffen
-
-        new_status = self.status_var.get()
-        if new_status:
-            success, message = db_manager.update_bug_report_status(self.selected_bug_id, new_status)
-            if success:
-                messagebox.showinfo("Status-Update", f"Status wurde auf '{new_status}' geändert.", parent=self)
-                self.load_bug_reports()
-            else:
-                messagebox.showerror("Fehler", f"Fehler beim Ändern des Status:\n{message}", parent=self)
+    def save_notes(self):
+        if not self.selected_report_id:
+            return
+        notes = self.notes_text.get("1.0", tk.END).strip()
+        success, message = update_bug_report_notes(self.selected_report_id, notes)
+        if success:
+            messagebox.showinfo("Gespeichert", "Die Notizen wurden erfolgreich gespeichert.", parent=self)
+            self.refresh_data()
+        else:
+            messagebox.showerror("Fehler", message, parent=self)
 
     def toggle_archive_status(self):
-        if self.selected_bug_id is None:
-            messagebox.showwarning("Keine Auswahl", "Bitte wählen Sie zuerst eine Meldung aus.", parent=self)
+        if not self.selected_report_id:
+            return
+        report = self.reports_data.get(self.selected_report_id)
+        if not report:
             return
 
-        bug = self.bug_reports_data.get(str(self.selected_bug_id))
-        if not bug: return
-
-        if bug['archived']:
-            success, message = db_manager.unarchive_bug_report(self.selected_bug_id)
+        if report.get('archived'):
+            success, message = unarchive_bug_report(self.selected_report_id)
         else:
-            success, message = db_manager.archive_bug_report(self.selected_bug_id)
+            success, message = archive_bug_report(self.selected_report_id)
 
         if success:
             messagebox.showinfo("Erfolg", message, parent=self)
-            self.load_bug_reports()
+            self.refresh_data()
         else:
-            messagebox.showerror("Fehler", f"Ein Fehler ist aufgetreten:\n{message}", parent=self)
+            messagebox.showerror("Fehler", message, parent=self)
+
+    def delete_selected_reports(self):
+        """Löscht alle ausgewählten Bug-Reports, egal ob archiviert oder nicht."""
+        selected_ids_str = self.tree.selection()
+        if not selected_ids_str:
+            messagebox.showwarning("Keine Auswahl", "Bitte wählen Sie die zu löschenden Reports aus.", parent=self)
+            return
+
+        ids_to_delete = [int(id_str) for id_str in selected_ids_str]
+
+        msg = f"Möchten Sie die {len(ids_to_delete)} ausgewählten Bug-Report(s) wirklich endgültig löschen? Diese Aktion kann nicht rückgängig gemacht werden."
+        if messagebox.askyesno("Löschen bestätigen", msg, icon='warning', parent=self):
+            success, message = delete_bug_reports(ids_to_delete)
+            if success:
+                messagebox.showinfo("Erfolg", message, parent=self)
+                self.refresh_data()
+                self.app.check_for_updates()
+            else:
+                messagebox.showerror("Fehler", message, parent=self)

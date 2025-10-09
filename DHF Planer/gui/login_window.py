@@ -2,88 +2,96 @@
 import tkinter as tk
 from tkinter import ttk, messagebox
 from database.db_manager import check_login, get_user_count
-from gui.registration_window import RegistrationWindow
+from .registration_window import RegistrationWindow
+
+__version__ = "1.0.0"
 
 
 class LoginWindow(tk.Toplevel):
-    BG_COLOR = "#212529"
-    FRAME_COLOR = "#343a40"
-    TEXT_COLOR = "#dee2e6"
-    ACCENT_COLOR = "#0d6efd"
-    ACCENT_HOVER = "#0b5ed7"
-
     def __init__(self, master, login_callback):
         super().__init__(master)
-        self.login_callback = login_callback
         self.master = master
-        self.title("Anmeldung")
+        self.login_callback = login_callback
+        self.title("DHF-Planer - Login")
+
+        # --- KORREKTUR: ECHTER VOLLBILDMODUS ---
         self.attributes('-fullscreen', True)
-        self.configure(bg=self.BG_COLOR)
-        self.bind("<Escape>", lambda event: self.attributes("-fullscreen", False))
+
+        self.configure(bg='#2c3e50')
 
         style = ttk.Style(self)
-        style.configure("TLabel", background=self.FRAME_COLOR, foreground=self.TEXT_COLOR, font=("Segoe UI", 12))
-        style.configure("TFrame", background=self.FRAME_COLOR)
-        style.configure("TEntry", fieldbackground="white", foreground="black", borderwidth=0, font=("Segoe UI", 12))
-        style.configure("Login.TButton", font=("Segoe UI", 14, "bold"), foreground="white",
-                        background=self.ACCENT_COLOR, padding=10, borderwidth=0)
-        style.map("Login.TButton", background=[('active', self.ACCENT_HOVER)])
+        style.theme_use('clam')
+        style.configure('TFrame', background='#2c3e50')
+        style.configure('TLabel', background='#2c3e50', foreground='white', font=('Segoe UI', 10))
+        style.configure('TButton', background='#3498db', foreground='white', font=('Segoe UI', 10, 'bold'),
+                        borderwidth=0)
+        style.map('TButton', background=[('active', '#2980b9')])
+        style.configure('Small.TButton', font=('Segoe UI', 8))
 
-        outer_frame = tk.Frame(self, bg=self.FRAME_COLOR, bd=0)
-        outer_frame.place(relx=0.5, rely=0.5, anchor='center')
-        center_frame = tk.Frame(outer_frame, bg=self.FRAME_COLOR, padx=50, pady=40)
-        center_frame.pack()
+        self.protocol("WM_DELETE_WINDOW", self.master.destroy)
+        self.create_widgets(style)
 
-        ttk.Label(center_frame, text="Willkommen zurück", font=("Segoe UI", 24, "bold")).pack(pady=(0, 10))
-        ttk.Label(center_frame, text="Bitte melden Sie sich an", font=("Segoe UI", 12)).pack(pady=(0, 30))
+    def create_widgets(self, style):
+        wrapper_frame = ttk.Frame(self, style='TFrame')
+        wrapper_frame.pack(expand=True)
 
-        # GEÄNDERT: Zwei Felder für Vorname und Nachname
-        self.vorname_var = tk.StringVar()
-        ttk.Label(center_frame, text="Vorname").pack(anchor="w")
-        self.vorname_entry = ttk.Entry(center_frame, textvariable=self.vorname_var, width=30, font=("Segoe UI", 14))
-        self.vorname_entry.pack(pady=(5, 10), ipady=5)
+        main_frame = ttk.Frame(wrapper_frame, padding="40", style='TFrame')
+        main_frame.pack()
 
-        self.nachname_var = tk.StringVar()
-        ttk.Label(center_frame, text="Nachname").pack(anchor="w")
-        self.nachname_entry = ttk.Entry(center_frame, textvariable=self.nachname_var, width=30, font=("Segoe UI", 14))
-        self.nachname_entry.pack(pady=(5, 15), ipady=5)
+        ttk.Label(main_frame, text=f"DHF Planer v{__version__}", font=("Segoe UI", 28, "bold")).pack(pady=(0, 40))
 
-        self.pass_var = tk.StringVar()
-        ttk.Label(center_frame, text="Passwort").pack(anchor="w")
-        self.pass_entry = ttk.Entry(center_frame, textvariable=self.pass_var, show="*", width=30, font=("Segoe UI", 14))
-        self.pass_entry.pack(pady=(5, 25), ipady=5)
-        self.pass_entry.bind("<Return>", self.attempt_login)
+        form_frame = ttk.Frame(main_frame, style='TFrame')
+        form_frame.pack(fill="x", pady=5)
+        form_frame.columnconfigure(1, weight=1)
 
-        login_button = ttk.Button(center_frame, text="Anmelden", command=self.attempt_login, style="Login.TButton",
-                                  width=25)
-        login_button.pack(pady=10)
+        ttk.Label(form_frame, text="Vorname:").grid(row=0, column=0, sticky="w", padx=5, pady=5)
+        self.vorname_entry = ttk.Entry(form_frame, font=('Segoe UI', 12), width=30)
+        self.vorname_entry.grid(row=0, column=1, sticky="ew", padx=5, pady=5)
+        self.vorname_entry.focus_set()
 
-        if get_user_count() == 0:
-            reg_button = ttk.Button(center_frame, text="Ersten Admin registrieren", command=self.open_registration)
+        ttk.Label(form_frame, text="Nachname:").grid(row=1, column=0, sticky="w", padx=5, pady=5)
+        self.name_entry = ttk.Entry(form_frame, font=('Segoe UI', 12))
+        self.name_entry.grid(row=1, column=1, sticky="ew", padx=5, pady=5)
+
+        ttk.Label(form_frame, text="Passwort:").grid(row=2, column=0, sticky="w", padx=5, pady=5)
+        self.password_entry = ttk.Entry(form_frame, show="*", font=('Segoe UI', 12))
+        self.password_entry.grid(row=2, column=1, sticky="ew", padx=5, pady=5)
+        self.password_entry.bind("<Return>", self.attempt_login)
+
+        self.login_button = ttk.Button(main_frame, text="Anmelden", command=self.attempt_login, style='TButton')
+        self.login_button.pack(pady=20, fill="x", ipady=8)
+
+        user_count = get_user_count()
+        if user_count == 0:
+            reg_frame = ttk.Frame(main_frame, style='TFrame')
+            reg_frame.pack(pady=10)
+            ttk.Label(reg_frame, text="Keine Benutzer gefunden.", foreground="#bdc3c7").pack()
+            reg_button = ttk.Button(reg_frame, text="Ersten Admin registrieren", command=self.open_registration)
             reg_button.pack(pady=5)
 
-        quit_button = ttk.Button(center_frame, text="Beenden", command=self.master.on_app_close)
-        quit_button.pack(pady=15)
+        footer_frame = ttk.Frame(self, style='TFrame', padding=10)
+        footer_frame.pack(side="bottom", fill="x")
+        update_button = ttk.Button(footer_frame, text="Update", command=self.check_for_updates, style='Small.TButton')
+        update_button.pack(side="right")
 
-        self.vorname_entry.focus()
+    def attempt_login(self, event=None):
+        vorname = self.vorname_entry.get()
+        name = self.name_entry.get()
+        password = self.password_entry.get()
+        user_data = check_login(vorname, name, password)
+        if user_data:
+            self.login_callback(user_data)
+        else:
+            messagebox.showerror("Login fehlgeschlagen", "Benutzername oder Passwort falsch.", parent=self)
 
     def open_registration(self):
         RegistrationWindow(self)
 
-    def attempt_login(self, event=None):
-        # GEÄNDERT: Liest Vorname und Nachname aus
-        vorname = self.vorname_var.get().strip()
-        nachname = self.nachname_var.get().strip()
-        password = self.pass_var.get().strip()
+    def check_for_updates(self):
+        messagebox.showinfo("Update", "Diese Funktion ist noch nicht implementiert.", parent=self)
 
-        if not vorname or not nachname or not password:
-            messagebox.showwarning("Eingabe fehlt", "Bitte füllen Sie alle Felder aus.", parent=self)
-            return
-
-        # GEÄNDERT: Übergibt Vorname und Nachname an die Datenbankfunktion
-        user_data = check_login(vorname, nachname, password)
-
-        if user_data:
-            self.login_callback(user_data)
-        else:
-            messagebox.showerror("Fehler", "Falscher Vor- oder Nachname bzw. Passwort.", parent=self)
+    def clear_input_fields(self):
+        self.vorname_entry.delete(0, tk.END)
+        self.name_entry.delete(0, tk.END)
+        self.password_entry.delete(0, tk.END)
+        self.vorname_entry.focus_set()

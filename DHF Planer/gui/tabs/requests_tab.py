@@ -3,144 +3,132 @@ import tkinter as tk
 from tkinter import ttk, messagebox
 from datetime import datetime
 
-from database import db_manager
+# --- KORRIGIERTER IMPORT ---
+from database.db_manager import get_pending_wunschfrei_requests, update_wunschfrei_status, save_shift_entry
+from ..dialogs.rejection_reason_dialog import RejectionReasonDialog
 
 
 class RequestsTab(ttk.Frame):
-    def __init__(self, master, app_logic):
+    def __init__(self, master, app):
         super().__init__(master)
-        self.app = app_logic
-        self.all_requests = {}
-        self.selected_request_id = None
+        self.app = app
+        self.all_requests_data = {}
         self.setup_ui()
-        self.refresh_requests_tree()
+        self.refresh_requests()
 
     def setup_ui(self):
-        # UI-Setup bleibt unverändert...
-        main_pane = ttk.PanedWindow(self, orient=tk.HORIZONTAL)
-        main_pane.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
-        list_frame = ttk.Frame(main_pane, padding=5)
-        self.setup_list_frame(list_frame)
-        main_pane.add(list_frame, weight=1)
-        details_frame = ttk.Frame(main_pane, padding=10)
-        self.setup_details_frame(details_frame)
-        main_pane.add(details_frame, weight=2)
+        main_frame = ttk.Frame(self, padding="10")
+        main_frame.pack(fill="both", expand=True)
 
-    def setup_list_frame(self, parent):
-        top_frame = ttk.Frame(parent)
-        top_frame.pack(fill=tk.X, pady=(0, 5))
-        ttk.Label(top_frame, text="Offene Anträge", font=("Segoe UI", 12, "bold")).pack(side=tk.LEFT, anchor="w")
-        ttk.Button(top_frame, text="Aktualisieren", command=self.refresh_requests_tree).pack(side=tk.RIGHT)
+        pending_frame = ttk.LabelFrame(main_frame, text="Offene Anträge", padding="10")
+        pending_frame.pack(fill="both", expand=True)
 
-        tree_frame = ttk.Frame(parent)
-        tree_frame.pack(fill=tk.BOTH, expand=True)
-        cols = ("datum", "mitarbeiter", "wunsch")
-        self.tree = ttk.Treeview(tree_frame, columns=cols, show="headings")
-        self.tree.heading("datum", text="Datum")
-        self.tree.column("datum", width=100)
-        self.tree.heading("mitarbeiter", text="Mitarbeiter")
-        self.tree.column("mitarbeiter", width=150)
-        self.tree.heading("wunsch", text="Wunsch")
-        self.tree.column("wunsch", width=80, anchor="center")
-        self.tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        vsb = ttk.Scrollbar(tree_frame, orient="vertical", command=self.tree.yview)
-        vsb.pack(side=tk.RIGHT, fill=tk.Y)
-        self.tree.configure(yscrollcommand=vsb.set)
-        self.tree.bind("<<TreeviewSelect>>", self.on_request_select)
+        tree_container = ttk.Frame(pending_frame)
+        tree_container.pack(fill="both", expand=True, side="left")
 
-    def setup_details_frame(self, parent):
-        parent.columnconfigure(1, weight=1)
-        ttk.Label(parent, text="Details zum Antrag", font=("Segoe UI", 12, "bold")).grid(row=0, column=0, columnspan=2,
-                                                                                         sticky="w", pady=(0, 10))
-        self.detail_date_var = tk.StringVar()
-        self.detail_user_var = tk.StringVar()
-        self.detail_request_var = tk.StringVar()
-        ttk.Label(parent, text="Datum:").grid(row=1, column=0, sticky="w")
-        ttk.Label(parent, textvariable=self.detail_date_var).grid(row=1, column=1, sticky="w")
-        ttk.Label(parent, text="Mitarbeiter:").grid(row=2, column=0, sticky="w")
-        ttk.Label(parent, textvariable=self.detail_user_var).grid(row=2, column=1, sticky="w")
-        ttk.Label(parent, text="Wunsch:").grid(row=3, column=0, sticky="w")
-        ttk.Label(parent, textvariable=self.detail_request_var).grid(row=3, column=1, sticky="w")
+        self.pending_requests_tree = ttk.Treeview(
+            tree_container,
+            columns=("user", "date", "request_type", "status"),
+            show="headings"
+        )
+        self.pending_requests_tree.heading("user", text="Mitarbeiter")
+        self.pending_requests_tree.heading("date", text="Datum")
+        self.pending_requests_tree.heading("request_type", text="Anfrage")
+        self.pending_requests_tree.heading("status", text="Status")
+        self.pending_requests_tree.pack(fill="both", expand=True)
 
-        action_frame = ttk.Frame(parent, padding=(0, 20, 0, 0))
-        action_frame.grid(row=4, column=0, columnspan=2, sticky="ew")
-        self.approve_button = ttk.Button(action_frame, text="Genehmigen", command=lambda: self.process_request(True))
-        self.approve_button.pack(side="left", padx=5)
-        self.reject_button = ttk.Button(action_frame, text="Ablehnen", command=lambda: self.process_request(False))
-        self.reject_button.pack(side="left", padx=5)
+        button_frame = ttk.Frame(pending_frame)
+        button_frame.pack(side="left", fill="y", padx=10, pady=5)
+        ttk.Button(button_frame, text="Genehmigen", command=lambda: self.process_selection(True)).pack(pady=5, fill="x")
+        ttk.Button(button_frame, text="Ablehnen", command=lambda: self.process_selection(False)).pack(pady=5, fill="x")
+        ttk.Button(button_frame, text="Aktualisieren", command=self.refresh_requests).pack(side="bottom", pady=10)
 
-    def refresh_requests_tree(self):
-        for i in self.tree.get_children():
-            self.tree.delete(i)
+    def refresh_requests(self):
+        for item in self.pending_requests_tree.get_children():
+            self.pending_requests_tree.delete(item)
+        self.all_requests_data.clear()
 
-        requests = db_manager.get_pending_wunschfrei_requests()
-        self.all_requests.clear()
-
+        # --- KORRIGIERTER FUNKTIONSAUFRUF ---
+        requests = get_pending_wunschfrei_requests()
         for req in requests:
-            self.all_requests[req['id']] = req
-            date_str = datetime.strptime(req['request_date'], '%Y-%m-%d').strftime('%d.%m.%Y')
+            req_id = req['id']
+            # Wir speichern hier die kompletten Daten, um sie später zu verwenden
+            self.all_requests_data[req_id] = req
             user_name = f"{req['vorname']} {req['name']}"
-            request_type = req['requested_shift']
-            self.tree.insert("", "end", iid=req['id'], values=(date_str, user_name, request_type))
+            date_obj = datetime.strptime(req['request_date'], '%Y-%m-%d').strftime('%d.%m.%Y')
+            req_type = "Frei" if req.get('requested_shift') == 'WF' else req.get('requested_shift')
+            # 'status' ist hier immer 'Ausstehend', aber wir holen es für Konsistenz
+            status = 'Ausstehend'
+            values = (user_name, date_obj, req_type, status)
+            self.pending_requests_tree.insert("", tk.END, iid=req_id, values=values)
 
-        self.clear_details()
-        # Ruft die neue Methode im Hauptfenster auf, um alle Zähler zu aktualisieren
-        self.app.update_notification_indicators()
-
-    def on_request_select(self, event):
-        selection = self.tree.selection()
+    def _get_selected_request_id(self):
+        selection = self.pending_requests_tree.selection()
         if not selection:
-            self.clear_details()
+            messagebox.showwarning("Keine Auswahl", "Bitte wählen Sie einen Antrag aus.", parent=self)
+            return None
+        return int(selection[0])
+
+    def process_selection(self, approve):
+        request_id = self._get_selected_request_id()
+        if request_id is None:
             return
 
-        self.selected_request_id = int(selection[0])
-        self.display_request_details(self.selected_request_id)
-
-    def display_request_details(self, request_id):
-        request = self.all_requests.get(request_id)
-        if not request: return
-
-        date_str = datetime.strptime(request['request_date'], '%Y-%m-%d').strftime('%d.%m.%Y')
-        self.detail_date_var.set(date_str)
-        self.detail_user_var.set(f"{request['vorname']} {request['name']}")
-        self.detail_request_var.set(request['requested_shift'])
-
-    def clear_details(self):
-        self.selected_request_id = None
-        self.detail_date_var.set("")
-        self.detail_user_var.set("")
-        self.detail_request_var.set("")
-
-    def process_request(self, approve):
-        if self.selected_request_id is None:
-            messagebox.showwarning("Keine Auswahl", "Bitte wählen Sie zuerst einen Antrag aus.", parent=self)
+        reason = self._ask_for_rejection_reason_if_needed(approve)
+        if reason is None:  # User cancelled the rejection dialog
             return
 
-        request_data = self.all_requests.get(self.selected_request_id)
-        if not request_data: return
+        self._update_request_status(request_id, approve, reason)
+
+    def _ask_for_rejection_reason_if_needed(self, approve):
+        if not approve:
+            dialog = RejectionReasonDialog(self)
+            if dialog.result:
+                return dialog.reason
+            else:
+                return None  # Indicates cancellation
+        return ""  # No reason needed for approval
+
+    def _update_request_status(self, request_id, approve, reason=""):
+        status = 'Genehmigt' if approve else 'Abgelehnt'
+        success, message = update_wunschfrei_status(request_id, status, reason)
+        if not success:
+            messagebox.showerror("Datenbankfehler", message, parent=self)
+            return
 
         if approve:
-            new_status = 'Genehmigt'
-            reason = None
-            if request_data['requested_shift'] == 'WF':
-                # Bei Genehmigung von "Wunschfrei" wird 'X' in den Plan eingetragen
-                db_manager.save_shift_entry(request_data['user_id'], request_data['request_date'], 'X')
-            else:
-                # Bei Schichtwunsch wird die gewünschte Schicht eingetragen
-                db_manager.save_shift_entry(request_data['user_id'], request_data['request_date'],
-                                            request_data['requested_shift'])
-        else:
-            new_status = 'Abgelehnt'
-            # Simpler Dialog zur Eingabe eines Ablehnungsgrundes
-            from tkinter.simpledialog import askstring
-            reason = askstring("Ablehnungsgrund", "Bitte geben Sie einen Grund für die Ablehnung an:", parent=self)
+            request_details = self.all_requests_data.get(request_id)
+            if request_details:
+                user_id = request_details['user_id']
+                date_str = request_details['request_date']
+                shift = 'WF' if request_details['requested_shift'] == 'WF' else request_details['requested_shift']
 
-        success, msg = db_manager.update_wunschfrei_status(self.selected_request_id, new_status, reason)
+                save_shift = 'X' if shift == 'WF' else shift
 
-        if success:
-            messagebox.showinfo("Erfolg", f"Antrag wurde erfolgreich {new_status.lower()}.", parent=self)
-            self.refresh_requests_tree()
-            # Lade den Schichtplan neu, da sich Einträge geändert haben könnten
-            self.app.reload_shift_plan()
-        else:
-            messagebox.showerror("Fehler", f"Fehler beim Bearbeiten des Antrags:\n{msg}", parent=self)
+                save_success, save_message = save_shift_entry(user_id, date_str, save_shift)
+                if not save_success:
+                    messagebox.showerror("Fehler beim Eintragen", save_message, parent=self)
+
+        messagebox.showinfo("Erfolg", message, parent=self)
+        self.refresh_requests()
+
+        shift_plan_tab = self.app.tab_frames.get("Schichtplan")
+        if shift_plan_tab:
+            shift_plan_tab.build_shift_plan_grid(self.app.current_display_date.year,
+                                                 self.app.current_display_date.month)
+
+    def process_wunschfrei_by_id(self, request_id, approve):
+        """Verarbeitet einen Antrag anhand seiner ID. Kann von anderen Tabs aufgerufen werden."""
+        # Wir müssen die Antragsdetails aus dem Speicher holen
+        if request_id not in self.all_requests_data:
+            self.refresh_requests()  # Daten neu laden, falls sie veraltet sind
+            if request_id not in self.all_requests_data:
+                messagebox.showerror("Fehler", "Antrag nicht gefunden. Bitte aktualisieren Sie die Ansicht.",
+                                     parent=self)
+                return
+
+        reason = self._ask_for_rejection_reason_if_needed(approve)
+        if reason is None:
+            return
+
+        self._update_request_status(request_id, approve, reason)
