@@ -1,12 +1,14 @@
-# gui/dialogs/planning_assistant_settings_window.py
+# gui/dialogs/planning_assistant_settings_window.py (KORRIGIERT: __init__ Signatur und Callback)
 import tkinter as tk
 from tkinter import ttk, messagebox
 from gui.admin_menu_config_manager import AdminMenuConfigManager
 
+
 class PlanningAssistantSettingsWindow(tk.Toplevel):
-    def __init__(self, master):
+    def __init__(self, master, callback):  # KORRIGIERT: Füge 'callback' hinzu
         super().__init__(master)
-        self.master = master # Referenz auf MainAdminWindow
+        self.master = master  # Referenz auf MainAdminWindow
+        self.callback = callback  # Speichere die Callback-Funktion
         self.title("Einstellungen für Planungs-Helfer")
         self.geometry("450x450")
         self.transient(master)
@@ -34,8 +36,9 @@ class PlanningAssistantSettingsWindow(tk.Toplevel):
         counter_frame = ttk.LabelFrame(main_frame, text="Häufigkeits-Zähler", padding="10")
         counter_frame.pack(fill="x", pady=(20, 0))
 
-        # Zugriff auf die Methode in der Haupt-App
-        ttk.Button(counter_frame, text="Zähler jetzt zurücksetzen", command=self.master.reset_shift_frequency).pack(pady=5)
+        # Zugriff auf die korrigierte Methode in der Haupt-App (keine Änderung nötig, da sie nun existiert)
+        ttk.Button(counter_frame, text="Zähler jetzt zurücksetzen", command=self.master.reset_shift_frequency).pack(
+            pady=5)
 
         button_bar = ttk.Frame(main_frame)
         button_bar.pack(fill="x", pady=(20, 0), side="bottom")
@@ -49,4 +52,9 @@ class PlanningAssistantSettingsWindow(tk.Toplevel):
         new_config = {key: var.get() for key, var in self.vis_vars.items()}
         AdminMenuConfigManager.save_config(new_config)
         messagebox.showinfo("Gespeichert", "Die Einstellungen für das Auswahlmenü wurden gespeichert.", parent=self)
+
+        # Führt den Callback aus, um die Hauptansicht zu aktualisieren
+        if self.callback:
+            self.callback()
+
         self.destroy()

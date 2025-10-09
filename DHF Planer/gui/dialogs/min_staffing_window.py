@@ -1,10 +1,10 @@
-# gui/dialogs/min_staffing_window.py (KORRIGIERT: Liest/Schreibt Regeln in DB)
+# gui/dialogs/min_staffing_window.py (KORRIGIERT: Behebt TclError)
 import tkinter as tk
 from tkinter import ttk, messagebox
 import json
 from collections import defaultdict
 
-from database.db_manager import load_staffing_rules, save_staffing_rules # Importiert DB-Funktionen
+from database.db_manager import load_staffing_rules, save_staffing_rules  # Importiert DB-Funktionen
 
 
 class MinStaffingWindow(tk.Toplevel):
@@ -16,7 +16,7 @@ class MinStaffingWindow(tk.Toplevel):
         self.transient(master)
         self.grab_set()
 
-        self.rules = load_staffing_rules() # LÄDT AUS DB
+        self.rules = load_staffing_rules()  # LÄDT AUS DB
         self.temp_rules = defaultdict(dict, self.rules.copy())
         self.shift_types = master.shift_types_data
         self.selected_rule_set = tk.StringVar(value="Daily")
@@ -31,8 +31,12 @@ class MinStaffingWindow(tk.Toplevel):
         rule_set_frame.pack(fill="x", pady=5)
         ttk.Label(rule_set_frame, text="Regel-Set:").pack(side="left", padx=(0, 10))
         rule_sets = ["Daily", "Sa-So", "Fr", "Mo-Do", "Holiday"]
-        ttk.Combobox(rule_set_frame, textvariable=self.selected_rule_set, values=rule_sets, state="readonly",
-                     command=self.load_rule_set).pack(side="left")
+
+        # FIX: command-Option entfernt und durch bind ersetzt, um TclError zu vermeiden
+        self.rule_set_combobox = ttk.Combobox(rule_set_frame, textvariable=self.selected_rule_set, values=rule_sets,
+                                              state="readonly")
+        self.rule_set_combobox.pack(side="left")
+        self.rule_set_combobox.bind('<<ComboboxSelected>>', self.load_rule_set)  # Bindet die Funktion an die Auswahl
 
         # Color Rules Button
         ttk.Button(rule_set_frame, text="Farben anpassen...", command=self.open_color_rules).pack(side="right")
@@ -71,7 +75,7 @@ class MinStaffingWindow(tk.Toplevel):
                                                                                                     sticky="ew", padx=5)
         ttk.Button(button_frame, text="Löschen", command=self.delete_rule).grid(row=0, column=1, sticky="ew", padx=5)
         ttk.Button(button_frame, text="Speichern & Schließen", command=self.save_rules).grid(row=0, column=2,
-                                                                                               sticky="ew", padx=5)
+                                                                                             sticky="ew", padx=5)
 
         self.load_rule_set()
 
@@ -93,7 +97,9 @@ class MinStaffingWindow(tk.Toplevel):
         current_set = self.selected_rule_set.get()
 
         if not shift or not staff_str.isdigit():
-            messagebox.showwarning("Eingabe ungültig", "Bitte eine Schicht auswählen und eine gültige Zahl für die Besetzung eingeben.", parent=self)
+            messagebox.showwarning("Eingabe ungültig",
+                                   "Bitte eine Schicht auswählen und eine gültige Zahl für die Besetzung eingeben.",
+                                   parent=self)
             return
 
         staff = int(staff_str)
@@ -129,7 +135,7 @@ class MinStaffingWindow(tk.Toplevel):
 
     def save_rules(self):
         """Speichert die Regeln in der Datenbank (ersetzt JSON-Speicherung)."""
-        success = save_staffing_rules(self.temp_rules) # SCHREIBT IN DB
+        success = save_staffing_rules(self.temp_rules)  # SCHREIBT IN DB
         if success:
             messagebox.showinfo("Erfolg", "Mindestbesetzungs-Regeln gespeichert.", parent=self)
             self.callback()
@@ -138,6 +144,7 @@ class MinStaffingWindow(tk.Toplevel):
             messagebox.showerror("Fehler", "Speichern in der Datenbank fehlgeschlagen.", parent=self)
 
     def open_color_rules(self):
-        messagebox.showinfo("Farben anpassen", "Die Farbregeln (im 'Colors'-Set) können hier bearbeitet werden.", parent=self)
+        messagebox.showinfo("Farben anpassen", "Die Farbregeln (im 'Colors'-Set) können hier bearbeitet werden.",
+                            parent=self)
         # Implementierung des Farbregel-Dialogs wäre hier, wenn er existiert.
         # Da hier nur eine MessageBox steht, wird diese beibehalten.

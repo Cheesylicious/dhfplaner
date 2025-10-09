@@ -8,10 +8,10 @@ from tkinter import messagebox
 
 # --- KONFIGURATION ---
 # Die aktuelle Version, die im Code enthalten ist. MUSST du nach jedem Update inkrementieren.
-CURRENT_VERSION = "1.0.0"
+CURRENT_VERSION = "1.0.1"
 
 # URL, unter der die Updates und die versions.txt liegen
-BASE_URL = "https://github.com/Cheesylicious/dhfplaner"
+BASE_URL = "https://raw.githubusercontent.com/Cheesylicious/dhfplaner/refs/heads/main/DHF%20Planer/"
 
 
 # --- ENDE KONFIGURATION ---

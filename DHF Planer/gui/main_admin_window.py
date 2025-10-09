@@ -1,4 +1,4 @@
-# gui/main_admin_window.py (KORRIGIERT: Konfigurations-Logik auf DB umgestellt)
+# gui/main_admin_window.py (KORRIGIERT: reset_shift_frequency hinzugefügt)
 import tkinter as tk
 from tkinter import ttk, messagebox
 import json
@@ -239,6 +239,15 @@ class MainAdminWindow(tk.Toplevel):
         if not save_shift_frequency(dict(self.shift_frequency)):
             messagebox.showwarning("Speicherfehler", "Die Schichthäufigkeit konnte nicht gespeichert werden.",
                                    parent=self)
+
+    def reset_shift_frequency(self):
+        """Setzt den Zähler für die Schichthäufigkeit zurück."""
+        if messagebox.askyesno("Bestätigen",
+                               "Möchten Sie den Zähler für die Schichthäufigkeit wirklich zurücksetzen? Dies kann nicht rückgängig gemacht werden.",
+                               parent=self):
+            self.shift_frequency = defaultdict(int)
+            self.save_shift_frequency()
+            messagebox.showinfo("Erfolg", "Der Zähler wurde erfolgreich zurückgesetzt.", parent=self)
 
     def get_allowed_roles(self):
         return ROLE_HIERARCHY
