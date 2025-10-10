@@ -7,7 +7,8 @@ from database.db_manager import (
     get_shifts_for_month, get_wunschfrei_requests_for_month, get_daily_shift_counts_for_month,
     get_ordered_shift_abbrevs, get_ordered_users_for_schedule, submit_user_request,
     get_wunschfrei_requests_by_user_for_month, get_wunschfrei_request_by_user_and_date,
-    withdraw_wunschfrei_request, get_all_vacation_requests_for_month
+    withdraw_wunschfrei_request, get_all_vacation_requests_for_month,
+    user_respond_to_request, save_shift_entry, get_wunschfrei_request_by_id
 )
 from gui.request_config_manager import RequestConfigManager
 from gui.dialogs.custom_messagebox import CustomMessagebox
@@ -78,6 +79,7 @@ class UserShiftPlanTab(ttk.Frame):
     def build_shift_plan_grid(self, year, month):
         for widget in self.plan_grid_frame.winfo_children():
             widget.destroy()
+        self.tooltips.clear()
         self.grid_widgets = {'cells': {}, 'user_totals': {}, 'daily_counts': {}}
         if year != self.app.current_display_date.year:
             self.app._load_holidays_for_year(year)
@@ -148,13 +150,16 @@ class UserShiftPlanTab(ttk.Frame):
                 elif vacation_status == 'Ausstehend':
                     display_shift = "EU?"
                 elif request_info:
-                    status, requested_shift = request_info
+                    status, requested_shift, requested_by = request_info
                     if status == 'Ausstehend':
-                        display_shift = 'WF' if requested_shift == 'WF' else f"{requested_shift}?"
-                    elif status == 'Genehmigt' and requested_shift == 'WF':
-                        display_shift = 'X'
-                    elif status == 'Abgelehnt':
-                        display_shift = ""
+                        if requested_by == 'admin':
+                            display_shift = f"{requested_shift} (A)?"
+                        else:
+                            display_shift = 'WF' if requested_shift == 'WF' else f"{requested_shift}?"
+                    elif "Akzeptiert" in status or "Genehmigt" in status:
+                        if requested_shift == 'WF':
+                            display_shift = 'X'
+                        # Ansonsten ist die Schicht bereits im Plan, also display_shift beibehalten
 
                 frame = tk.Frame(self.plan_grid_frame, bd=1, relief="solid")
                 frame.grid(row=current_row, column=day + 1, sticky="nsew")
@@ -223,6 +228,7 @@ class UserShiftPlanTab(ttk.Frame):
         weekend_bg = rules.get('weekend_bg', "#EAF4FF")
         holiday_bg = rules.get('holiday_bg', "#FFD700")
         pending_color = rules.get('Ausstehend', 'orange')
+        admin_pending_color = rules.get('Admin_Ausstehend', '#E0B0FF')
 
         self.wunschfrei_data = get_wunschfrei_requests_for_month(year, month)
 
@@ -246,10 +252,10 @@ class UserShiftPlanTab(ttk.Frame):
                     frame.config(bg="gold", bd=2)
 
                 original_text = label.cget("text")
-                shift_abbrev = original_text.replace("?", "")
+                shift_abbrev = original_text.replace("?", "").replace(" (A)", "")
                 shift_data = self.app.shift_types_data.get(shift_abbrev)
+                request_info = self.wunschfrei_data.get(user_id_str, {}).get(current_date.strftime('%Y-%m-%d'))
 
-                # Standard-Hintergrundfarbe setzen
                 bg_color = "white"
                 if is_holiday:
                     bg_color = holiday_bg
@@ -258,11 +264,15 @@ class UserShiftPlanTab(ttk.Frame):
                 elif is_logged_in_user:
                     bg_color = "#E8F5E9"
 
-                # Überschreiben mit spezifischen Farben
                 if shift_abbrev in ["EU", "X"] and shift_data and shift_data.get('color'):
                     bg_color = shift_data.get('color')
-                elif vacation_status == 'Ausstehend' or '?' in original_text or original_text == 'WF':
+                elif vacation_status == 'Ausstehend':
                     bg_color = pending_color
+                elif request_info and request_info[0] == 'Ausstehend':
+                    if request_info[2] == 'admin':
+                        bg_color = admin_pending_color
+                    else:
+                        bg_color = pending_color
                 elif shift_data and shift_data.get('color') and not (is_holiday or is_weekend):
                     bg_color = shift_data.get('color')
 
@@ -319,11 +329,18 @@ class UserShiftPlanTab(ttk.Frame):
             return
         date_str = request_date.strftime('%Y-%m-%d')
         existing_request = get_wunschfrei_request_by_user_and_date(user_id, date_str)
-        if existing_request and existing_request['status'] == 'Genehmigt':
+
+        if existing_request and existing_request.get('requested_by') == 'admin' and existing_request.get(
+                'status') == 'Ausstehend':
+            self.handle_admin_request(event, existing_request)
+            return
+
+        if existing_request and ("Akzeptiert" in existing_request['status'] or "Genehmigt" in existing_request['status']):
             messagebox.showinfo("Info",
-                                "Ein bereits genehmigter Antrag kann hier nicht geändert werden.\nBitte ziehe den Antrag im Reiter 'Meine Anfragen' zurück, um einen neuen zu stellen.",
+                                "Ein bereits akzeptierter Antrag kann hier nicht geändert werden.\nBitte ziehe den Antrag im Reiter 'Meine Anfragen' zurück, um einen neuen zu stellen.",
                                 parent=self)
             return
+
         context_menu = tk.Menu(self, tearoff=0)
         request_config = RequestConfigManager.load_config()
         if existing_request:
@@ -350,6 +367,36 @@ class UserShiftPlanTab(ttk.Frame):
         else:
             messagebox.showinfo("Keine Aktionen", "Aktuell sind keine Anfragetypen für diesen Tag verfügbar.",
                                 parent=self)
+
+    def handle_admin_request(self, event, request_info):
+        context_menu = tk.Menu(self, tearoff=0)
+        context_menu.add_command(label="Einverstanden",
+                                 command=lambda: self.respond_to_admin_request(request_info['id'], 'Genehmigt'))
+        context_menu.add_command(label="Ablehnen",
+                                 command=lambda: self.respond_to_admin_request(request_info['id'], 'Abgelehnt'))
+        context_menu.post(event.x_root, event.y_root)
+
+    def respond_to_admin_request(self, request_id, response):
+        request_info_before = get_wunschfrei_request_by_id(request_id)
+        if not request_info_before:
+            messagebox.showerror("Fehler", "Anfrage nicht gefunden.", parent=self)
+            return
+
+        success, message = user_respond_to_request(request_id, response)
+
+        if success:
+            if response == 'Genehmigt':
+                save_shift_entry(
+                    request_info_before['user_id'],
+                    request_info_before['request_date'],
+                    request_info_before['requested_shift'],
+                    keep_request_record=True
+                )
+            self.build_shift_plan_grid(self.app.current_display_date.year, self.app.current_display_date.month)
+            if "Meine Anfragen" in self.app.tab_frames:
+                self.app.tab_frames["Meine Anfragen"].refresh_data()
+        else:
+            messagebox.showerror("Fehler", message, parent=self)
 
     def _update_user_total_hours(self, user_id_str):
         total_hours_label = self.grid_widgets['user_totals'].get(user_id_str)
@@ -405,6 +452,7 @@ class UserShiftPlanTab(ttk.Frame):
         else:
             total_hours_label.config(background="white")
             if tooltip_key in self.tooltips:
+                self.tooltips[tooltip_key].hidetip()
                 self.tooltips[tooltip_key].widget.unbind("<Enter>")
                 self.tooltips[tooltip_key].widget.unbind("<Leave>")
                 del self.tooltips[tooltip_key]
@@ -419,19 +467,25 @@ class UserShiftPlanTab(ttk.Frame):
         if user_id_str not in self.wunschfrei_data:
             self.wunschfrei_data[user_id_str] = {}
         if request_info:
-            self.wunschfrei_data[user_id_str][date_str] = (request_info['status'], request_info['requested_shift'])
+            self.wunschfrei_data[user_id_str][date_str] = (
+            request_info['status'], request_info['requested_shift'], request_info.get('requested_by', 'user'))
         elif date_str in self.wunschfrei_data.get(user_id_str, {}):
             del self.wunschfrei_data[user_id_str][date_str]
 
         display_shift = shift
         if request_info:
-            status, requested_shift = request_info['status'], request_info['requested_shift']
+            status, requested_shift, requested_by = request_info['status'], request_info['requested_shift'], request_info.get(
+                'requested_by', 'user')
             if status == 'Ausstehend':
-                display_shift = 'WF' if requested_shift == 'WF' else f"{requested_shift}?"
-            elif status == 'Genehmigt' and requested_shift == 'WF':
-                display_shift = 'X'
-            elif status == 'Abgelehnt':
-                display_shift = ""
+                if requested_by == 'admin':
+                    display_shift = f"{requested_shift} (A)?"
+                else:
+                    display_shift = 'WF' if requested_shift == 'WF' else f"{requested_shift}?"
+            elif "Akzeptiert" in status or "Genehmigt" in status:
+                if requested_shift == 'WF':
+                    display_shift = 'X'
+                else:
+                    display_shift = requested_shift
 
         cell_widgets = self.grid_widgets['cells'].get(user_id_str, {}).get(day)
         if cell_widgets:
@@ -447,7 +501,7 @@ class UserShiftPlanTab(ttk.Frame):
                 CustomMessagebox(self, "Erfolg", message, lambda: setattr(self.app, 'show_request_popups', False))
             self._update_cell_ui(user_id, date_str)
             if "Meine Anfragen" in self.app.tab_frames:
-                self.app.tab_frames["Meine Anfragen"].refresh_wunschfrei_tab()
+                self.app.tab_frames["Meine Anfragen"].refresh_data()
         else:
             messagebox.showerror("Fehler", message, parent=self)
 
@@ -455,7 +509,7 @@ class UserShiftPlanTab(ttk.Frame):
         request_date = date(year, month, day)
         date_str = request_date.strftime('%Y-%m-%d')
 
-        if request_type is None:  # WF
+        if request_type is None:
             request_count = get_wunschfrei_requests_by_user_for_month(self.app.user_data['id'], year, month)
             existing_request = get_wunschfrei_request_by_user_and_date(self.app.user_data['id'], date_str)
             is_new_wf_request = not existing_request or existing_request['requested_shift'] != 'WF'
@@ -477,7 +531,7 @@ class UserShiftPlanTab(ttk.Frame):
                 CustomMessagebox(self, "Erfolg", message, lambda: setattr(self.app, 'show_request_popups', False))
             self._update_cell_ui(self.app.user_data['id'], date_str)
             if "Meine Anfragen" in self.app.tab_frames:
-                self.app.tab_frames["Meine Anfragen"].refresh_wunschfrei_tab()
+                self.app.tab_frames["Meine Anfragen"].refresh_data()
         else:
             messagebox.showerror("Fehler", message, parent=self)
 

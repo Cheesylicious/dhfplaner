@@ -70,6 +70,7 @@ def initialize_db():
                 notified INTEGER DEFAULT 0,
                 rejection_reason TEXT,
                 requested_shift TEXT,
+                requested_by TEXT DEFAULT 'user',
                 UNIQUE(user_id, request_date),
                 FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE
             );
@@ -170,6 +171,7 @@ def initialize_db():
         _add_column_if_not_exists(cursor, "wunschfrei_requests", "notified", "INTEGER DEFAULT 0")
         _add_column_if_not_exists(cursor, "wunschfrei_requests", "rejection_reason", "TEXT")
         _add_column_if_not_exists(cursor, "wunschfrei_requests", "requested_shift", "TEXT")
+        _add_column_if_not_exists(cursor, "wunschfrei_requests", "requested_by", "TEXT DEFAULT 'user'")
         _add_column_if_not_exists(cursor, "shift_types", "start_time", "TEXT")
         _add_column_if_not_exists(cursor, "shift_types", "end_time", "TEXT")
         _add_column_if_not_exists(cursor, "bug_reports", "user_notified", "INTEGER NOT NULL DEFAULT 1")
@@ -178,7 +180,6 @@ def initialize_db():
         _add_column_if_not_exists(cursor, "users", "has_seen_tutorial", "INTEGER DEFAULT 0")
         _add_column_if_not_exists(cursor, "vacation_requests", "archived", "INTEGER DEFAULT 0")
         _add_column_if_not_exists(cursor, "vacation_requests", "user_notified", "INTEGER DEFAULT 1")
-
 
         conn.commit()
     finally:
@@ -438,17 +439,59 @@ def submit_user_request(user_id, request_date_str, requested_shift=None):
         shift_to_store = "WF" if requested_shift is None else requested_shift
 
         cursor.execute("""
-            INSERT INTO wunschfrei_requests (user_id, request_date, requested_shift, status, notified, rejection_reason)
-            VALUES (?, ?, ?, 'Ausstehend', 0, NULL)
+            INSERT INTO wunschfrei_requests (user_id, request_date, requested_shift, status, notified, rejection_reason, requested_by)
+            VALUES (?, ?, ?, 'Ausstehend', 0, NULL, 'user')
             ON CONFLICT(user_id, request_date) DO UPDATE SET
                 requested_shift = excluded.requested_shift,
                 status = 'Ausstehend',
                 notified = 0,
-                rejection_reason = NULL;
+                rejection_reason = NULL,
+                requested_by = 'user';
         """, (user_id, request_date_str, shift_to_store))
 
         conn.commit()
         return True, "Anfrage erfolgreich gestellt oder aktualisiert."
+    except sqlite3.Error as e:
+        return False, f"Datenbankfehler: {e}"
+    finally:
+        conn.close()
+
+
+def admin_submit_request(user_id, request_date_str, requested_shift):
+    """Speichert eine Admin-Anfrage für eine Schicht."""
+    conn = create_connection()
+    try:
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT INTO wunschfrei_requests (user_id, request_date, requested_shift, status, requested_by)
+            VALUES (?, ?, ?, 'Ausstehend', 'admin')
+            ON CONFLICT(user_id, request_date) DO UPDATE SET
+                requested_shift = excluded.requested_shift,
+                status = 'Ausstehend',
+                requested_by = 'admin';
+        """, (user_id, request_date_str, requested_shift))
+        conn.commit()
+        return True, "Anfrage erfolgreich an den Benutzer gesendet."
+    except sqlite3.Error as e:
+        return False, f"Datenbankfehler: {e}"
+    finally:
+        conn.close()
+
+
+def user_respond_to_request(request_id, response):
+    """Verarbeitet die Antwort eines Benutzers auf eine Admin-Anfrage."""
+    conn = create_connection()
+    try:
+        cursor = conn.cursor()
+        if response == 'Genehmigt':
+            new_status = "Akzeptiert von Benutzer"
+        elif response == 'Abgelehnt':
+            new_status = "Abgelehnt von Benutzer"
+        else:
+            new_status = response
+        cursor.execute("UPDATE wunschfrei_requests SET status = ?, notified = 1 WHERE id = ?", (new_status, request_id))
+        conn.commit()
+        return True, "Antwort erfolgreich übermittelt."
     except sqlite3.Error as e:
         return False, f"Datenbankfehler: {e}"
     finally:
@@ -471,9 +514,16 @@ def withdraw_wunschfrei_request(request_id, user_id):
         status = request_data['status']
         request_date = request_data['request_date']
 
-        if status not in ['Ausstehend', 'Genehmigt', 'Abgelehnt']:
+        log_status = None
+        if "Akzeptiert" in status or "Genehmigt" in status:
+            log_status = 'Genehmigt'
+        elif "Abgelehnt" in status:
+            log_status = 'Abgelehnt'
+        elif status == 'Ausstehend':
+            log_status = 'Ausstehend'
+        else:
             conn.rollback()
-            return False, "Nur ausstehende, genehmigte oder abgelehnte Anträge können zurückgezogen werden."
+            return False, "Dieser Antrag kann nicht zurückgezogen werden."
 
         cursor.execute("DELETE FROM wunschfrei_requests WHERE id = ?", (request_id,))
 
@@ -484,18 +534,18 @@ def withdraw_wunschfrei_request(request_id, user_id):
 
         date_formatted = datetime.strptime(request_date, '%Y-%m-%d').strftime('%d.%m.%Y')
 
-        if status == 'Genehmigt':
+        if log_status == 'Genehmigt':
             cursor.execute("DELETE FROM shift_schedule WHERE user_id = ? AND shift_date = ?",
                            (user_id, request_date))
-            details = f"Benutzer '{user_name}' hat genehmigten Antrag für {date_formatted} zurückgezogen."
-            _log_activity(cursor, user_id, "ANTRAG_GENEHMIGT_ZURÜCKGEZOGEN", details)
+            details = f"Benutzer '{user_name}' hat akzeptierten Antrag für {date_formatted} zurückgezogen."
+            _log_activity(cursor, user_id, "ANTRAG_AKZEPTIERT_ZURÜCKGEZOGEN", details)
             _create_admin_notification(cursor, details)
-            msg = "Genehmigter Antrag wurde zurückgezogen."
-        elif status == 'Ausstehend':
+            msg = "Akzeptierter Antrag wurde zurückgezogen."
+        elif log_status == 'Ausstehend':
             details = f"Benutzer '{user_name}' hat ausstehenden Antrag für {date_formatted} zurückgezogen."
             _log_activity(cursor, user_id, "ANTRAG_AUSSTEHEND_ZURÜCKGEZOGEN", details)
             msg = "Ausstehender Antrag wurde zurückgezogen."
-        elif status == 'Abgelehnt':
+        elif log_status == 'Abgelehnt':
             details = f"Benutzer '{user_name}' hat abgelehnten Antrag für {date_formatted} gelöscht."
             _log_activity(cursor, user_id, "ANTRAG_ABGELEHNT_GELÖSCHT", details)
             msg = "Abgelehnter Antrag wurde gelöscht."
@@ -517,7 +567,7 @@ def get_wunschfrei_requests_by_user_for_month(user_id, year, month):
         start_date = date(year, month, 1).strftime('%Y-%m-01')
         end_date = date(year, month, calendar.monthrange(year, month)[1]).strftime('%Y-%m-%d')
         cursor.execute(
-            "SELECT COUNT(*) FROM wunschfrei_requests WHERE user_id = ? AND request_date BETWEEN ? AND ? AND status != 'Abgelehnt' AND requested_shift = 'WF'",
+            "SELECT COUNT(*) FROM wunschfrei_requests WHERE user_id = ? AND request_date BETWEEN ? AND ? AND status NOT LIKE 'Abgelehnt%' AND requested_shift = 'WF'",
             (user_id, start_date, end_date)
         )
         return cursor.fetchone()[0]
@@ -541,15 +591,41 @@ def get_pending_wunschfrei_requests():
         conn.close()
 
 
+def get_pending_admin_requests_for_user(user_id):
+    """ Zählt die Anzahl der ausstehenden Schichtanfragen von Admins für einen Benutzer. """
+    conn = create_connection()
+    try:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT COUNT(*) FROM wunschfrei_requests WHERE user_id = ? AND requested_by = 'admin' AND status = 'Ausstehend'",
+            (user_id,)
+        )
+        return cursor.fetchone()[0]
+    finally:
+        conn.close()
+
+
 def get_wunschfrei_request_by_user_and_date(user_id, request_date_str):
     """Holt eine spezifische 'Wunschfrei'-Anfrage anhand von Benutzer und Datum."""
     conn = create_connection()
     try:
         cursor = conn.cursor()
         cursor.execute(
-            "SELECT id, user_id, request_date, status, requested_shift FROM wunschfrei_requests WHERE user_id = ? AND request_date = ?",
+            "SELECT id, user_id, request_date, status, requested_shift, requested_by FROM wunschfrei_requests WHERE user_id = ? AND request_date = ?",
             (user_id, request_date_str)
         )
+        row = cursor.fetchone()
+        return dict(row) if row else None
+    finally:
+        conn.close()
+
+
+def get_wunschfrei_request_by_id(request_id):
+    """Holt eine spezifische 'Wunschfrei'-Anfrage anhand ihrer ID."""
+    conn = create_connection()
+    try:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM wunschfrei_requests WHERE id = ?", (request_id,))
         row = cursor.fetchone()
         return dict(row) if row else None
     finally:
@@ -563,7 +639,7 @@ def get_wunschfrei_requests_for_month(year, month):
         start_date = date(year, month, 1).strftime('%Y-%m-01')
         end_date = date(year, month, calendar.monthrange(year, month)[1]).strftime('%Y-%m-%d')
         cursor.execute(
-            "SELECT user_id, request_date, status, requested_shift FROM wunschfrei_requests WHERE request_date BETWEEN ? AND ?",
+            "SELECT user_id, request_date, status, requested_shift, requested_by FROM wunschfrei_requests WHERE request_date BETWEEN ? AND ?",
             (start_date, end_date)
         )
         requests = {}
@@ -571,7 +647,7 @@ def get_wunschfrei_requests_for_month(year, month):
             user_id_str = str(row['user_id'])
             if user_id_str not in requests:
                 requests[user_id_str] = {}
-            requests[user_id_str][row['request_date']] = (row['status'], row['requested_shift'])
+            requests[user_id_str][row['request_date']] = (row['status'], row['requested_shift'], row['requested_by'])
         return requests
     finally:
         conn.close()
@@ -581,9 +657,17 @@ def update_wunschfrei_status(request_id, new_status, reason=None):
     conn = create_connection()
     try:
         cursor = conn.cursor()
+
+        if new_status == 'Genehmigt':
+            final_status = 'Akzeptiert von Admin'
+        elif new_status == 'Abgelehnt':
+            final_status = 'Abgelehnt von Admin'
+        else:
+            final_status = new_status
+
         cursor.execute(
             "UPDATE wunschfrei_requests SET status = ?, notified = 0, rejection_reason = ? WHERE id = ?",
-            (new_status, reason, request_id)
+            (final_status, reason, request_id)
         )
         conn.commit()
         return True, "Status erfolgreich aktualisiert."
@@ -598,7 +682,7 @@ def get_all_requests_by_user(user_id):
     try:
         cursor = conn.cursor()
         cursor.execute(
-            "SELECT id, request_date, status, rejection_reason, requested_shift FROM wunschfrei_requests WHERE user_id = ? ORDER BY request_date DESC",
+            "SELECT id, request_date, status, rejection_reason, requested_shift, requested_by FROM wunschfrei_requests WHERE user_id = ? ORDER BY request_date DESC",
             (user_id,)
         )
         return [dict(row) for row in cursor.fetchall()]
@@ -634,7 +718,7 @@ def mark_requests_as_notified(request_ids):
         conn.close()
 
 
-def save_shift_entry(user_id, shift_date_str, shift_abbrev):
+def save_shift_entry(user_id, shift_date_str, shift_abbrev, keep_request_record=False):
     conn = create_connection()
     try:
         cursor = conn.cursor()
@@ -653,9 +737,10 @@ def save_shift_entry(user_id, shift_date_str, shift_abbrev):
                     VALUES (?, ?, ?)
                 """, (user_id, shift_date_str, shift_abbrev))
 
-        if shift_abbrev != 'X':
-            cursor.execute("DELETE FROM wunschfrei_requests WHERE user_id = ? AND request_date = ?",
-                           (user_id, shift_date_str))
+        if not keep_request_record:
+            if shift_abbrev != 'X':
+                cursor.execute("DELETE FROM wunschfrei_requests WHERE user_id = ? AND request_date = ?",
+                               (user_id, shift_date_str))
 
         conn.commit()
         return True, "Schicht gespeichert."
@@ -671,7 +756,7 @@ def get_shifts_for_month(year, month):
     conn = create_connection()
     try:
         cursor = conn.cursor()
-        start_date = date(year, month, 1).strftime('%Y-%m-%d')
+        start_date = date(year, month, 1).strftime('%Y-%m-01')
         end_date = date(year, month, calendar.monthrange(year, month)[1]).strftime('%Y-%m-%d')
 
         cursor.execute("""
@@ -700,7 +785,7 @@ def get_daily_shift_counts_for_month(year, month):
     conn = create_connection()
     try:
         cursor = conn.cursor()
-        start_date = date(year, month, 1).strftime('%Y-%m-%d')
+        start_date = date(year, month, 1).strftime('%Y-%m-01')
         end_date = date(year, month, calendar.monthrange(year, month)[1]).strftime('%Y-%m-%d')
 
         cursor.execute("""
@@ -1157,12 +1242,30 @@ def get_all_vacation_requests_for_admin():
         conn.close()
 
 
+def delete_vacation_requests(request_ids):
+    if not request_ids:
+        return False, "Keine Anträge zum Löschen ausgewählt."
+    conn = create_connection()
+    try:
+        cursor = conn.cursor()
+        placeholders = ','.join('?' for _ in request_ids)
+        query = f"DELETE FROM vacation_requests WHERE id IN ({placeholders})"
+        cursor.execute(query, request_ids)
+        conn.commit()
+        return True, f"{cursor.rowcount} Urlaubsantrag/anträge endgültig gelöscht."
+    except sqlite3.Error as e:
+        return False, f"Datenbankfehler: {e}"
+    finally:
+        conn.close()
+
+
 def update_vacation_request_status(request_id, new_status):
     """Aktualisiert nur den Status eines Urlaubsantrags und setzt den Notified-Flag."""
     conn = create_connection()
     try:
         cursor = conn.cursor()
-        cursor.execute("UPDATE vacation_requests SET status = ?, user_notified = 0 WHERE id = ?", (new_status, request_id))
+        cursor.execute("UPDATE vacation_requests SET status = ?, user_notified = 0 WHERE id = ?",
+                       (new_status, request_id))
         conn.commit()
         return True, "Urlaubsstatus erfolgreich aktualisiert."
     except sqlite3.Error as e:
@@ -1190,7 +1293,8 @@ def approve_vacation_request(request_id, admin_id):
             return False, "Antrag nicht gefunden."
 
         # Status auf 'Genehmigt' setzen und für Benachrichtigung markieren
-        cursor.execute("UPDATE vacation_requests SET status = 'Genehmigt', user_notified = 0 WHERE id = ?", (request_id,))
+        cursor.execute("UPDATE vacation_requests SET status = 'Genehmigt', user_notified = 0 WHERE id = ?",
+                       (request_id,))
 
         # Urlaubstage in den Schichtplan eintragen
         user_id = request_data['user_id']
@@ -1241,7 +1345,8 @@ def cancel_vacation_request(request_id, admin_id):
             return False, "Nur bereits genehmigte Anträge können storniert werden."
 
         # Status auf 'Storniert' setzen und für Benachrichtigung markieren
-        cursor.execute("UPDATE vacation_requests SET status = 'Storniert', user_notified = 0 WHERE id = ?", (request_id,))
+        cursor.execute("UPDATE vacation_requests SET status = 'Storniert', user_notified = 0 WHERE id = ?",
+                       (request_id,))
 
         # Urlaubstage ('U') aus dem Schichtplan entfernen
         user_id = request_data['user_id']

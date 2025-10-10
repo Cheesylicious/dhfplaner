@@ -7,7 +7,8 @@ import calendar
 from database.db_manager import (
     get_shifts_for_month, get_wunschfrei_requests_for_month, get_daily_shift_counts_for_month,
     get_ordered_shift_abbrevs, get_ordered_users_for_schedule, save_shift_entry,
-    get_wunschfrei_request_by_user_and_date, get_all_vacation_requests_for_month
+    get_wunschfrei_request_by_user_and_date, get_all_vacation_requests_for_month,
+    admin_submit_request
 )
 from gui.admin_menu_config_manager import AdminMenuConfigManager
 
@@ -161,19 +162,28 @@ class ShiftPlanTab(ttk.Frame):
                 elif vacation_status == 'Ausstehend':
                     display_text = "EU?"
                 elif request_info:
-                    if request_info[0] == 'Ausstehend':
-                        display_text = 'WF' if request_info[1] == 'WF' else f"{request_info[1]}?"
-                    elif request_info[0] == 'Genehmigt' and request_info[1] == 'WF':
-                        display_text = 'X'
+                    status, requested_shift, requested_by = request_info
+                    if status == 'Ausstehend':
+                        if requested_by == 'admin':
+                            display_text = f"{requested_shift} (A)?"
+                        else:
+                            display_text = 'WF' if requested_shift == 'WF' else f"{requested_shift}?"
+                    elif "Akzeptiert" in status or "Genehmigt" in status:
+                        if requested_shift == 'WF':
+                            display_text = 'X'
+                        # Ansonsten ist die Schicht bereits im Plan, also display_shift beibehalten
 
                 frame = tk.Frame(self.plan_grid_frame, bd=1, relief="solid")
                 frame.grid(row=current_row, column=day + 1, sticky="nsew")
                 label = tk.Label(frame, text=display_text, font=("Segoe UI", 10))
                 label.pack(expand=True, fill="both")
 
+                is_admin_request = request_info and request_info[2] == 'admin' and request_info[0] == 'Ausstehend'
+
                 label.bind("<Button-1>",
                            lambda e, uid=user_id, d=day, y=year, m=month: self.on_grid_cell_click(e, uid, d, y, m))
-                if '?' in display_text or display_text == 'WF':
+
+                if '?' in display_text or display_text == 'WF' or is_admin_request:
                     label.bind("<Button-3>",
                                lambda e, uid=user_id, dt=date_str: self.show_wunschfrei_context_menu(e, uid, dt))
 
@@ -250,6 +260,9 @@ class ShiftPlanTab(ttk.Frame):
         weekend_bg = rules.get('weekend_bg', "#EAF4FF")
         holiday_bg = rules.get('holiday_bg', "#FFD700")
         pending_color = rules.get('Ausstehend', 'orange')
+        admin_pending_color = rules.get('Admin_Ausstehend', '#E0B0FF')
+
+        wunschfrei_data = get_wunschfrei_requests_for_month(year, month)
 
         for user in self.current_user_order:
             user_id, user_id_str = user['id'], str(user['id'])
@@ -270,21 +283,25 @@ class ShiftPlanTab(ttk.Frame):
                     frame.config(bg="gold", bd=2)
 
                 original_text = label.cget("text")
-                shift_abbrev = original_text.replace("?", "")
+                shift_abbrev = original_text.replace("?", "").replace(" (A)", "")
                 shift_data = self.app.shift_types_data.get(shift_abbrev)
+                request_info = wunschfrei_data.get(user_id_str, {}).get(current_date.strftime('%Y-%m-%d'))
 
-                # Standard-Hintergrundfarbe setzen
                 bg_color = "white"
                 if is_holiday:
                     bg_color = holiday_bg
                 elif is_weekend:
                     bg_color = weekend_bg
 
-                # Überschreiben mit spezifischen Farben
                 if shift_abbrev in ["EU", "X"] and shift_data and shift_data.get('color'):
                     bg_color = shift_data.get('color')
-                elif vacation_status == 'Ausstehend' or '?' in original_text or original_text == 'WF':
+                elif vacation_status == 'Ausstehend':
                     bg_color = pending_color
+                elif request_info and request_info[0] == 'Ausstehend':
+                    if request_info[2] == 'admin':
+                        bg_color = admin_pending_color
+                    else:
+                        bg_color = pending_color
                 elif shift_data and shift_data.get('color') and not (is_holiday or is_weekend):
                     bg_color = shift_data.get('color')
 
@@ -329,28 +346,50 @@ class ShiftPlanTab(ttk.Frame):
         self.build_shift_plan_grid(self.app.current_display_date.year, self.app.current_display_date.month)
 
     def on_grid_cell_click(self, event, user_id, day, year, month):
-        current_shift = event.widget.cget("text")
-        if '?' in current_shift or current_shift == 'WF': return
-
         shift_date_str = date(year, month, day).strftime('%Y-%m-%d')
+        request = get_wunschfrei_request_by_user_and_date(user_id, shift_date_str)
+
+        # Admin darf alles bearbeiten, außer offene Wünsche von Benutzern
+        if request and request['status'] == 'Ausstehend' and request['requested_by'] == 'user':
+            return
+
+        current_shift = event.widget.cget("text")
+
         context_menu = tk.Menu(self, tearoff=0)
         context_menu.add_command(label="FREI (Dienst entfernen)",
                                  command=lambda: self._save_shift_and_update_ui(user_id, shift_date_str, current_shift,
                                                                                 ""))
         context_menu.add_separator()
+
+        anfragen_menu = tk.Menu(context_menu, tearoff=0)
+        context_menu.add_cascade(label="Anfragen", menu=anfragen_menu)
+
         all_abbrevs = list(self.app.shift_types_data.keys())
         menu_config = AdminMenuConfigManager.load_config(all_abbrevs)
         sorted_abbrevs = sorted(all_abbrevs, key=lambda s: self.app.shift_frequency.get(s, 0), reverse=True)
+
         for abbrev in sorted_abbrevs:
             if menu_config.get(abbrev, True):
                 name = self.app.shift_types_data[abbrev].get('name', abbrev)
                 count = self.app.shift_frequency.get(abbrev, 0)
                 label_text = f"{abbrev} ({name})" + (f"  (Bisher {count}x)" if count > 0 else "")
+
                 context_menu.add_command(label=label_text,
                                          command=lambda s=abbrev: self._save_shift_and_update_ui(user_id,
                                                                                                  shift_date_str,
                                                                                                  current_shift, s))
+                anfragen_menu.add_command(label=label_text,
+                                          command=lambda s=abbrev: self._admin_request_shift(user_id, shift_date_str,
+                                                                                             s))
         context_menu.post(event.x_root, event.y_root)
+
+    def _admin_request_shift(self, user_id, shift_date_str, shift_abbrev):
+        success, message = admin_submit_request(user_id, shift_date_str, shift_abbrev)
+        if success:
+            messagebox.showinfo("Anfrage gesendet", message, parent=self.app)
+            self.refresh_plan()
+        else:
+            messagebox.showerror("Fehler", message, parent=self.app)
 
     def show_wunschfrei_context_menu(self, event, user_id, date_str):
         request = get_wunschfrei_request_by_user_and_date(user_id, date_str)

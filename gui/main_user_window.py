@@ -16,7 +16,8 @@ from .holiday_manager import HolidayManager
 from database.db_manager import (
     get_all_shift_types, get_unnotified_requests, mark_requests_as_notified,
     get_unnotified_bug_reports_for_user, mark_bug_reports_as_notified,
-    get_unnotified_vacation_requests_for_user, mark_vacation_requests_as_notified
+    get_unnotified_vacation_requests_for_user, mark_vacation_requests_as_notified,
+    set_user_tutorial_seen, get_pending_admin_requests_for_user
 )
 
 USER_TAB_ORDER_FILE = 'user_tab_order_config.json'
@@ -25,6 +26,7 @@ DEFAULT_RULES = {"Colors": {}}
 
 
 class TabOrderManager:
+    # Namen vereinheitlicht, um mit den Tab-Namen übereinzustimmen
     DEFAULT_ORDER = ["Schichtplan", "Meine Anfragen", "Mein Urlaub", "Bug-Reports"]
 
     @staticmethod
@@ -49,7 +51,7 @@ class TabOrderManager:
 
 
 class TabOrderWindow(tk.Toplevel):
-    def __init__(self, master, callback):
+    def __init__(self, master, callback, all_tab_names):
         super().__init__(master)
         self.callback = callback
         self.title("Reiter-Reihenfolge anpassen")
@@ -75,8 +77,19 @@ class TabOrderWindow(tk.Toplevel):
         ttk.Button(button_subframe, text="↑ Hoch", command=lambda: self.move_item(-1)).pack(pady=2, fill="x")
         ttk.Button(button_subframe, text="↓ Runter", command=lambda: self.move_item(1)).pack(pady=2, fill="x")
 
-        current_order = TabOrderManager.load_order()
-        for tab_name in current_order:
+        # Logik zur Synchronisierung der Tabs
+        saved_order = TabOrderManager.load_order()
+        final_display_order = []
+        # Füge Tabs aus der gespeicherten Reihenfolge hinzu, die noch existieren
+        for tab_name in saved_order:
+            if tab_name in all_tab_names:
+                final_display_order.append(tab_name)
+        # Füge neue Tabs hinzu, die nicht in der gespeicherten Reihenfolge waren
+        for tab_name in all_tab_names:
+            if tab_name not in final_display_order:
+                final_display_order.append(tab_name)
+
+        for tab_name in final_display_order:
             self.tab_listbox.insert(tk.END, tab_name)
 
         button_bar = ttk.Frame(main_frame)
@@ -138,42 +151,53 @@ class MainUserWindow(tk.Toplevel):
                   foreground=[('active', 'black')])
 
         today = date.today()
-        days_in_month = calendar.monthrange(today.year, today.month)[1]
-        self.current_display_date = today.replace(day=1) + timedelta(days=days_in_month)
+        # Fix for month change
+        if today.month == 12:
+            self.current_display_date = today.replace(year=today.year + 1, month=1, day=1)
+        else:
+            self.current_display_date = today.replace(month=today.month + 1, day=1)
 
         self.shift_types_data = {}
         self.staffing_rules = self.load_staffing_rules()
         self.current_year_holidays = {}
+        self.shift_frequency = self.load_shift_frequency()
         self.load_shift_types()
         self._load_holidays_for_year(self.current_display_date.year)
 
+        self.setup_ui()
+        self.setup_footer()
+
+        self.protocol("WM_DELETE_WINDOW", self.master.on_app_close)
+        self.after(500, self.check_all_notifications)
+        self.after(500, self.check_for_admin_requests)
+
+        if not self.user_data.get('has_seen_tutorial'):
+            self.show_tutorial()
+
+    def setup_ui(self):
         header_frame = ttk.Frame(self)
         header_frame.pack(fill="x", padx=10, pady=(5, 0))
 
         ttk.Button(header_frame, text="Tutorial", command=self.show_tutorial).pack(side="left", padx=(0, 5))
-
         ttk.Button(header_frame, text="Reiter anpassen", command=self.open_tab_order_window).pack(side="right")
+
+        self.admin_request_frame = tk.Frame(self, bg='orange', height=40)
 
         self.notebook = ttk.Notebook(self)
         self.notebook.pack(fill="both", expand=True, padx=10, pady=10)
 
         self.tab_frames = {}
         self.setup_tabs()
-        self.setup_footer()
-
-        self.protocol("WM_DELETE_WINDOW", self.master.on_app_close)
-        self.after(500, self.check_all_notifications)
 
     def setup_tabs(self):
-        # KORREKTUR: Die Tabs erhalten jetzt die 'user_data' statt des ganzen Fensters 'self'
-        # Der Schichtplan-Tab ist eine Ausnahme, da er Zugriff auf Methoden wie is_holiday() etc. benötigt.
         self.tab_frames = {
             "Schichtplan": UserShiftPlanTab(self.notebook, self),
             "Meine Anfragen": MyRequestsTab(self.notebook, self.user_data),
             "Mein Urlaub": VacationTab(self.notebook, self.user_data),
-            "Bug-Reports": UserBugReportTab(self.notebook, self.user_data)
+            "Bug-Reports": UserBugReportTab(self.notebook, self)
         }
         saved_order = TabOrderManager.load_order()
+
         final_order = []
         existing_tabs = list(self.tab_frames.keys())
         for tab_name in saved_order:
@@ -181,10 +205,14 @@ class MainUserWindow(tk.Toplevel):
                 final_order.append(tab_name)
                 existing_tabs.remove(tab_name)
         final_order.extend(existing_tabs)
+
         for tab_name in final_order:
             frame = self.tab_frames.get(tab_name)
             if frame:
                 self.notebook.add(frame, text=tab_name)
+
+    def get_tab(self, tab_name):
+        return self.tab_frames.get(tab_name)
 
     def setup_footer(self):
         footer_frame = ttk.Frame(self, padding=5)
@@ -208,29 +236,62 @@ class MainUserWindow(tk.Toplevel):
         self.master.login_window.deiconify()
 
     def open_tab_order_window(self):
-        TabOrderWindow(self, self.reorder_tabs)
+        all_tab_names = list(self.tab_frames.keys())
+        TabOrderWindow(self, self.reorder_tabs, all_tab_names)
 
     def reorder_tabs(self, new_order):
         try:
             selected_tab_name = self.notebook.tab(self.notebook.select(), "text")
         except tk.TclError:
             selected_tab_name = None
-        all_tabs = {self.notebook.tab(tab_id, "text"): self.notebook.nametowidget(tab_id) for tab_id in
-                    self.notebook.tabs()}
-        for tab_id in list(self.notebook.tabs()):
-            self.notebook.forget(tab_id)
+
+        all_tabs = list(self.notebook.tabs())
+        for tab in all_tabs:
+            self.notebook.forget(tab)
+
         for tab_name in new_order:
-            if tab_name in all_tabs:
-                self.notebook.add(all_tabs[tab_name], text=tab_name)
+            frame = self.tab_frames.get(tab_name)
+            if frame:
+                self.notebook.add(frame, text=tab_name)
+
         if selected_tab_name in new_order:
-            self.notebook.select(new_order.index(selected_tab_name))
+            for i, tab in enumerate(self.notebook.tabs()):
+                if self.notebook.tab(tab, "text") == selected_tab_name:
+                    self.notebook.select(i)
+                    break
+        elif len(self.notebook.tabs()) > 0:
+            self.notebook.select(0)
+
+    def check_for_admin_requests(self):
+        for widget in self.admin_request_frame.winfo_children():
+            widget.destroy()
+
+        count = get_pending_admin_requests_for_user(self.user_data['id'])
+        if count > 0:
+            self.admin_request_frame.pack(fill='x', side='top', ipady=5, before=self.notebook)
+
+            label_text = f"Sie haben {count} offene Schichtanfrage vom Admin!" if count > 1 else "Sie haben 1 offene Schichtanfrage vom Admin!"
+
+            notification_label = tk.Label(self.admin_request_frame, text=label_text, bg='orange', fg='black',
+                                          font=('Segoe UI', 12, 'bold'))
+            notification_label.pack(side='left', padx=15, pady=5)
+
+            show_button = ttk.Button(self.admin_request_frame, text="Anzeigen", command=self.go_to_shift_plan)
+            show_button.pack(side='right', padx=15)
+        else:
+            self.admin_request_frame.pack_forget()
+
+    def go_to_shift_plan(self):
+        for i in range(len(self.notebook.tabs())):
+            if self.notebook.tab(i, "text") == "Schichtplan":
+                self.notebook.select(i)
+                break
 
     def check_all_notifications(self):
         """Prüft alle Benachrichtigungstypen in einer Funktion."""
         all_messages = []
         tabs_to_refresh = []
 
-        # 1. Wunschfrei-Anfragen
         unnotified_requests = get_unnotified_requests(self.user_data['id'])
         if unnotified_requests:
             message_lines = ["Sie haben Neuigkeiten zu Ihren 'Wunschfrei'-Anträgen:"]
@@ -245,7 +306,6 @@ class MainUserWindow(tk.Toplevel):
             mark_requests_as_notified(notified_ids)
             tabs_to_refresh.append("Meine Anfragen")
 
-        # 2. Urlaubsanträge
         unnotified_vacation = get_unnotified_vacation_requests_for_user(self.user_data['id'])
         if unnotified_vacation:
             message_lines = ["Es gibt Neuigkeiten zu Ihren Urlaubsanträgen:"]
@@ -258,7 +318,6 @@ class MainUserWindow(tk.Toplevel):
             mark_vacation_requests_as_notified(notified_ids)
             tabs_to_refresh.append("Mein Urlaub")
 
-        # 3. Bug-Reports
         unnotified_reports = get_unnotified_bug_reports_for_user(self.user_data['id'])
         if unnotified_reports:
             message_lines = ["Es gibt Neuigkeiten zu Ihren Fehlerberichten:"]
@@ -271,7 +330,6 @@ class MainUserWindow(tk.Toplevel):
             mark_bug_reports_as_notified(notified_ids)
             tabs_to_refresh.append("Bug-Reports")
 
-        # Wenn es Nachrichten gibt, zeige sie an und lade die Tabs neu
         if all_messages:
             messagebox.showinfo("Benachrichtigungen", "\n\n".join(all_messages), parent=self)
             if self.winfo_exists():
@@ -311,3 +369,14 @@ class MainUserWindow(tk.Toplevel):
             except json.JSONDecodeError:
                 return DEFAULT_RULES
         return DEFAULT_RULES
+
+    def load_shift_frequency(self):
+        try:
+            with open('shift_frequency.json', 'r') as f:
+                return json.load(f)
+        except (FileNotFoundError, json.JSONDecodeError):
+            return {}
+
+    def save_shift_frequency(self):
+        with open('shift_frequency.json', 'w') as f:
+            json.dump(self.shift_frequency, f, indent=4)
