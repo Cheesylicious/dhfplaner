@@ -82,7 +82,8 @@ class VacationRequestsTab(ttk.Frame):
             for req_id in selected_ids:
                 approve_vacation_request(req_id, self.admin_id)
             self.refresh_vacation_requests()
-            self.app.get_tab("Dienstplan").refresh_plan()
+            if "Schichtplan" in self.app.tab_frames:
+                self.app.tab_frames["Schichtplan"].refresh_plan()
 
     def reject_selected(self):
         selected_ids = self.get_selected_request_ids()
@@ -91,7 +92,8 @@ class VacationRequestsTab(ttk.Frame):
         for req_id in selected_ids:
             update_vacation_request_status(req_id, 'Abgelehnt')
         self.refresh_vacation_requests()
-        self.app.get_tab("Dienstplan").refresh_plan()
+        if "Schichtplan" in self.app.tab_frames:
+            self.app.tab_frames["Schichtplan"].refresh_plan()
 
     def cancel_selected(self):
         selected_ids = self.get_selected_request_ids()
@@ -102,7 +104,8 @@ class VacationRequestsTab(ttk.Frame):
             for req_id in selected_ids:
                 cancel_vacation_request(req_id, self.admin_id)
             self.refresh_vacation_requests()
-            self.app.get_tab("Dienstplan").refresh_plan()
+            if "Schichtplan" in self.app.tab_frames:
+                self.app.tab_frames["Schichtplan"].refresh_plan()
 
     def archive_selected(self):
         selected_ids = self.get_selected_request_ids()

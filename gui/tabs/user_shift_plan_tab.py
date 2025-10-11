@@ -10,6 +10,8 @@ from database.db_manager import (
     withdraw_wunschfrei_request, get_all_vacation_requests_for_month,
     user_respond_to_request, save_shift_entry, get_wunschfrei_request_by_id
 )
+# KORRIGIERTE IMPORTE: 'is_month_locked' entfernt und 'RequestLockManager' importiert
+from gui.request_lock_manager import RequestLockManager
 from gui.request_config_manager import RequestConfigManager
 from gui.dialogs.custom_messagebox import CustomMessagebox
 from gui.tooltip import Tooltip
@@ -146,9 +148,9 @@ class UserShiftPlanTab(ttk.Frame):
                 display_shift = shift
 
                 if vacation_status == 'Genehmigt':
-                    display_shift = 'X' if current_date_obj.weekday() == 6 else 'EU'
+                    display_shift = 'U'
                 elif vacation_status == 'Ausstehend':
-                    display_shift = "EU?"
+                    display_shift = "U?"
                 elif request_info:
                     status, requested_shift, requested_by = request_info
                     if status == 'Ausstehend':
@@ -159,7 +161,6 @@ class UserShiftPlanTab(ttk.Frame):
                     elif "Akzeptiert" in status or "Genehmigt" in status:
                         if requested_shift == 'WF':
                             display_shift = 'X'
-                        # Ansonsten ist die Schicht bereits im Plan, also display_shift beibehalten
 
                 frame = tk.Frame(self.plan_grid_frame, bd=1, relief="solid")
                 frame.grid(row=current_row, column=day + 1, sticky="nsew")
@@ -264,7 +265,7 @@ class UserShiftPlanTab(ttk.Frame):
                 elif is_logged_in_user:
                     bg_color = "#E8F5E9"
 
-                if shift_abbrev in ["EU", "X"] and shift_data and shift_data.get('color'):
+                if shift_abbrev in ["U", "X"] and shift_data and shift_data.get('color'):
                     bg_color = shift_data.get('color')
                 elif vacation_status == 'Ausstehend':
                     bg_color = pending_color
@@ -323,6 +324,14 @@ class UserShiftPlanTab(ttk.Frame):
 
     def on_user_cell_click(self, event, user_id, day, year, month):
         request_date = date(year, month, day)
+
+        # HIER DIE KORREKTUR: Ruft die korrekte Funktion auf
+        if RequestLockManager.is_month_locked(year, month):
+            messagebox.showinfo("Anträge gesperrt",
+                                "Für diesen Monat können keine neuen Anträge gestellt oder bestehende bearbeitet werden.",
+                                parent=self)
+            return
+
         if request_date < date.today():
             messagebox.showwarning("Aktion nicht erlaubt", "Anfragen für vergangene Tage sind nicht möglich.",
                                    parent=self)

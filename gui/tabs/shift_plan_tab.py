@@ -3,6 +3,9 @@ import tkinter as tk
 from tkinter import ttk, messagebox
 from datetime import date, datetime, timedelta
 import calendar
+import webbrowser
+import os
+import tempfile
 
 from database.db_manager import (
     get_shifts_for_month, get_wunschfrei_requests_for_month, get_daily_shift_counts_for_month,
@@ -11,6 +14,7 @@ from database.db_manager import (
     admin_submit_request
 )
 from gui.admin_menu_config_manager import AdminMenuConfigManager
+from ..request_lock_manager import RequestLockManager
 
 
 class ShiftPlanTab(ttk.Frame):
@@ -32,11 +36,9 @@ class ShiftPlanTab(ttk.Frame):
             user_id_str = str(req['user_id'])
             if user_id_str not in processed:
                 processed[user_id_str] = {}
-
             try:
                 start = datetime.strptime(req['start_date'], '%Y-%m-%d').date()
                 end = datetime.strptime(req['end_date'], '%Y-%m-%d').date()
-
                 current_date = start
                 while current_date <= end:
                     if current_date.year == year and current_date.month == month:
@@ -51,10 +53,20 @@ class ShiftPlanTab(ttk.Frame):
         main_view_container.pack(fill="both", expand=True)
         nav_frame = ttk.Frame(main_view_container)
         nav_frame.pack(fill="x", pady=(0, 10))
+
         ttk.Button(nav_frame, text="< Voriger Monat", command=self.show_previous_month).pack(side="left")
+
+        ttk.Button(nav_frame, text="📄 Drucken", command=self.print_shift_plan).pack(side="left", padx=20)
+
         self.month_label_var = tk.StringVar()
-        ttk.Label(nav_frame, textvariable=self.month_label_var, font=("Segoe UI", 14, "bold"), anchor="center").pack(
-            side="left", expand=True, fill="x")
+        month_label_frame = ttk.Frame(nav_frame)
+        month_label_frame.pack(side="left", expand=True, fill="x")
+
+        ttk.Label(month_label_frame, textvariable=self.month_label_var, font=("Segoe UI", 14, "bold"),
+                  anchor="center").pack()
+        self.lock_status_label = ttk.Label(month_label_frame, text="", font=("Segoe UI", 10, "italic"), anchor="center")
+        self.lock_status_label.pack()
+
         ttk.Button(nav_frame, text="Nächster Monat >", command=self.show_next_month).pack(side="right")
 
         grid_container_frame = ttk.Frame(main_view_container)
@@ -81,41 +93,160 @@ class ShiftPlanTab(ttk.Frame):
         self.inner_frame.bind('<Configure>', _configure_scrollregion)
         self.plan_grid_frame = ttk.Frame(self.inner_frame)
         self.plan_grid_frame.pack(fill="both", expand=True)
-        check_frame = ttk.Frame(main_view_container)
-        check_frame.pack(fill="x", pady=10)
-        button_subframe = ttk.Frame(check_frame)
-        button_subframe.pack()
-        ttk.Button(button_subframe, text="Schichtplan Prüfen", command=self.check_understaffing).pack(side="left",
-                                                                                                      padx=5)
-        ttk.Button(button_subframe, text="Leeren", command=self.clear_understaffing_results).pack(side="left", padx=5)
+
+        footer_frame = ttk.Frame(main_view_container)
+        footer_frame.pack(fill="x", pady=10)
+
+        check_frame = ttk.Frame(footer_frame)
+        check_frame.pack(side="left")
+
+        ttk.Button(check_frame, text="Schichtplan Prüfen", command=self.check_understaffing).pack(side="left", padx=5)
+        ttk.Button(check_frame, text="Leeren", command=self.clear_understaffing_results).pack(side="left", padx=5)
+
+        self.lock_button = ttk.Button(footer_frame, text="", command=self.toggle_month_lock)
+        self.lock_button.pack(side="right", padx=5)
+
         self.understaffing_result_frame = ttk.Frame(main_view_container, padding="10")
+
+    def print_shift_plan(self):
+        year, month = self.app.current_display_date.year, self.app.current_display_date.month
+        users = get_ordered_users_for_schedule(include_hidden=False)
+        shifts_data = get_shifts_for_month(year, month)
+        wunschfrei_data = get_wunschfrei_requests_for_month(year, month)
+        processed_vacations = self._process_vacations(year, month)
+        month_name = self.month_label_var.get()
+        rules = self.app.staffing_rules.get('Colors', {})
+        weekend_bg = rules.get('weekend_bg', "#EAF4FF")
+        holiday_bg = rules.get('holiday_bg', "#FFD700")
+
+        html = f"""
+        <!DOCTYPE html>
+        <html lang="de">
+        <head>
+            <meta charset="UTF-8">
+            <title>Dienstplan {month_name}</title>
+            <style>
+                body {{ font-family: Segoe UI, Arial, sans-serif; }}
+                table {{ border-collapse: collapse; width: 100%; font-size: 11px; }}
+                th, td {{ border: 1px solid #ccc; padding: 6px; text-align: center; }}
+                th {{ background-color: #E0E0E0; }}
+                .weekend {{ background-color: {weekend_bg}; }}
+                .holiday {{ background-color: {holiday_bg}; }}
+                .name-col {{ text-align: left; font-weight: bold; width: 140px; }}
+                .dog-col {{ text-align: left; width: 90px; }}
+                .hours-col {{ font-weight: bold; width: 40px; }}
+            </style>
+        </head>
+        <body>
+            <h1>Dienstplan für {month_name}</h1>
+            <table>
+                <thead>
+                    <tr>
+                        <th class="name-col">Name</th>
+                        <th class="dog-col">Diensthund</th>
+        """
+
+        days_in_month = calendar.monthrange(year, month)[1]
+        day_map = {0: "Mo", 1: "Di", 2: "Mi", 3: "Do", 4: "Fr", 5: "Sa", 6: "So"}
+        for day in range(1, days_in_month + 1):
+            current_date = date(year, month, day)
+            day_class = ""
+            if self.app.is_holiday(current_date):
+                day_class = "holiday"
+            elif current_date.weekday() >= 5:
+                day_class = "weekend"
+            html += f'<th class="{day_class}">{day}<br>{day_map[current_date.weekday()]}</th>'
+
+        html += '<th class="hours-col">Std.</th>'
+        html += """
+                </tr>
+            </thead>
+            <tbody>
+        """
+
+        for user in users:
+            user_id_str = str(user['id'])
+            total_hours = self._calculate_total_hours_for_user(user_id_str, year, month)
+            html += f"""
+                <tr>
+                    <td class="name-col">{user['vorname']} {user['name']}</td>
+                    <td class="dog-col">{user.get('diensthund', '---')}</td>
+            """
+            for day in range(1, days_in_month + 1):
+                current_date = date(year, month, day)
+                date_str = current_date.strftime('%Y-%m-%d')
+
+                display_text = shifts_data.get(user_id_str, {}).get(date_str, "&nbsp;")
+                vacation_status = processed_vacations.get(user_id_str, {}).get(current_date)
+                if vacation_status == 'Genehmigt': display_text = 'U'
+
+                request_info = wunschfrei_data.get(user_id_str, {}).get(date_str)
+                if request_info and ("Akzeptiert" in request_info[0] or "Genehmigt" in request_info[0]) and \
+                        request_info[1] == 'WF':
+                    display_text = 'X'
+
+                bg_color = ""
+                is_weekend = current_date.weekday() >= 5
+                is_holiday = self.app.is_holiday(current_date)
+
+                if is_holiday:
+                    bg_color = holiday_bg
+                elif is_weekend:
+                    bg_color = weekend_bg
+
+                shift_data = self.app.shift_types_data.get(display_text)
+
+                if shift_data and shift_data.get('color'):
+                    if display_text in ["U", "X"]:
+                        bg_color = shift_data['color']
+                    elif not is_holiday and not is_weekend:
+                        bg_color = shift_data['color']
+
+                text_color = self.app.get_contrast_color(bg_color) if bg_color else "black"
+                html += f'<td style="background-color: {bg_color or "white"}; color: {text_color};">{display_text}</td>'
+
+            html += f'<td class="hours-col">{total_hours}</td></tr>'
+
+        html += """
+            </tbody>
+        </table>
+        </body>
+        </html>
+        """
+        try:
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".html", mode="w", encoding="utf-8") as f:
+                f.write(html)
+                filepath = f.name
+
+            webbrowser.open(f"file://{os.path.realpath(filepath)}")
+            messagebox.showinfo("Drucken",
+                                "Der Dienstplan wurde in deinem Webbrowser geöffnet.\n\nBitte nutze dort die Druckfunktion (normalerweise Strg+P oder Cmd+P).",
+                                parent=self)
+        except Exception as e:
+            messagebox.showerror("Fehler", f"Der Plan konnte nicht zum Drucken geöffnet werden:\n{e}", parent=self)
 
     def build_shift_plan_grid(self, year, month):
         for widget in self.plan_grid_frame.winfo_children(): widget.destroy()
         self.grid_widgets = {'cells': {}, 'user_totals': {}, 'daily_counts': {}}
-
+        self.update_lock_status()
         self.processed_vacations = self._process_vacations(year, month)
         self.current_user_order = get_ordered_users_for_schedule(include_hidden=False)
         self.shift_schedule_data = get_shifts_for_month(year, month)
         wunschfrei_data = get_wunschfrei_requests_for_month(year, month)
         daily_counts = get_daily_shift_counts_for_month(year, month)
         ordered_abbrevs_to_show = get_ordered_shift_abbrevs(include_hidden=False)
-
         month_name_german = {"January": "Januar", "February": "Februar", "March": "März", "April": "April",
                              "May": "Mai", "June": "Juni", "July": "Juli", "August": "August",
                              "September": "September", "October": "Oktober", "November": "November",
                              "December": "Dezember"}
         month_name_en = date(year, month, 1).strftime('%B')
         self.month_label_var.set(f"{month_name_german.get(month_name_en, month_name_en)} {year}")
-
         day_map = {0: "Mo", 1: "Di", 2: "Mi", 3: "Do", 4: "Fr", 5: "Sa", 6: "So"}
         days_in_month = calendar.monthrange(year, month)[1]
-
         rules = self.app.staffing_rules.get('Colors', {})
         header_bg, summary_bg = "#E0E0E0", "#D0D0FF"
         weekend_bg = rules.get('weekend_bg', "#EAF4FF")
         holiday_bg = rules.get('holiday_bg', "#FFD700")
-
         MIN_NAME_WIDTH, MIN_DOG_WIDTH = 150, 100
         tk.Label(self.plan_grid_frame, text="Mitarbeiter", font=("Segoe UI", 10, "bold"), bg=header_bg, fg="black",
                  padx=5, pady=5, bd=1, relief="solid").grid(row=0, column=0, columnspan=2, sticky="nsew")
@@ -145,22 +276,18 @@ class ShiftPlanTab(ttk.Frame):
             tk.Label(self.plan_grid_frame, text=user_data_row.get('diensthund', '---'), font=("Segoe UI", 10),
                      bg="white", fg="black", padx=5, pady=5, bd=1, relief="solid").grid(row=current_row, column=1,
                                                                                         sticky="nsew")
-
             total_hours = self._calculate_total_hours_for_user(user_id_str, year, month)
-
             for day in range(1, days_in_month + 1):
                 current_date_obj = date(year, month, day)
                 date_str = current_date_obj.strftime('%Y-%m-%d')
-
                 vacation_status = self.processed_vacations.get(user_id_str, {}).get(current_date_obj)
                 shift = self.shift_schedule_data.get(user_id_str, {}).get(date_str, "")
                 request_info = wunschfrei_data.get(user_id_str, {}).get(date_str)
                 display_text = shift
-
                 if vacation_status == 'Genehmigt':
-                    display_text = 'X' if current_date_obj.weekday() == 6 else 'EU'
+                    display_text = 'U'
                 elif vacation_status == 'Ausstehend':
-                    display_text = "EU?"
+                    display_text = "U?"
                 elif request_info:
                     status, requested_shift, requested_by = request_info
                     if status == 'Ausstehend':
@@ -171,24 +298,17 @@ class ShiftPlanTab(ttk.Frame):
                     elif "Akzeptiert" in status or "Genehmigt" in status:
                         if requested_shift == 'WF':
                             display_text = 'X'
-                        # Ansonsten ist die Schicht bereits im Plan, also display_shift beibehalten
-
                 frame = tk.Frame(self.plan_grid_frame, bd=1, relief="solid")
                 frame.grid(row=current_row, column=day + 1, sticky="nsew")
                 label = tk.Label(frame, text=display_text, font=("Segoe UI", 10))
                 label.pack(expand=True, fill="both")
-
                 is_admin_request = request_info and request_info[2] == 'admin' and request_info[0] == 'Ausstehend'
-
                 label.bind("<Button-1>",
                            lambda e, uid=user_id, d=day, y=year, m=month: self.on_grid_cell_click(e, uid, d, y, m))
-
                 if '?' in display_text or display_text == 'WF' or is_admin_request:
                     label.bind("<Button-3>",
                                lambda e, uid=user_id, dt=date_str: self.show_wunschfrei_context_menu(e, uid, dt))
-
                 self.grid_widgets['cells'][user_id_str][day] = {'frame': frame, 'label': label}
-
             total_hours_label = tk.Label(self.plan_grid_frame, text=str(total_hours), font=("Segoe UI", 10, "bold"),
                                          bg="white", fg="black", padx=5, pady=5, bd=1, relief="solid", anchor="e")
             total_hours_label.grid(row=current_row, column=days_in_month + 2, sticky="nsew")
@@ -210,13 +330,11 @@ class ShiftPlanTab(ttk.Frame):
                 current_date = date(year, month, day)
                 is_friday = current_date.weekday() == 4
                 is_holiday = self.app.is_holiday(current_date)
-
                 display_text = ""
                 if not (abbrev == "6" and (not is_friday or is_holiday)):
                     count = daily_counts.get(current_date.strftime('%Y-%m-%d'), {}).get(abbrev, 0)
                     min_required = self.get_min_staffing_for_date(current_date).get(abbrev)
                     display_text = f"{count}/{min_required}" if min_required is not None else str(count)
-
                 count_label = tk.Label(self.plan_grid_frame, text=display_text, font=("Segoe UI", 9), bd=1,
                                        relief="solid")
                 count_label.grid(row=current_row, column=day + 1, sticky="nsew")
@@ -231,6 +349,90 @@ class ShiftPlanTab(ttk.Frame):
             self.plan_grid_frame.grid_columnconfigure(day_col, weight=1)
         self.inner_frame.update_idletasks()
         self.canvas.config(scrollregion=self.canvas.bbox("all"))
+
+    def apply_grid_colors(self):
+        self.update_violation_set()
+        year, month = self.app.current_display_date.year, self.app.current_display_date.month
+        days_in_month = calendar.monthrange(year, month)[1]
+        rules = self.app.staffing_rules.get('Colors', {})
+        weekend_bg = rules.get('weekend_bg', "#EAF4FF")
+        holiday_bg = rules.get('holiday_bg', "#FFD700")
+        pending_color = rules.get('Ausstehend', 'orange')
+        admin_pending_color = rules.get('Admin_Ausstehend', '#E0B0FF')
+        wunschfrei_data = get_wunschfrei_requests_for_month(year, month)
+        for user in self.current_user_order:
+            user_id, user_id_str = user['id'], str(user['id'])
+            for day in range(1, days_in_month + 1):
+                cell_widgets = self.grid_widgets['cells'].get(user_id_str, {}).get(day)
+                if not cell_widgets: continue
+                frame = cell_widgets['frame']
+                label = cell_widgets['label']
+                current_date = date(year, month, day)
+                is_weekend = current_date.weekday() >= 5
+                is_holiday = self.app.is_holiday(current_date)
+                frame.config(bg="black", bd=1)
+                vacation_status = self.processed_vacations.get(user_id_str, {}).get(current_date)
+                if vacation_status == 'Ausstehend':
+                    frame.config(bg="gold", bd=2)
+                original_text = label.cget("text")
+                shift_abbrev = original_text.replace("?", "").replace(" (A)", "")
+                shift_data = self.app.shift_types_data.get(shift_abbrev)
+                request_info = wunschfrei_data.get(user_id_str, {}).get(current_date.strftime('%Y-%m-%d'))
+
+                # **KORRIGIERTE FARB-LOGIK**
+                bg_color = "white"
+                if is_holiday:
+                    bg_color = holiday_bg
+                elif is_weekend:
+                    bg_color = weekend_bg
+
+                if shift_data and shift_data.get('color'):
+                    if shift_abbrev in ["U", "X"]:
+                        bg_color = shift_data['color']
+                    elif not is_holiday and not is_weekend:
+                        bg_color = shift_data['color']
+
+                if vacation_status == 'Ausstehend':
+                    bg_color = pending_color
+                elif request_info and request_info[0] == 'Ausstehend':
+                    if request_info[2] == 'admin':
+                        bg_color = admin_pending_color
+                    else:
+                        bg_color = pending_color
+
+                fg_color = self.app.get_contrast_color(bg_color)
+                if (user_id, day) in self.violation_cells:
+                    bg_color = "#FF5555"
+                    fg_color = "white"
+                label.config(bg=bg_color, fg=fg_color)
+
+        daily_counts = get_daily_shift_counts_for_month(year, month)
+        summary_bg = "#D0D0FF"
+        for abbrev, day_map in self.grid_widgets['daily_counts'].items():
+            for day, label in day_map.items():
+                current_date = date(year, month, day)
+                is_friday = current_date.weekday() == 4
+                is_holiday = self.app.is_holiday(current_date)
+                if abbrev == "6" and (not is_friday or is_holiday):
+                    label.config(bg=summary_bg, bd=0)
+                    continue
+                bg = summary_bg
+                if self.app.is_holiday(current_date):
+                    bg = holiday_bg
+                elif current_date.weekday() >= 5:
+                    bg = weekend_bg
+                count = daily_counts.get(current_date.strftime('%Y-%m-%d'), {}).get(abbrev, 0)
+                min_req = self.get_min_staffing_for_date(current_date).get(abbrev)
+                if min_req is not None:
+                    if count < min_req:
+                        bg = rules.get('alert_bg', "#FF5555")
+                    elif count > min_req:
+                        bg = rules.get('overstaffed_bg', "#FFFF99")
+                    else:
+                        bg = rules.get('success_bg', "#90EE90")
+                label.config(bg=bg, fg=self.app.get_contrast_color(bg), bd=1)
+
+    # ... (Rest der Methoden bleibt unverändert) ...
 
     def show_previous_month(self):
         self.clear_understaffing_results()
@@ -252,128 +454,27 @@ class ShiftPlanTab(ttk.Frame):
             self.app._load_holidays_for_year(self.app.current_display_date.year)
         self.build_shift_plan_grid(self.app.current_display_date.year, self.app.current_display_date.month)
 
-    def apply_grid_colors(self):
-        self.update_violation_set()
-        year, month = self.app.current_display_date.year, self.app.current_display_date.month
-        days_in_month = calendar.monthrange(year, month)[1]
-        rules = self.app.staffing_rules.get('Colors', {})
-        weekend_bg = rules.get('weekend_bg', "#EAF4FF")
-        holiday_bg = rules.get('holiday_bg', "#FFD700")
-        pending_color = rules.get('Ausstehend', 'orange')
-        admin_pending_color = rules.get('Admin_Ausstehend', '#E0B0FF')
-
-        wunschfrei_data = get_wunschfrei_requests_for_month(year, month)
-
-        for user in self.current_user_order:
-            user_id, user_id_str = user['id'], str(user['id'])
-            for day in range(1, days_in_month + 1):
-                cell_widgets = self.grid_widgets['cells'].get(user_id_str, {}).get(day)
-                if not cell_widgets: continue
-
-                frame = cell_widgets['frame']
-                label = cell_widgets['label']
-                current_date = date(year, month, day)
-                is_weekend = current_date.weekday() >= 5
-                is_holiday = self.app.is_holiday(current_date)
-
-                frame.config(bg="black", bd=1)
-
-                vacation_status = self.processed_vacations.get(user_id_str, {}).get(current_date)
-                if vacation_status == 'Ausstehend':
-                    frame.config(bg="gold", bd=2)
-
-                original_text = label.cget("text")
-                shift_abbrev = original_text.replace("?", "").replace(" (A)", "")
-                shift_data = self.app.shift_types_data.get(shift_abbrev)
-                request_info = wunschfrei_data.get(user_id_str, {}).get(current_date.strftime('%Y-%m-%d'))
-
-                bg_color = "white"
-                if is_holiday:
-                    bg_color = holiday_bg
-                elif is_weekend:
-                    bg_color = weekend_bg
-
-                if shift_abbrev in ["EU", "X"] and shift_data and shift_data.get('color'):
-                    bg_color = shift_data.get('color')
-                elif vacation_status == 'Ausstehend':
-                    bg_color = pending_color
-                elif request_info and request_info[0] == 'Ausstehend':
-                    if request_info[2] == 'admin':
-                        bg_color = admin_pending_color
-                    else:
-                        bg_color = pending_color
-                elif shift_data and shift_data.get('color') and not (is_holiday or is_weekend):
-                    bg_color = shift_data.get('color')
-
-                fg_color = self.app.get_contrast_color(bg_color)
-                if (user_id, day) in self.violation_cells:
-                    bg_color = "#FF5555"
-                    fg_color = "white"
-                label.config(bg=bg_color, fg=fg_color)
-
-        daily_counts = get_daily_shift_counts_for_month(year, month)
-        summary_bg = "#D0D0FF"
-        for abbrev, day_map in self.grid_widgets['daily_counts'].items():
-            for day, label in day_map.items():
-                current_date = date(year, month, day)
-                is_friday = current_date.weekday() == 4
-                is_holiday = self.app.is_holiday(current_date)
-
-                if abbrev == "6" and (not is_friday or is_holiday):
-                    label.config(bg=summary_bg, bd=0)
-                    continue
-
-                bg = summary_bg
-                if self.app.is_holiday(current_date):
-                    bg = holiday_bg
-                elif current_date.weekday() >= 5:
-                    bg = weekend_bg
-
-                count = daily_counts.get(current_date.strftime('%Y-%m-%d'), {}).get(abbrev, 0)
-                min_req = self.get_min_staffing_for_date(current_date).get(abbrev)
-
-                if min_req is not None:
-                    if count < min_req:
-                        bg = rules.get('alert_bg', "#FF5555")
-                    elif count > min_req:
-                        bg = rules.get('overstaffed_bg', "#FFFF99")
-                    else:
-                        bg = rules.get('success_bg', "#90EE90")
-
-                label.config(bg=bg, fg=self.app.get_contrast_color(bg), bd=1)
-
-    def refresh_plan(self):
-        self.build_shift_plan_grid(self.app.current_display_date.year, self.app.current_display_date.month)
-
     def on_grid_cell_click(self, event, user_id, day, year, month):
         shift_date_str = date(year, month, day).strftime('%Y-%m-%d')
         request = get_wunschfrei_request_by_user_and_date(user_id, shift_date_str)
-
-        # Admin darf alles bearbeiten, außer offene Wünsche von Benutzern
         if request and request['status'] == 'Ausstehend' and request['requested_by'] == 'user':
             return
-
         current_shift = event.widget.cget("text")
-
         context_menu = tk.Menu(self, tearoff=0)
         context_menu.add_command(label="FREI (Dienst entfernen)",
                                  command=lambda: self._save_shift_and_update_ui(user_id, shift_date_str, current_shift,
                                                                                 ""))
         context_menu.add_separator()
-
         anfragen_menu = tk.Menu(context_menu, tearoff=0)
         context_menu.add_cascade(label="Anfragen", menu=anfragen_menu)
-
         all_abbrevs = list(self.app.shift_types_data.keys())
         menu_config = AdminMenuConfigManager.load_config(all_abbrevs)
         sorted_abbrevs = sorted(all_abbrevs, key=lambda s: self.app.shift_frequency.get(s, 0), reverse=True)
-
         for abbrev in sorted_abbrevs:
             if menu_config.get(abbrev, True):
                 name = self.app.shift_types_data[abbrev].get('name', abbrev)
                 count = self.app.shift_frequency.get(abbrev, 0)
                 label_text = f"{abbrev} ({name})" + (f"  (Bisher {count}x)" if count > 0 else "")
-
                 context_menu.add_command(label=label_text,
                                          command=lambda s=abbrev: self._save_shift_and_update_ui(user_id,
                                                                                                  shift_date_str,
@@ -394,11 +495,8 @@ class ShiftPlanTab(ttk.Frame):
     def show_wunschfrei_context_menu(self, event, user_id, date_str):
         request = get_wunschfrei_request_by_user_and_date(user_id, date_str)
         if not request or request['status'] != 'Ausstehend': return
-
         context_menu = tk.Menu(self, tearoff=0)
-
         wunschfrei_tab = self.app.tab_frames.get("Wunschanfragen")
-
         if wunschfrei_tab:
             context_menu.add_command(label="Genehmigen",
                                      command=lambda: wunschfrei_tab.process_wunschfrei_by_id(request['id'], True))
@@ -435,13 +533,11 @@ class ShiftPlanTab(ttk.Frame):
     def _calculate_total_hours_for_user(self, user_id_str, year, month):
         total_hours = 0
         days_in_month = calendar.monthrange(year, month)[1]
-
         prev_month_date = date(year, month, 1) - timedelta(days=1)
         prev_month_shifts = get_shifts_for_month(prev_month_date.year, prev_month_date.month)
         prev_month_last_day_str = prev_month_date.strftime('%Y-%m-%d')
         if prev_month_shifts.get(user_id_str, {}).get(prev_month_last_day_str) == 'N.':
             total_hours += 6
-
         user_shifts = self.shift_schedule_data.get(user_id_str, {})
         for day in range(1, days_in_month + 1):
             date_str = date(year, month, day).strftime('%Y-%m-%d')
@@ -451,7 +547,6 @@ class ShiftPlanTab(ttk.Frame):
                 if shift == 'N.' and day == days_in_month:
                     hours = 6
                 total_hours += hours
-
         return total_hours
 
     def _update_user_total_hours(self, user_id_str):
@@ -571,3 +666,40 @@ class ShiftPlanTab(ttk.Frame):
             ttk.Label(self.understaffing_result_frame, text="Keine Unterbesetzungen gefunden.",
                       foreground="green", font=("Segoe UI", 12, "bold")).pack(anchor="w")
         self.understaffing_result_frame.pack(fill="x", pady=5)
+
+    def update_lock_status(self):
+        year = self.app.current_display_date.year
+        month = self.app.current_display_date.month
+        is_locked = RequestLockManager.is_month_locked(year, month)
+
+        s = ttk.Style()
+        s.configure("Lock.TButton", background="red", foreground="white", font=('Segoe UI', 9, 'bold'))
+        s.map("Lock.TButton", background=[('active', '#CC0000')])
+        s.configure("Unlock.TButton", background="green", foreground="white", font=('Segoe UI', 9, 'bold'))
+        s.map("Unlock.TButton", background=[('active', '#006400')])
+
+        if is_locked:
+            self.lock_status_label.config(text="(Für Anträge gesperrt)", foreground="red")
+            self.lock_button.config(text="Monat entsperren", style="Unlock.TButton")
+        else:
+            self.lock_status_label.config(text="")
+            self.lock_button.config(text="Monat für Anträge sperren", style="Lock.TButton")
+
+    def toggle_month_lock(self):
+        year = self.app.current_display_date.year
+        month = self.app.current_display_date.month
+        is_locked = RequestLockManager.is_month_locked(year, month)
+
+        locks = RequestLockManager.load_locks()
+        lock_key = f"{year}-{month:02d}"
+
+        if is_locked:
+            if lock_key in locks:
+                del locks[lock_key]
+        else:
+            locks[lock_key] = True
+
+        if RequestLockManager.save_locks(locks):
+            self.app.refresh_antragssperre_views()
+        else:
+            messagebox.showerror("Fehler", "Der Status konnte nicht gespeichert werden.", parent=self)

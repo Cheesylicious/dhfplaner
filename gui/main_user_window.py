@@ -19,6 +19,7 @@ from database.db_manager import (
     get_unnotified_vacation_requests_for_user, mark_vacation_requests_as_notified,
     set_user_tutorial_seen, get_pending_admin_requests_for_user
 )
+from .tab_lock_manager import TabLockManager  # NEUER IMPORT
 
 USER_TAB_ORDER_FILE = 'user_tab_order_config.json'
 STAFFING_RULES_FILE = 'min_staffing_rules.json'
@@ -26,7 +27,6 @@ DEFAULT_RULES = {"Colors": {}}
 
 
 class TabOrderManager:
-    # Namen vereinheitlicht, um mit den Tab-Namen übereinzustimmen
     DEFAULT_ORDER = ["Schichtplan", "Meine Anfragen", "Mein Urlaub", "Bug-Reports"]
 
     @staticmethod
@@ -77,14 +77,11 @@ class TabOrderWindow(tk.Toplevel):
         ttk.Button(button_subframe, text="↑ Hoch", command=lambda: self.move_item(-1)).pack(pady=2, fill="x")
         ttk.Button(button_subframe, text="↓ Runter", command=lambda: self.move_item(1)).pack(pady=2, fill="x")
 
-        # Logik zur Synchronisierung der Tabs
         saved_order = TabOrderManager.load_order()
         final_display_order = []
-        # Füge Tabs aus der gespeicherten Reihenfolge hinzu, die noch existieren
         for tab_name in saved_order:
             if tab_name in all_tab_names:
                 final_display_order.append(tab_name)
-        # Füge neue Tabs hinzu, die nicht in der gespeicherten Reihenfolge waren
         for tab_name in all_tab_names:
             if tab_name not in final_display_order:
                 final_display_order.append(tab_name)
@@ -151,7 +148,6 @@ class MainUserWindow(tk.Toplevel):
                   foreground=[('active', 'black')])
 
         today = date.today()
-        # Fix for month change
         if today.month == 12:
             self.current_display_date = today.replace(year=today.year + 1, month=1, day=1)
         else:
@@ -210,6 +206,27 @@ class MainUserWindow(tk.Toplevel):
             frame = self.tab_frames.get(tab_name)
             if frame:
                 self.notebook.add(frame, text=tab_name)
+
+                if TabLockManager.is_tab_locked(tab_name):
+                    overlay = tk.Frame(frame, bg='gray90', relief='raised', borderwidth=2)
+                    overlay.place(relx=0, rely=0, relwidth=1, relheight=1, anchor='nw')
+
+                    msg_frame = ttk.Frame(overlay, style="Overlay.TFrame")
+                    msg_frame.place(relx=0.5, rely=0.5, anchor='center')
+
+                    style = ttk.Style()
+                    style.configure("Overlay.TFrame", background='gray90')
+
+                    ttk.Label(msg_frame, text="🔧", font=('Segoe UI', 48, 'bold'), background='gray90',
+                              foreground='gray60').pack(pady=10)
+                    ttk.Label(msg_frame, text="Wartungsarbeiten", font=('Segoe UI', 22, 'bold'), background='gray90',
+                              foreground='gray60').pack(pady=5)
+                    ttk.Label(msg_frame,
+                              text="Dieser Bereich wird gerade überarbeitet und ist in Kürze wieder verfügbar.",
+                              font=('Segoe UI', 12), background='gray90', foreground='gray60').pack(pady=10)
+
+                    overlay.bind("<Button-1>", lambda e: "break")
+                    overlay.bind("<B1-Motion>", lambda e: "break")
 
     def get_tab(self, tab_name):
         return self.tab_frames.get(tab_name)
@@ -288,7 +305,6 @@ class MainUserWindow(tk.Toplevel):
                 break
 
     def check_all_notifications(self):
-        """Prüft alle Benachrichtigungstypen in einer Funktion."""
         all_messages = []
         tabs_to_refresh = []
 

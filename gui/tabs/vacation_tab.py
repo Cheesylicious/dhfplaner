@@ -8,6 +8,7 @@ from database.db_manager import (
     get_requests_by_user,
     get_user_by_id
 )
+from ..request_lock_manager import RequestLockManager
 
 class VacationTab(ttk.Frame):
     def __init__(self, master, user_data):
@@ -22,13 +23,11 @@ class VacationTab(ttk.Frame):
         main_frame = ttk.Frame(self, padding="10")
         main_frame.pack(expand=True, fill='both')
 
-        # Frame for vacation days info
         info_frame = ttk.LabelFrame(main_frame, text="Meine Urlaubstage", padding="10")
         info_frame.pack(fill='x', pady=5)
         self.vacation_days_label = ttk.Label(info_frame, text="", font=('Segoe UI', 10))
         self.vacation_days_label.pack()
 
-        # Frame for new request
         request_frame = ttk.LabelFrame(main_frame, text="Neuer Urlaubsantrag", padding="10")
         request_frame.pack(fill='x', pady=10)
 
@@ -43,7 +42,6 @@ class VacationTab(ttk.Frame):
         submit_button = ttk.Button(request_frame, text="Antrag stellen", command=self.submit_request)
         submit_button.grid(row=0, column=4, padx=10, pady=5)
 
-        # Frame for existing requests
         history_frame = ttk.LabelFrame(main_frame, text="Meine Anträge", padding="10")
         history_frame.pack(expand=True, fill='both')
 
@@ -52,16 +50,14 @@ class VacationTab(ttk.Frame):
         self.tree.heading('end_date', text='Bis')
         self.tree.heading('status', text='Status')
 
-        # Farben für die Status
         self.tree.tag_configure('Ausstehend', background='#FFF3CD')
         self.tree.tag_configure('Genehmigt', background='#D4EDDA')
         self.tree.tag_configure('Abgelehnt', background='#F8D7DA')
-        self.tree.tag_configure('Storniert', background='#E0B0FF') # Lila
+        self.tree.tag_configure('Storniert', background='#E0B0FF')
 
         self.tree.pack(expand=True, fill='both')
 
     def load_user_vacation_data(self):
-        # Lade die Benutzerdaten bei Bedarf neu, um aktuelle Urlaubstage zu haben
         user = get_user_by_id(self.user_data['id'])
         if user:
             self.user_data['urlaub_gesamt'] = user['urlaub_gesamt']
@@ -77,7 +73,6 @@ class VacationTab(ttk.Frame):
             start_date = datetime.strptime(req['start_date'], '%Y-%m-%d').strftime('%d.%m.%Y')
             end_date = datetime.strptime(req['end_date'], '%Y-%m-%d').strftime('%d.%m.%Y')
             status = req['status']
-            # Der Tag für die Farbe ist direkt der Status
             self.tree.insert('', 'end', values=(start_date, end_date, status), tags=(status,))
 
     def submit_request(self):
@@ -87,6 +82,20 @@ class VacationTab(ttk.Frame):
         if start_date > end_date:
             messagebox.showwarning("Ungültiges Datum", "Das Startdatum darf nicht nach dem Enddatum liegen.", parent=self)
             return
+
+        months_to_check = set()
+        temp_date = start_date
+        while temp_date <= end_date:
+            months_to_check.add((temp_date.year, temp_date.month))
+            next_month = temp_date.month % 12 + 1
+            next_year = temp_date.year + (temp_date.month // 12)
+            temp_date = date(next_year, next_month, 1)
+
+        for year, month in months_to_check:
+            if RequestLockManager.is_month_locked(year, month):
+                month_name = date(year, month, 1).strftime("%B")
+                messagebox.showwarning("Anträge gesperrt", f"Der Monat {month_name} {year} ist für Anträge gesperrt.", parent=self)
+                return
 
         if add_vacation_request(self.user_data['id'], start_date, end_date):
             messagebox.showinfo("Erfolg", "Urlaubsantrag wurde erfolgreich gestellt.", parent=self)

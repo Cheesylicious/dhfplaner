@@ -10,6 +10,7 @@ from database.db_manager import (
     get_all_shift_types
 )
 from ..dialogs.rejection_reason_dialog import RejectionReasonDialog
+from ..request_lock_manager import RequestLockManager
 
 
 class MyRequestsTab(ttk.Frame):
@@ -93,6 +94,9 @@ class MyRequestsTab(ttk.Frame):
 
     def submit_frei_request(self):
         req_date = self.date_entry.get_date()
+        if RequestLockManager.is_month_locked(req_date.year, req_date.month):
+            messagebox.showwarning("Anträge gesperrt", "Für diesen Monat können keine Anträge gestellt oder bestehende bearbeitet werden.", parent=self)
+            return
         date_str = req_date.strftime('%Y-%m-%d')
         success, msg = submit_user_request(self.user_data['id'], date_str, requested_shift=None)
         if success:
@@ -107,6 +111,9 @@ class MyRequestsTab(ttk.Frame):
             messagebox.showwarning("Eingabe fehlt", "Bitte wählen Sie eine Schicht aus.", parent=self)
             return
         req_date = self.date_entry.get_date()
+        if RequestLockManager.is_month_locked(req_date.year, req_date.month):
+            messagebox.showwarning("Anträge gesperrt", "Für diesen Monat können keine Anträge gestellt oder bestehende bearbeitet werden.", parent=self)
+            return
         date_str = req_date.strftime('%Y-%m-%d')
         success, msg = submit_user_request(self.user_data['id'], date_str, requested_shift=shift)
         if success:
@@ -122,6 +129,15 @@ class MyRequestsTab(ttk.Frame):
         if not selected:
             messagebox.showwarning("Keine Auswahl", "Bitte wählen Sie einen Antrag zum Zurückziehen aus.", parent=self)
             return
+
+        item = self.tree.item(selected[0])
+        date_str = item['values'][0]
+        req_date = datetime.strptime(date_str, '%d.%m.%Y').date()
+
+        if RequestLockManager.is_month_locked(req_date.year, req_date.month):
+            messagebox.showwarning("Anträge gesperrt", "Für diesen Monat können keine Anträge gestellt oder bestehende bearbeitet werden.", parent=self)
+            return
+
         request_id = selected[0]
         if messagebox.askyesno("Bestätigen", "Möchten Sie den ausgewählten Antrag wirklich zurückziehen?", parent=self):
             success, msg = withdraw_wunschfrei_request(request_id, self.user_data['id'])

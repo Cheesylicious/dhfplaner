@@ -3,6 +3,8 @@ import tkinter as tk
 from tkinter import ttk, messagebox
 from database.db_manager import check_login, get_user_count
 from .registration_window import RegistrationWindow
+from .password_change_window import PasswordChangeWindow
+from .password_reset_window import PasswordResetWindow
 
 __version__ = "1.0.0"
 
@@ -27,6 +29,7 @@ class LoginWindow(tk.Toplevel):
                         borderwidth=0)
         style.map('TButton', background=[('active', '#2980b9')])
         style.configure('Small.TButton', font=('Segoe UI', 8))
+        style.configure('Link.TLabel', foreground='#3498db', font=('Segoe UI', 9, 'underline'))
 
         self.protocol("WM_DELETE_WINDOW", self.master.destroy)
         self.create_widgets(style)
@@ -61,6 +64,10 @@ class LoginWindow(tk.Toplevel):
         self.login_button = ttk.Button(main_frame, text="Anmelden", command=self.attempt_login, style='TButton')
         self.login_button.pack(pady=20, fill="x", ipady=8)
 
+        reset_link = ttk.Label(main_frame, text="Passwort vergessen?", style='Link.TLabel', cursor="hand2")
+        reset_link.pack()
+        reset_link.bind("<Button-1>", self.open_password_reset)
+
         user_count = get_user_count()
         if user_count == 0:
             reg_frame = ttk.Frame(main_frame, style='TFrame')
@@ -80,12 +87,19 @@ class LoginWindow(tk.Toplevel):
         password = self.password_entry.get()
         user_data = check_login(vorname, name, password)
         if user_data:
-            self.login_callback(user_data)
+            if user_data['password_changed'] == 0:
+                self.withdraw()  # Hide login window
+                PasswordChangeWindow(self, user_data, self.login_callback)
+            else:
+                self.login_callback(user_data)
         else:
             messagebox.showerror("Login fehlgeschlagen", "Benutzername oder Passwort falsch.", parent=self)
 
     def open_registration(self):
         RegistrationWindow(self)
+
+    def open_password_reset(self, event=None):
+        PasswordResetWindow(self)
 
     def check_for_updates(self):
         messagebox.showinfo("Update", "Diese Funktion ist noch nicht implementiert.", parent=self)

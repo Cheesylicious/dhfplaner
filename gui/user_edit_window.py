@@ -1,26 +1,27 @@
 # gui/user_edit_window.py
 import tkinter as tk
-from tkinter import ttk, messagebox
+from tkinter import ttk, messagebox, simpledialog
 from datetime import datetime
 from tkcalendar import DateEntry
-from .column_manager import ColumnManager
-# NEUE IMPORTE
-from database.db_manager import get_available_dogs, get_dog_assignment_count
+from database.db_manager import (
+    get_available_dogs, get_dog_assignment_count, create_user_by_admin,
+    update_user, admin_reset_password
+)
 
 
 class UserEditWindow(tk.Toplevel):
     def __init__(self, master, user_id, user_data, callback, is_new, allowed_roles):
         super().__init__(master)
         self.user_id = user_id
-        self.user_data = user_data
+        self.user_data = user_data if user_data is not None else {}
         self.callback = callback
         self.is_new = is_new
         self.allowed_roles = allowed_roles
 
-        self.title(
-            "Neuen Benutzer anlegen" if self.is_new else f"Benutzer bearbeiten: {self.user_data['vorname']} {self.user_data['name']}")
+        title = "Neuen Benutzer anlegen" if self.is_new else f"Benutzer bearbeiten: {self.user_data.get('vorname', '')} {self.user_data.get('name', '')}"
+        self.title(title)
 
-        self.geometry("450x520")
+        self.geometry("480x650")
         self.transient(master)
         self.grab_set()
 
@@ -30,57 +31,67 @@ class UserEditWindow(tk.Toplevel):
 
         style = ttk.Style(self)
         style.configure("TEntry", fieldbackground="white", foreground="black", font=("Segoe UI", 10))
-
-        all_columns = ColumnManager.load_config().get('all_columns', {})
+        style.configure("Readonly.TEntry", fieldbackground="#f0f0f0", foreground="#555555")
 
         self.vars = {}
         self.widgets = {}
         row_index = 0
 
-        for key, display_name in all_columns.items():
-            if key in ['urlaub_rest']: continue
+        readonly_fields = ['password_hash', 'urlaub_rest']
+
+        field_order = [
+            ('vorname', 'Vorname'), ('name', 'Nachname'), ('geburtstag', 'Geburtstag'),
+            ('telefon', 'Telefon'), ('entry_date', 'Eintrittsdatum'), ('urlaub_gesamt', 'Urlaub Gesamt'),
+            ('urlaub_rest', 'Urlaub Rest'), ('diensthund', 'Diensthund'), ('role', 'Rolle'),
+            ('password_hash', 'Passwort Hash'), ('has_seen_tutorial', 'Tutorial gesehen'),
+            ('password_changed', 'Passwort geändert')
+        ]
+
+        for key, display_name in field_order:
+            if self.is_new and key in readonly_fields + ['password_hash']:
+                continue
 
             ttk.Label(main_frame, text=f"{display_name}:").grid(row=row_index, column=0, sticky="w", pady=5,
                                                                 padx=(0, 10))
 
-            if "date" in key or "geburtstag" in key:
+            if key in ["geburtstag", "entry_date"]:
                 date_val = None
                 if self.user_data.get(key):
                     try:
                         date_val = datetime.strptime(self.user_data.get(key), '%Y-%m-%d').date()
                     except (ValueError, TypeError):
                         pass
-                widget = DateEntry(main_frame, date_pattern='dd.mm.yyyy', date=date_val, foreground="black",
-                                   headersforeground="black")
+                widget = DateEntry(main_frame, date_pattern='dd.mm.yyyy', date=date_val)
                 self.widgets[key] = widget
 
-            # GEÄNDERT: Spezielle Logik für das "Diensthund"-Feld
             elif key == 'diensthund':
-                self.vars['diensthund'] = tk.StringVar(value=self.user_data.get('diensthund', ''))
-
-                # Hole die Liste der verfügbaren Hunde
+                self.vars[key] = tk.StringVar(value=self.user_data.get(key, 'Kein'))
                 dog_options = get_available_dogs()
                 current_dog = self.user_data.get('diensthund')
-
-                # Füge den aktuellen Hund des Benutzers hinzu, falls er nicht in der Liste ist
                 if current_dog and current_dog not in dog_options:
                     dog_options.append(current_dog)
-
-                # Füge eine Option hinzu, um die Zuweisung aufzuheben
                 dog_options.insert(0, "Kein")
-
-                widget = ttk.Combobox(main_frame, textvariable=self.vars['diensthund'], values=sorted(dog_options),
+                widget = ttk.Combobox(main_frame, textvariable=self.vars[key], values=sorted(dog_options),
                                       state="readonly")
 
             elif key == 'role':
-                self.vars['role'] = tk.StringVar(value=self.user_data.get('role', 'Benutzer'))
-                widget = ttk.Combobox(main_frame, textvariable=self.vars['role'], values=self.allowed_roles,
+                self.vars[key] = tk.StringVar(value=self.user_data.get('role', 'Benutzer'))
+                widget = ttk.Combobox(main_frame, textvariable=self.vars[key], values=self.allowed_roles,
                                       state="readonly")
                 if not self.allowed_roles: widget.config(state="disabled")
 
+            # HIER DIE ÄNDERUNG: Dropdown für Ja/Nein
+            elif key in ['has_seen_tutorial', 'password_changed']:
+                val = self.user_data.get(key, 0)
+                self.vars[key] = tk.StringVar(value="Ja" if val == 1 else "Nein")
+                widget = ttk.Combobox(main_frame, textvariable=self.vars[key], values=["Ja", "Nein"], state="readonly")
+
             else:
                 self.vars[key] = tk.StringVar(value=str(self.user_data.get(key, "")))
-                widget = ttk.Entry(main_frame, textvariable=self.vars[key])
+                style = "Readonly.TEntry" if key in readonly_fields else "TEntry"
+                widget = ttk.Entry(main_frame, textvariable=self.vars[key], style=style)
+                if key in readonly_fields:
+                    widget.config(state='readonly')
 
             widget.grid(row=row_index, column=1, sticky="ew", pady=5, ipady=2)
             row_index += 1
@@ -105,14 +116,24 @@ class UserEditWindow(tk.Toplevel):
         ttk.Button(button_bar, text="Abbrechen", command=self.destroy).grid(row=0, column=1, sticky="ew", padx=(5, 0))
 
     def reset_password(self):
-        messagebox.showinfo("Info", "Passwort-Reset-Funktion noch nicht implementiert.", parent=self)
+        new_password = simpledialog.askstring("Passwort zurücksetzen", "Geben Sie ein neues temporäres Passwort ein:",
+                                              parent=self, show='*')
+        if new_password:
+            success, message = admin_reset_password(self.user_id, new_password)
+            if success:
+                messagebox.showinfo("Erfolg", message, parent=self)
+            else:
+                messagebox.showerror("Fehler", message, parent=self)
 
     def save(self):
         updated_data = {key: var.get().strip() for key, var in self.vars.items()}
 
         for key, widget in self.widgets.items():
-            date_obj = widget.get_date()
-            updated_data[key] = date_obj.strftime('%Y-%m-%d')
+            try:
+                date_obj = widget.get_date()
+                updated_data[key] = date_obj.strftime('%Y-%m-%d')
+            except (ValueError, TypeError):
+                updated_data[key] = ""
 
         if not updated_data.get("vorname") or not updated_data.get("name"):
             messagebox.showwarning("Eingabe fehlt", "Vorname und Name dürfen nicht leer sein.", parent=self)
@@ -123,22 +144,25 @@ class UserEditWindow(tk.Toplevel):
                                    parent=self)
             return
 
-        # NEU: Validierung der Hund-Zuweisung
-        new_dog = updated_data.get('diensthund')
-        original_dog = self.user_data.get('diensthund')
-
-        # Prüfe nur, wenn sich die Zuweisung ändert und es nicht "Kein" ist
-        if new_dog and new_dog != "Kein" and new_dog != original_dog:
-            assignment_count = get_dog_assignment_count(new_dog)
-            if assignment_count >= 2:
-                messagebox.showerror("Fehler",
-                                     f"Der Diensthund '{new_dog}' ist bereits {assignment_count} Mal zugewiesen und kann nicht weiter zugeteilt werden.",
-                                     parent=self)
-                return
-
-        # Korrigiere "Kein" zu einem leeren String für die Datenbank
         if updated_data.get('diensthund') == "Kein":
             updated_data['diensthund'] = ""
 
-        self.callback(self.user_id, updated_data)
-        self.destroy()
+        # HIER DIE ÄNDERUNG: Umwandlung von Ja/Nein in 1/0
+        updated_data['has_seen_tutorial'] = 1 if updated_data.get('has_seen_tutorial') == 'Ja' else 0
+        updated_data['password_changed'] = 1 if updated_data.get('password_changed') == 'Ja' else 0
+
+        success = False
+        message = ""
+        if self.is_new:
+            success = create_user_by_admin(updated_data)
+            message = "Mitarbeiter erfolgreich hinzugefügt." if success else "Ein Mitarbeiter mit diesem Namen existiert bereits."
+        else:
+            success = update_user(self.user_id, updated_data)
+            message = "Mitarbeiterdaten erfolgreich aktualisiert." if success else "Fehler beim Aktualisieren der Mitarbeiterdaten."
+
+        if success:
+            messagebox.showinfo("Erfolg", message, parent=self)
+            self.callback()
+            self.destroy()
+        else:
+            messagebox.showerror("Fehler", message, parent=self)

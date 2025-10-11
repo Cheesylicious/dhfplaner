@@ -14,6 +14,8 @@ from .tabs.requests_tab import RequestsTab
 from .tabs.log_tab import LogTab
 from .tabs.bug_reports_tab import BugReportsTab
 from .tabs.vacation_requests_tab import VacationRequestsTab
+from .tabs.request_lock_tab import RequestLockTab
+from .tabs.user_tab_settings_tab import UserTabSettingsTab
 from .dialogs.user_order_window import UserOrderWindow
 from .dialogs.shift_order_window import ShiftOrderWindow
 from .dialogs.min_staffing_window import MinStaffingWindow
@@ -25,8 +27,9 @@ from .dialogs.bug_report_dialog import BugReportDialog
 from .holiday_manager import HolidayManager
 from database.db_manager import (
     get_all_shift_types, get_pending_wunschfrei_requests, get_open_bug_reports_count,
-    get_pending_vacation_requests_count, ROLE_HIERARCHY
+    get_pending_vacation_requests_count, get_pending_password_resets_count, ROLE_HIERARCHY
 )
+from .tabs.password_reset_requests_window import PasswordResetRequestsWindow
 
 
 class MainAdminWindow(tk.Toplevel):
@@ -104,6 +107,8 @@ class MainAdminWindow(tk.Toplevel):
         settings_menu.add_command(label="Farbeinstellungen", command=self.open_color_settings_window)
         settings_menu.add_separator()
         settings_menu.add_command(label="Anfragen verwalten", command=self.open_request_settings_window)
+        settings_menu.add_command(label="Antragssperre", command=self.open_request_lock_window)
+        settings_menu.add_command(label="Benutzer-Reiter sperren", command=self.open_user_tab_settings)
         settings_menu.add_command(label="Planungs-Helfer", command=self.open_planning_assistant_settings)
 
     def setup_tabs(self):
@@ -134,6 +139,35 @@ class MainAdminWindow(tk.Toplevel):
     def open_bug_report_dialog(self):
         BugReportDialog(self, self.user_data['id'], self.check_for_updates)
 
+    def open_password_resets_window(self):
+        PasswordResetRequestsWindow(self, self.check_for_updates)
+
+    def open_request_lock_window(self):
+        if "Antragssperre" not in self.tab_frames:
+            self.tab_frames["Antragssperre"] = RequestLockTab(self.notebook, self)
+            self.notebook.add(self.tab_frames["Antragssperre"], text="Antragssperre")
+        self.notebook.select(self.tab_frames["Antragssperre"])
+
+    def refresh_antragssperre_views(self):
+        if "Schichtplan" in self.tab_frames and self.tab_frames["Schichtplan"].winfo_exists():
+            self.tab_frames["Schichtplan"].update_lock_status()
+        if "Antragssperre" in self.tab_frames and self.tab_frames["Antragssperre"].winfo_exists():
+            self.tab_frames["Antragssperre"].load_locks_for_year()
+
+    def open_user_tab_settings(self):
+        tab_name = "Benutzer-Reiter"
+
+        # Dies ist jetzt die "Master-Liste" der Benutzer-Reiter.
+        # Wenn ein neuer Reiter für Benutzer hinzugefügt wird, muss er hier eingetragen werden.
+        all_user_tab_names = ["Schichtplan", "Meine Anfragen", "Mein Urlaub", "Bug-Reports"]
+
+        if tab_name not in self.tab_frames:
+            # Übergebe die Liste an den Einstellungs-Tab
+            self.tab_frames[tab_name] = UserTabSettingsTab(self.notebook, all_user_tab_names)
+            self.notebook.add(self.tab_frames[tab_name], text=tab_name)
+
+        self.notebook.select(self.tab_frames[tab_name])
+
     def logout(self):
         self.withdraw()
         self.master.login_window.clear_input_fields()
@@ -142,6 +176,8 @@ class MainAdminWindow(tk.Toplevel):
     def check_for_updates(self):
         self.update_tab_titles()
         self.update_header_notifications()
+        if hasattr(self.tab_frames["Mitarbeiter"], 'update_password_reset_button'):
+            self.tab_frames["Mitarbeiter"].update_password_reset_button()
         self.after(60000, self.check_for_updates)
 
     def update_tab_titles(self):
@@ -171,6 +207,15 @@ class MainAdminWindow(tk.Toplevel):
             widget.destroy()
 
         notifications = []
+
+        pending_password_resets = get_pending_password_resets_count()
+        if pending_password_resets > 0:
+            notifications.append({
+                "text": f"{pending_password_resets} Passwort-Reset(s)",
+                "bg": "mediumpurple",
+                "fg": "white",
+                "action": self.open_password_resets_window
+            })
 
         pending_wunsch_count = len(get_pending_wunschfrei_requests())
         if pending_wunsch_count > 0:
@@ -205,11 +250,17 @@ class MainAdminWindow(tk.Toplevel):
         else:
             for i, notif in enumerate(notifications):
                 self.style.configure(f'Notif{i}.TButton', background=notif["bg"], foreground=notif["fg"])
+
+                if "action" in notif:
+                    command = notif["action"]
+                else:
+                    command = lambda tab=notif["tab"]: self.switch_to_tab(tab)
+
                 btn = ttk.Button(
                     self.notification_frame,
                     text=notif["text"],
                     style=f'Notif{i}.TButton',
-                    command=lambda tab=notif["tab"]: self.switch_to_tab(tab)
+                    command=command
                 )
                 btn.pack(side="left", padx=5, fill="x", expand=True)
 
@@ -280,7 +331,6 @@ class MainAdminWindow(tk.Toplevel):
             messagebox.showinfo("Erfolg", "Der Zähler wurde zurückgesetzt.", parent=self)
 
     def get_allowed_roles(self):
-        """Gibt eine Liste der Rollen zurück, die der aktuelle Admin vergeben darf."""
         admin_level = ROLE_HIERARCHY.get(self.user_data['role'], 0)
         allowed_roles = [role for role, level in ROLE_HIERARCHY.items() if level < admin_level]
         if self.user_data['role'] == "SuperAdmin":
