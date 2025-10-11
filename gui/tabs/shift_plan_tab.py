@@ -197,7 +197,7 @@ class ShiftPlanTab(ttk.Frame):
                 shift_data = self.app.shift_types_data.get(display_text)
 
                 if shift_data and shift_data.get('color'):
-                    if display_text in ["U", "X"]:
+                    if display_text in ["U", "X", "EU"]:
                         bg_color = shift_data['color']
                     elif not is_holiday and not is_weekend:
                         bg_color = shift_data['color']
@@ -247,6 +247,9 @@ class ShiftPlanTab(ttk.Frame):
         header_bg, summary_bg = "#E0E0E0", "#D0D0FF"
         weekend_bg = rules.get('weekend_bg', "#EAF4FF")
         holiday_bg = rules.get('holiday_bg', "#FFD700")
+        ausbildung_bg = rules.get('quartals_ausbildung_bg', "#ADD8E6")
+        schiessen_bg = rules.get('schiessen_bg', "#FFB6C1")
+
         MIN_NAME_WIDTH, MIN_DOG_WIDTH = 150, 100
         tk.Label(self.plan_grid_frame, text="Mitarbeiter", font=("Segoe UI", 10, "bold"), bg=header_bg, fg="black",
                  padx=5, pady=5, bd=1, relief="solid").grid(row=0, column=0, columnspan=2, sticky="nsew")
@@ -259,7 +262,18 @@ class ShiftPlanTab(ttk.Frame):
             day_abbr = day_map[current_date.weekday()]
             is_weekend = current_date.weekday() >= 5
             is_holiday = self.app.is_holiday(current_date)
-            bg = holiday_bg if is_holiday else (weekend_bg if is_weekend else header_bg)
+            event_type = self.app.get_event_type(current_date)
+
+            bg = header_bg
+            if is_holiday:
+                bg = holiday_bg
+            elif event_type == "Quartals Ausbildung":
+                bg = ausbildung_bg
+            elif event_type == "Schießen":
+                bg = schiessen_bg
+            elif is_weekend:
+                bg = weekend_bg
+
             tk.Label(self.plan_grid_frame, text=day_abbr, font=("Segoe UI", 9, "bold"), bg=bg, fg="black", padx=5,
                      pady=5, bd=1, relief="solid").grid(row=0, column=day + 1, sticky="nsew")
             tk.Label(self.plan_grid_frame, text=str(day), font=("Segoe UI", 9), bg=bg, fg="black", padx=5, pady=5, bd=1,
@@ -379,7 +393,6 @@ class ShiftPlanTab(ttk.Frame):
                 shift_data = self.app.shift_types_data.get(shift_abbrev)
                 request_info = wunschfrei_data.get(user_id_str, {}).get(current_date.strftime('%Y-%m-%d'))
 
-                # **KORRIGIERTE FARB-LOGIK**
                 bg_color = "white"
                 if is_holiday:
                     bg_color = holiday_bg
@@ -387,7 +400,7 @@ class ShiftPlanTab(ttk.Frame):
                     bg_color = weekend_bg
 
                 if shift_data and shift_data.get('color'):
-                    if shift_abbrev in ["U", "X"]:
+                    if shift_abbrev in ["U", "X", "EU"]:
                         bg_color = shift_data['color']
                     elif not is_holiday and not is_weekend:
                         bg_color = shift_data['color']
@@ -432,8 +445,6 @@ class ShiftPlanTab(ttk.Frame):
                         bg = rules.get('success_bg', "#90EE90")
                 label.config(bg=bg, fg=self.app.get_contrast_color(bg), bd=1)
 
-    # ... (Rest der Methoden bleibt unverändert) ...
-
     def show_previous_month(self):
         self.clear_understaffing_results()
         current_date = self.app.current_display_date
@@ -442,6 +453,7 @@ class ShiftPlanTab(ttk.Frame):
         self.app.current_display_date = last_day_of_previous_month.replace(day=1)
         if current_date.year != self.app.current_display_date.year:
             self.app._load_holidays_for_year(self.app.current_display_date.year)
+            self.app._load_events_for_year(self.app.current_display_date.year)
         self.build_shift_plan_grid(self.app.current_display_date.year, self.app.current_display_date.month)
 
     def show_next_month(self):
@@ -452,6 +464,7 @@ class ShiftPlanTab(ttk.Frame):
         self.app.current_display_date = first_day_of_next_month
         if current_date.year != self.app.current_display_date.year:
             self.app._load_holidays_for_year(self.app.current_display_date.year)
+            self.app._load_events_for_year(self.app.current_display_date.year)
         self.build_shift_plan_grid(self.app.current_display_date.year, self.app.current_display_date.month)
 
     def on_grid_cell_click(self, event, user_id, day, year, month):
@@ -510,6 +523,7 @@ class ShiftPlanTab(ttk.Frame):
             if new_shift and new_shift != "FREI":
                 self.app.shift_frequency[new_shift] = self.app.shift_frequency.get(new_shift, 0) + 1
                 self.app.save_shift_frequency()
+
             user_id_str = str(user_id)
             if user_id_str not in self.shift_schedule_data:
                 self.shift_schedule_data[user_id_str] = {}
@@ -517,7 +531,12 @@ class ShiftPlanTab(ttk.Frame):
                 self.shift_schedule_data[user_id_str][date_str] = new_shift
             elif date_str in self.shift_schedule_data[user_id_str]:
                 del self.shift_schedule_data[user_id_str][date_str]
+
             self._update_ui_after_change(user_id, date_str, old_shift, new_shift)
+
+            # ANPASSUNG: "Teilnahmen"-Tab aktualisieren
+            if "Teilnahmen" in self.app.tab_frames:
+                self.app.tab_frames["Teilnahmen"].refresh_data()
         else:
             messagebox.showerror("Fehler", message, parent=self.app)
 

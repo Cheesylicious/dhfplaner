@@ -16,15 +16,18 @@ from .tabs.bug_reports_tab import BugReportsTab
 from .tabs.vacation_requests_tab import VacationRequestsTab
 from .tabs.request_lock_tab import RequestLockTab
 from .tabs.user_tab_settings_tab import UserTabSettingsTab
+from .tabs.participation_tab import ParticipationTab
 from .dialogs.user_order_window import UserOrderWindow
 from .dialogs.shift_order_window import ShiftOrderWindow
 from .dialogs.min_staffing_window import MinStaffingWindow
 from .dialogs.holiday_settings_window import HolidaySettingsWindow
+from .dialogs.event_settings_window import EventSettingsWindow
 from .dialogs.request_settings_window import RequestSettingsWindow
 from .dialogs.planning_assistant_settings_window import PlanningAssistantSettingsWindow
 from .dialogs.color_settings_window import ColorSettingsWindow
 from .dialogs.bug_report_dialog import BugReportDialog
 from .holiday_manager import HolidayManager
+from .event_manager import EventManager
 from database.db_manager import (
     get_all_shift_types, get_pending_wunschfrei_requests, get_open_bug_reports_count,
     get_pending_vacation_requests_count, get_pending_password_resets_count, ROLE_HIERARCHY
@@ -62,6 +65,7 @@ class MainAdminWindow(tk.Toplevel):
 
         self.shift_types_data = {}
         self.staffing_rules = {}
+        self.events = {}
 
         today = date.today()
         days_in_month = calendar.monthrange(today.year, today.month)[1]
@@ -104,6 +108,7 @@ class MainAdminWindow(tk.Toplevel):
         settings_menu.add_separator()
         settings_menu.add_command(label="Besetzungsregeln", command=self.open_staffing_rules_window)
         settings_menu.add_command(label="Feiertage", command=self.open_holiday_settings_window)
+        settings_menu.add_command(label="Sondertermine", command=self.open_event_settings_window)
         settings_menu.add_command(label="Farbeinstellungen", command=self.open_color_settings_window)
         settings_menu.add_separator()
         settings_menu.add_command(label="Anfragen verwalten", command=self.open_request_settings_window)
@@ -114,6 +119,7 @@ class MainAdminWindow(tk.Toplevel):
     def setup_tabs(self):
         self.tab_frames = {
             "Schichtplan": ShiftPlanTab(self.notebook, self),
+            "Teilnahmen": ParticipationTab(self.notebook, self),
             "Mitarbeiter": UserManagementTab(self.notebook, self),
             "Diensthunde": DogManagementTab(self.notebook, self),
             "Wunschanfragen": RequestsTab(self.notebook, self),
@@ -156,16 +162,10 @@ class MainAdminWindow(tk.Toplevel):
 
     def open_user_tab_settings(self):
         tab_name = "Benutzer-Reiter"
-
-        # Dies ist jetzt die "Master-Liste" der Benutzer-Reiter.
-        # Wenn ein neuer Reiter für Benutzer hinzugefügt wird, muss er hier eingetragen werden.
         all_user_tab_names = ["Schichtplan", "Meine Anfragen", "Mein Urlaub", "Bug-Reports"]
-
         if tab_name not in self.tab_frames:
-            # Übergebe die Liste an den Einstellungs-Tab
             self.tab_frames[tab_name] = UserTabSettingsTab(self.notebook, all_user_tab_names)
             self.notebook.add(self.tab_frames[tab_name], text=tab_name)
-
         self.notebook.select(self.tab_frames[tab_name])
 
     def logout(self):
@@ -207,7 +207,6 @@ class MainAdminWindow(tk.Toplevel):
             widget.destroy()
 
         notifications = []
-
         pending_password_resets = get_pending_password_resets_count()
         if pending_password_resets > 0:
             notifications.append({
@@ -216,7 +215,6 @@ class MainAdminWindow(tk.Toplevel):
                 "fg": "white",
                 "action": self.open_password_resets_window
             })
-
         pending_wunsch_count = len(get_pending_wunschfrei_requests())
         if pending_wunsch_count > 0:
             notifications.append({
@@ -225,7 +223,6 @@ class MainAdminWindow(tk.Toplevel):
                 "fg": "black",
                 "tab": "Wunschanfragen"
             })
-
         pending_urlaub_count = get_pending_vacation_requests_count()
         if pending_urlaub_count > 0:
             notifications.append({
@@ -234,7 +231,6 @@ class MainAdminWindow(tk.Toplevel):
                 "fg": "black",
                 "tab": "Urlaubsanträge"
             })
-
         open_bug_count = get_open_bug_reports_count()
         if open_bug_count > 0:
             notifications.append({
@@ -250,12 +246,10 @@ class MainAdminWindow(tk.Toplevel):
         else:
             for i, notif in enumerate(notifications):
                 self.style.configure(f'Notif{i}.TButton', background=notif["bg"], foreground=notif["fg"])
-
                 if "action" in notif:
                     command = notif["action"]
                 else:
                     command = lambda tab=notif["tab"]: self.switch_to_tab(tab)
-
                 btn = ttk.Button(
                     self.notification_frame,
                     text=notif["text"],
@@ -272,14 +266,15 @@ class MainAdminWindow(tk.Toplevel):
         self.load_shift_types()
         self.load_staffing_rules()
         self._load_holidays_for_year(self.current_display_date.year)
+        self._load_events_for_year(self.current_display_date.year)
 
     def refresh_all_tabs(self):
         self.load_all_data()
-        for tab in self.tab_frames.values():
-            if hasattr(tab, 'refresh_plan'):
-                tab.refresh_plan()
-            elif hasattr(tab, 'refresh_data'):
-                tab.refresh_data()
+        for tab_name, tab_frame in self.tab_frames.items():
+            if hasattr(tab_frame, 'refresh_data'):
+                tab_frame.refresh_data()
+            elif hasattr(tab_frame, 'refresh_plan'):
+                tab_frame.refresh_plan()
         self.check_for_updates()
 
     def load_shift_types(self):
@@ -295,8 +290,14 @@ class MainAdminWindow(tk.Toplevel):
     def _load_holidays_for_year(self, year):
         self.current_year_holidays = HolidayManager.get_holidays_for_year(year)
 
+    def _load_events_for_year(self, year):
+        self.events = EventManager.get_events_for_year(year)
+
     def is_holiday(self, check_date):
         return check_date in self.current_year_holidays
+
+    def get_event_type(self, current_date):
+        return EventManager.get_event_type(current_date, self.events)
 
     def get_contrast_color(self, hex_color):
         if not hex_color or not hex_color.startswith('#') or len(hex_color) != 7:
@@ -348,6 +349,9 @@ class MainAdminWindow(tk.Toplevel):
 
     def open_holiday_settings_window(self):
         HolidaySettingsWindow(self, year=self.current_display_date.year, callback=self.refresh_all_tabs)
+
+    def open_event_settings_window(self):
+        EventSettingsWindow(self, year=self.current_display_date.year, callback=self.refresh_all_tabs)
 
     def open_color_settings_window(self):
         ColorSettingsWindow(self, callback=self.refresh_all_tabs)

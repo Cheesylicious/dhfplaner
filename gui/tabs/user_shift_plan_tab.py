@@ -10,7 +10,6 @@ from database.db_manager import (
     withdraw_wunschfrei_request, get_all_vacation_requests_for_month,
     user_respond_to_request, save_shift_entry, get_wunschfrei_request_by_id
 )
-# KORRIGIERTE IMPORTE: 'is_month_locked' entfernt und 'RequestLockManager' importiert
 from gui.request_lock_manager import RequestLockManager
 from gui.request_config_manager import RequestConfigManager
 from gui.dialogs.custom_messagebox import CustomMessagebox
@@ -105,6 +104,8 @@ class UserShiftPlanTab(ttk.Frame):
         header_bg, summary_bg = "#E0E0E0", "#D0D0FF"
         weekend_bg = rules.get('weekend_bg', "#EAF4FF")
         holiday_bg = rules.get('holiday_bg', "#FFD700")
+        ausbildung_bg = rules.get('quartals_ausbildung_bg', "#ADD8E6")
+        schiessen_bg = rules.get('schiessen_bg', "#FFB6C1")
 
         MIN_NAME_WIDTH, MIN_DOG_WIDTH = 150, 100
 
@@ -117,8 +118,18 @@ class UserShiftPlanTab(ttk.Frame):
         for day in range(1, days_in_month + 1):
             current_date = date(year, month, day)
             day_abbr = day_map[current_date.weekday()]
-            bg = holiday_bg if self.app.is_holiday(current_date) else (
-                weekend_bg if current_date.weekday() >= 5 else header_bg)
+
+            bg = header_bg
+            event_type = self.app.get_event_type(current_date)
+            if self.app.is_holiday(current_date):
+                bg = holiday_bg
+            elif event_type == "Quartals Ausbildung":
+                bg = ausbildung_bg
+            elif event_type == "Schießen":
+                bg = schiessen_bg
+            elif current_date.weekday() >= 5:
+                bg = weekend_bg
+
             tk.Label(self.plan_grid_frame, text=day_abbr, font=("Segoe UI", 9, "bold"), bg=bg, fg="black", padx=5,
                      pady=5, bd=1, relief="solid").grid(row=0, column=day + 1, sticky="nsew")
             tk.Label(self.plan_grid_frame, text=str(day), font=("Segoe UI", 9), bg=bg, fg="black", padx=5, pady=5, bd=1,
@@ -265,17 +276,19 @@ class UserShiftPlanTab(ttk.Frame):
                 elif is_logged_in_user:
                     bg_color = "#E8F5E9"
 
-                if shift_abbrev in ["U", "X"] and shift_data and shift_data.get('color'):
-                    bg_color = shift_data.get('color')
-                elif vacation_status == 'Ausstehend':
+                if shift_data and shift_data.get('color'):
+                    if shift_abbrev in ["U", "X", "EU"]:
+                        bg_color = shift_data.get('color')
+                    elif not is_holiday and not is_weekend:
+                        bg_color = shift_data.get('color')
+
+                if vacation_status == 'Ausstehend':
                     bg_color = pending_color
                 elif request_info and request_info[0] == 'Ausstehend':
                     if request_info[2] == 'admin':
                         bg_color = admin_pending_color
                     else:
                         bg_color = pending_color
-                elif shift_data and shift_data.get('color') and not (is_holiday or is_weekend):
-                    bg_color = shift_data.get('color')
 
                 fg_color = self.app.get_contrast_color(bg_color)
                 label.config(bg=bg_color, fg=fg_color)
@@ -325,7 +338,6 @@ class UserShiftPlanTab(ttk.Frame):
     def on_user_cell_click(self, event, user_id, day, year, month):
         request_date = date(year, month, day)
 
-        # HIER DIE KORREKTUR: Ruft die korrekte Funktion auf
         if RequestLockManager.is_month_locked(year, month):
             messagebox.showinfo("Anträge gesperrt",
                                 "Für diesen Monat können keine neuen Anträge gestellt oder bestehende bearbeitet werden.",
@@ -344,7 +356,8 @@ class UserShiftPlanTab(ttk.Frame):
             self.handle_admin_request(event, existing_request)
             return
 
-        if existing_request and ("Akzeptiert" in existing_request['status'] or "Genehmigt" in existing_request['status']):
+        if existing_request and (
+                "Akzeptiert" in existing_request['status'] or "Genehmigt" in existing_request['status']):
             messagebox.showinfo("Info",
                                 "Ein bereits akzeptierter Antrag kann hier nicht geändert werden.\nBitte ziehe den Antrag im Reiter 'Meine Anfragen' zurück, um einen neuen zu stellen.",
                                 parent=self)
@@ -477,13 +490,14 @@ class UserShiftPlanTab(ttk.Frame):
             self.wunschfrei_data[user_id_str] = {}
         if request_info:
             self.wunschfrei_data[user_id_str][date_str] = (
-            request_info['status'], request_info['requested_shift'], request_info.get('requested_by', 'user'))
+                request_info['status'], request_info['requested_shift'], request_info.get('requested_by', 'user'))
         elif date_str in self.wunschfrei_data.get(user_id_str, {}):
             del self.wunschfrei_data[user_id_str][date_str]
 
         display_shift = shift
         if request_info:
-            status, requested_shift, requested_by = request_info['status'], request_info['requested_shift'], request_info.get(
+            status, requested_shift, requested_by = request_info['status'], request_info[
+                'requested_shift'], request_info.get(
                 'requested_by', 'user')
             if status == 'Ausstehend':
                 if requested_by == 'admin':
@@ -547,9 +561,15 @@ class UserShiftPlanTab(ttk.Frame):
     def show_previous_month(self):
         self.app.current_display_date = (self.app.current_display_date.replace(day=1) - timedelta(days=1)).replace(
             day=1)
+        if self.app.current_display_date.year != self.app.current_display_date.year:
+            self.app._load_holidays_for_year(self.app.current_display_date.year)
+            self.app._load_events_for_year(self.app.current_display_date.year)
         self.build_shift_plan_grid(self.app.current_display_date.year, self.app.current_display_date.month)
 
     def show_next_month(self):
         days_in_month = calendar.monthrange(self.app.current_display_date.year, self.app.current_display_date.month)[1]
         self.app.current_display_date = self.app.current_display_date.replace(day=1) + timedelta(days=days_in_month)
+        if self.app.current_display_date.year != self.app.current_display_date.year:
+            self.app._load_holidays_for_year(self.app.current_display_date.year)
+            self.app._load_events_for_year(self.app.current_display_date.year)
         self.build_shift_plan_grid(self.app.current_display_date.year, self.app.current_display_date.month)

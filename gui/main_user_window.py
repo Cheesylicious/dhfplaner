@@ -13,13 +13,14 @@ from .tabs.user_bug_report_tab import UserBugReportTab
 from .dialogs.bug_report_dialog import BugReportDialog
 from .dialogs.tutorial_window import TutorialWindow
 from .holiday_manager import HolidayManager
+from .event_manager import EventManager  # NEUER IMPORT
 from database.db_manager import (
     get_all_shift_types, get_unnotified_requests, mark_requests_as_notified,
     get_unnotified_bug_reports_for_user, mark_bug_reports_as_notified,
     get_unnotified_vacation_requests_for_user, mark_vacation_requests_as_notified,
     set_user_tutorial_seen, get_pending_admin_requests_for_user
 )
-from .tab_lock_manager import TabLockManager  # NEUER IMPORT
+from .tab_lock_manager import TabLockManager
 
 USER_TAB_ORDER_FILE = 'user_tab_order_config.json'
 STAFFING_RULES_FILE = 'min_staffing_rules.json'
@@ -156,9 +157,11 @@ class MainUserWindow(tk.Toplevel):
         self.shift_types_data = {}
         self.staffing_rules = self.load_staffing_rules()
         self.current_year_holidays = {}
+        self.events = {}  # NEU
         self.shift_frequency = self.load_shift_frequency()
         self.load_shift_types()
         self._load_holidays_for_year(self.current_display_date.year)
+        self._load_events_for_year(self.current_display_date.year)  # NEU
 
         self.setup_ui()
         self.setup_footer()
@@ -359,8 +362,14 @@ class MainUserWindow(tk.Toplevel):
     def _load_holidays_for_year(self, year):
         self.current_year_holidays = HolidayManager.get_holidays_for_year(year)
 
+    def _load_events_for_year(self, year):
+        self.events = EventManager.get_events_for_year(year)
+
     def is_holiday(self, check_date):
         return check_date in self.current_year_holidays
+
+    def get_event_type(self, current_date):
+        return EventManager.get_event_type(current_date, self.events)
 
     def load_shift_types(self):
         self.shift_types_data = {st['abbreviation']: st for st in get_all_shift_types()}
