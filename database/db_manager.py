@@ -3,6 +3,7 @@ import sqlite3
 import hashlib
 from datetime import date, datetime, timedelta
 import calendar
+import json
 
 DATABASE_NAME = 'planer.db'
 
@@ -198,6 +199,8 @@ def initialize_db():
         _add_column_if_not_exists(cursor, "vacation_requests", "archived", "INTEGER DEFAULT 0")
         _add_column_if_not_exists(cursor, "vacation_requests", "user_notified", "INTEGER DEFAULT 1")
         _add_column_if_not_exists(cursor, "users", "password_changed", "INTEGER DEFAULT 0")
+        _add_column_if_not_exists(cursor, "users", "last_ausbildung", "TEXT")
+        _add_column_if_not_exists(cursor, "users", "last_schiessen", "TEXT")
 
         conn.commit()
     finally:
@@ -205,7 +208,6 @@ def initialize_db():
 
 
 def lock_month(year, month):
-    """Sperrt einen Monat für neue Anträge."""
     conn = create_connection()
     try:
         cursor = conn.cursor()
@@ -220,7 +222,6 @@ def lock_month(year, month):
 
 
 def unlock_month(year, month):
-    """Entsperrt einen Monat für neue Anträge."""
     conn = create_connection()
     try:
         cursor = conn.cursor()
@@ -235,7 +236,6 @@ def unlock_month(year, month):
 
 
 def is_month_locked(year, month):
-    """Prüft, ob ein Monat gesperrt ist."""
     conn = create_connection()
     try:
         cursor = conn.cursor()
@@ -243,13 +243,12 @@ def is_month_locked(year, month):
         return cursor.fetchone() is not None
     except sqlite3.Error as e:
         print(f"DB Error on is_month_locked: {e}")
-        return False # Im Zweifel lieber nicht sperren
+        return False
     finally:
         conn.close()
 
 
 def admin_reset_password(user_id, new_password):
-    """Resets a user's password and forces them to change it on next login."""
     conn = create_connection()
     try:
         cursor = conn.cursor()
@@ -349,7 +348,6 @@ def submit_bug_report(user_id, title, description):
 
 
 def get_open_bug_reports_count():
-    """Zählt alle nicht erledigten und nicht archivierten Bug-Reports."""
     conn = create_connection()
     try:
         cursor = conn.cursor()
@@ -360,7 +358,6 @@ def get_open_bug_reports_count():
 
 
 def get_all_bug_reports():
-    """Holt alle Bug-Reports inklusive des Archivierungsstatus."""
     conn = create_connection()
     try:
         cursor = conn.cursor()
@@ -376,7 +373,6 @@ def get_all_bug_reports():
 
 
 def get_visible_bug_reports():
-    """Holt alle nicht-archivierten Bug-Reports für die Benutzeransicht."""
     conn = create_connection()
     try:
         cursor = conn.cursor()
@@ -424,7 +420,6 @@ def update_bug_report_notes(bug_id, notes):
 
 
 def archive_bug_report(bug_id):
-    """Setzt den 'archived' Status für einen Bug-Report auf 1."""
     conn = create_connection()
     try:
         cursor = conn.cursor()
@@ -441,7 +436,6 @@ def archive_bug_report(bug_id):
 
 
 def unarchive_bug_report(bug_id):
-    """Setzt den 'archived' Status für einen Bug-Report auf 0 zurück."""
     conn = create_connection()
     try:
         cursor = conn.cursor()
@@ -458,7 +452,6 @@ def unarchive_bug_report(bug_id):
 
 
 def delete_bug_reports(report_ids):
-    """Löscht einen oder mehrere Bug-Reports endgültig aus der Datenbank."""
     if not report_ids:
         return False, "Keine IDs zum Löschen übergeben."
 
@@ -511,7 +504,6 @@ def mark_bug_reports_as_notified(report_ids):
 
 
 def submit_user_request(user_id, request_date_str, requested_shift=None):
-    """Speichert oder aktualisiert eine Benutzeranfrage (Wunschfrei oder Schichtpräferenz)."""
     conn = create_connection()
     try:
         cursor = conn.cursor()
@@ -537,7 +529,6 @@ def submit_user_request(user_id, request_date_str, requested_shift=None):
 
 
 def admin_submit_request(user_id, request_date_str, requested_shift):
-    """Speichert eine Admin-Anfrage für eine Schicht."""
     conn = create_connection()
     try:
         cursor = conn.cursor()
@@ -558,7 +549,6 @@ def admin_submit_request(user_id, request_date_str, requested_shift):
 
 
 def user_respond_to_request(request_id, response):
-    """Verarbeitet die Antwort eines Benutzers auf eine Admin-Anfrage."""
     conn = create_connection()
     try:
         cursor = conn.cursor()
@@ -639,7 +629,6 @@ def withdraw_wunschfrei_request(request_id, user_id):
 
 
 def get_wunschfrei_requests_by_user_for_month(user_id, year, month):
-    """Zählt die 'Wunschfrei'-Anfragen eines Benutzers für einen Monat, die NICHT abgelehnt wurden."""
     conn = create_connection()
     try:
         cursor = conn.cursor()
@@ -671,7 +660,6 @@ def get_pending_wunschfrei_requests():
 
 
 def get_pending_admin_requests_for_user(user_id):
-    """ Zählt die Anzahl der ausstehenden Schichtanfragen von Admins für einen Benutzer. """
     conn = create_connection()
     try:
         cursor = conn.cursor()
@@ -685,7 +673,6 @@ def get_pending_admin_requests_for_user(user_id):
 
 
 def get_wunschfrei_request_by_user_and_date(user_id, request_date_str):
-    """Holt eine spezifische 'Wunschfrei'-Anfrage anhand von Benutzer und Datum."""
     conn = create_connection()
     try:
         cursor = conn.cursor()
@@ -700,7 +687,6 @@ def get_wunschfrei_request_by_user_and_date(user_id, request_date_str):
 
 
 def get_wunschfrei_request_by_id(request_id):
-    """Holt eine spezifische 'Wunschfrei'-Anfrage anhand ihrer ID."""
     conn = create_connection()
     try:
         cursor = conn.cursor()
@@ -807,14 +793,28 @@ def save_shift_entry(user_id, shift_date_str, shift_abbrev, keep_request_record=
                            (user_id, shift_date_str))
         else:
             cursor.execute("""
-                UPDATE shift_schedule SET shift_abbrev = ?
-                WHERE user_id = ? AND shift_date = ?
-            """, (shift_abbrev, user_id, shift_date_str))
-            if cursor.rowcount == 0:
-                cursor.execute("""
-                    INSERT INTO shift_schedule (user_id, shift_date, shift_abbrev)
-                    VALUES (?, ?, ?)
-                """, (user_id, shift_date_str, shift_abbrev))
+                INSERT INTO shift_schedule (user_id, shift_date, shift_abbrev)
+                VALUES (?, ?, ?)
+                ON CONFLICT(user_id, shift_date) DO UPDATE SET shift_abbrev = ?
+            """, (user_id, shift_date_str, shift_abbrev, shift_abbrev))
+
+        if shift_abbrev and shift_abbrev not in ["", "FREI"]:
+            try:
+                with open('events_config.json', 'r', encoding='utf-8') as f:
+                    all_events = json.load(f)
+
+                date_obj = datetime.strptime(shift_date_str, '%Y-%m-%d').date()
+                year_str = str(date_obj.year)
+
+                if year_str in all_events and shift_date_str in all_events[year_str]:
+                    event_type = all_events[year_str][shift_date_str]
+
+                    if event_type == "Quartals Ausbildung":
+                        cursor.execute("UPDATE users SET last_ausbildung = ? WHERE id = ?", (shift_date_str, user_id))
+                    elif event_type == "Schießen":
+                        cursor.execute("UPDATE users SET last_schiessen = ? WHERE id = ?", (shift_date_str, user_id))
+            except (FileNotFoundError, json.JSONDecodeError, KeyError):
+                pass
 
         if not keep_request_record:
             if shift_abbrev != 'X':
@@ -869,12 +869,13 @@ def get_daily_shift_counts_for_month(year, month):
 
         cursor.execute("""
             SELECT
-                shift_date,
-                shift_abbrev,
-                COUNT(shift_abbrev) as count
-            FROM shift_schedule
-            WHERE shift_date BETWEEN ? AND ?
-            GROUP BY shift_date, shift_abbrev
+                ss.shift_date,
+                ss.shift_abbrev,
+                COUNT(ss.shift_abbrev) as count
+            FROM shift_schedule ss
+            LEFT JOIN user_order uo ON ss.user_id = uo.user_id
+            WHERE ss.shift_date BETWEEN ? AND ? AND COALESCE(uo.is_visible, 1) = 1
+            GROUP BY ss.shift_date, ss.shift_abbrev
         """, (start_date, end_date))
 
         daily_counts = {}
@@ -927,6 +928,7 @@ def add_shift_type(data):
 
 
 def update_shift_type(shift_type_id, data):
+    data['id'] = shift_type_id
     conn = create_connection()
     try:
         cursor = conn.cursor()
@@ -1274,7 +1276,8 @@ def create_user_by_admin(data):
         cursor.execute(
             "INSERT INTO users (vorname, name, password_hash, role, geburtstag, telefon, diensthund, urlaub_gesamt, urlaub_rest, entry_date) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (data['vorname'], data['name'], hash_password(data['password']), data['role'], data.get('geburtstag', ''),
-             data.get('telefon', ''), data.get('diensthund', ''), urlaub_gesamt, urlaub_gesamt, data.get('entry_date', '')))
+             data.get('telefon', ''), data.get('diensthund', ''), urlaub_gesamt, urlaub_gesamt,
+             data.get('entry_date', '')))
         conn.commit()
         return True
     except sqlite3.IntegrityError:
@@ -1369,7 +1372,6 @@ def delete_vacation_requests(request_ids):
 
 
 def update_vacation_request_status(request_id, new_status):
-    """Aktualisiert nur den Status eines Urlaubsantrags und setzt den Notified-Flag."""
     conn = create_connection()
     try:
         cursor = conn.cursor()
@@ -1385,27 +1387,20 @@ def update_vacation_request_status(request_id, new_status):
 
 
 def approve_vacation_request(request_id, admin_id):
-    """
-    Genehmigt einen Urlaubsantrag, aktualisiert den Status und trägt die
-    Urlaubstage ('U') in den Schichtplan ein.
-    """
     conn = create_connection()
     try:
         cursor = conn.cursor()
         cursor.execute("BEGIN TRANSACTION")
 
-        # Antragsdetails holen
         cursor.execute("SELECT * FROM vacation_requests WHERE id = ?", (request_id,))
         request_data = cursor.fetchone()
         if not request_data:
             conn.rollback()
             return False, "Antrag nicht gefunden."
 
-        # Status auf 'Genehmigt' setzen und für Benachrichtigung markieren
         cursor.execute("UPDATE vacation_requests SET status = 'Genehmigt', user_notified = 0 WHERE id = ?",
                        (request_id,))
 
-        # Urlaubstage in den Schichtplan eintragen
         user_id = request_data['user_id']
         start_date = datetime.strptime(request_data['start_date'], '%Y-%m-%d').date()
         end_date = datetime.strptime(request_data['end_date'], '%Y-%m-%d').date()
@@ -1413,7 +1408,6 @@ def approve_vacation_request(request_id, admin_id):
         current_date = start_date
         while current_date <= end_date:
             date_str = current_date.strftime('%Y-%m-%d')
-            # Bestehenden Eintrag überschreiben oder neuen einfügen
             cursor.execute("""
                 INSERT INTO shift_schedule (user_id, shift_date, shift_abbrev)
                 VALUES (?, ?, 'U')
@@ -1437,10 +1431,6 @@ def approve_vacation_request(request_id, admin_id):
 
 
 def cancel_vacation_request(request_id, admin_id):
-    """
-    Storniert einen GENEHMIGTEN Urlaubsantrag. Ändert den Status zu 'Storniert',
-    entfernt die Urlaubstage aus dem Plan und benachrichtigt den Benutzer.
-    """
     conn = create_connection()
     try:
         cursor = conn.cursor()
@@ -1453,11 +1443,9 @@ def cancel_vacation_request(request_id, admin_id):
         if request_data['status'] != 'Genehmigt':
             return False, "Nur bereits genehmigte Anträge können storniert werden."
 
-        # Status auf 'Storniert' setzen und für Benachrichtigung markieren
         cursor.execute("UPDATE vacation_requests SET status = 'Storniert', user_notified = 0 WHERE id = ?",
                        (request_id,))
 
-        # Urlaubstage ('U') aus dem Schichtplan entfernen
         user_id = request_data['user_id']
         start_date = datetime.strptime(request_data['start_date'], '%Y-%m-%d').date()
         end_date = datetime.strptime(request_data['end_date'], '%Y-%m-%d').date()
@@ -1480,7 +1468,6 @@ def cancel_vacation_request(request_id, admin_id):
 
 
 def archive_vacation_request(request_id, admin_id):
-    """Archiviert einen Urlaubsantrag, ohne den Status oder Plan zu ändern."""
     conn = create_connection()
     try:
         cursor = conn.cursor()
@@ -1497,7 +1484,6 @@ def archive_vacation_request(request_id, admin_id):
 
 
 def get_pending_vacation_requests_count():
-    """Zählt die Anzahl der ausstehenden Urlaubsanträge."""
     conn = create_connection()
     try:
         cursor = conn.cursor()
@@ -1512,7 +1498,6 @@ def get_pending_vacation_requests_count():
 
 
 def get_all_vacation_requests_for_month(year, month):
-    """Holt alle Urlaubsanträge, die in den angegebenen Monat fallen."""
     conn = create_connection()
     try:
         cursor = conn.cursor()
@@ -1534,7 +1519,6 @@ def get_all_vacation_requests_for_month(year, month):
 
 
 def set_user_tutorial_seen(user_id):
-    """Setzt das Flag, dass der Benutzer das Tutorial gesehen hat."""
     conn = create_connection()
     try:
         cursor = conn.cursor()
@@ -1549,7 +1533,6 @@ def set_user_tutorial_seen(user_id):
 
 
 def get_unnotified_vacation_requests_for_user(user_id):
-    """Holt alle Urlaubsanträge für einen Benutzer, über die er noch nicht benachrichtigt wurde."""
     conn = create_connection()
     try:
         cursor = conn.cursor()
@@ -1563,7 +1546,6 @@ def get_unnotified_vacation_requests_for_user(user_id):
 
 
 def mark_vacation_requests_as_notified(request_ids):
-    """Markiert Urlaubsanträge als 'vom Benutzer gesehen'."""
     if not request_ids:
         return
     conn = create_connection()
@@ -1581,7 +1563,8 @@ def request_password_reset(vorname, name):
     conn = create_connection()
     try:
         cursor = conn.cursor()
-        cursor.execute("SELECT id FROM users WHERE lower(vorname) = ? AND lower(name) = ?", (vorname.lower(), name.lower()))
+        cursor.execute("SELECT id FROM users WHERE lower(vorname) = ? AND lower(name) = ?",
+                       (vorname.lower(), name.lower()))
         user = cursor.fetchone()
         if user:
             user_id = user['id']
@@ -1658,5 +1641,25 @@ def get_pending_password_resets_count():
         cursor = conn.cursor()
         cursor.execute("SELECT COUNT(*) FROM password_reset_requests WHERE status = 'Ausstehend'")
         return cursor.fetchone()[0]
+    finally:
+        conn.close()
+
+
+def get_all_user_participation():
+    """Ruft die Daten zur letzten Teilnahme für alle sichtbaren Benutzer ab."""
+    conn = create_connection()
+    try:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT u.id, u.vorname, u.name, u.last_ausbildung, u.last_schiessen
+            FROM users u
+            LEFT JOIN user_order uo ON u.id = uo.user_id
+            WHERE COALESCE(uo.is_visible, 1) = 1
+            ORDER BY COALESCE(uo.sort_order, 9999)
+        """)
+        return [dict(row) for row in cursor.fetchall()]
+    except sqlite3.Error as e:
+        print(f"DB Error on get_all_user_participation: {e}")
+        return []
     finally:
         conn.close()
