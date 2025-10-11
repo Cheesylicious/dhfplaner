@@ -45,6 +45,7 @@ def initialize_db():
                 urlaub_rest INTEGER DEFAULT 30,
                 entry_date TEXT,
                 has_seen_tutorial INTEGER DEFAULT 0,
+                password_changed INTEGER DEFAULT 0,
                 UNIQUE (vorname, name)
             );
         """)
@@ -162,6 +163,22 @@ def initialize_db():
                 FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE
             );
         """)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS password_reset_requests (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                timestamp TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'Ausstehend',
+                FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE
+            );
+        """)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS locked_months (
+                year INTEGER NOT NULL,
+                month INTEGER NOT NULL,
+                PRIMARY KEY (year, month)
+            );
+        """)
 
         _add_column_if_not_exists(cursor, "users", "entry_date", "TEXT")
         _add_column_if_not_exists(cursor, "shift_types", "color", "TEXT DEFAULT '#FFFFFF'")
@@ -180,8 +197,70 @@ def initialize_db():
         _add_column_if_not_exists(cursor, "users", "has_seen_tutorial", "INTEGER DEFAULT 0")
         _add_column_if_not_exists(cursor, "vacation_requests", "archived", "INTEGER DEFAULT 0")
         _add_column_if_not_exists(cursor, "vacation_requests", "user_notified", "INTEGER DEFAULT 1")
+        _add_column_if_not_exists(cursor, "users", "password_changed", "INTEGER DEFAULT 0")
 
         conn.commit()
+    finally:
+        conn.close()
+
+
+def lock_month(year, month):
+    """Sperrt einen Monat für neue Anträge."""
+    conn = create_connection()
+    try:
+        cursor = conn.cursor()
+        cursor.execute("INSERT OR IGNORE INTO locked_months (year, month) VALUES (?, ?)", (year, month))
+        conn.commit()
+        return True
+    except sqlite3.Error as e:
+        print(f"DB Error on lock_month: {e}")
+        return False
+    finally:
+        conn.close()
+
+
+def unlock_month(year, month):
+    """Entsperrt einen Monat für neue Anträge."""
+    conn = create_connection()
+    try:
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM locked_months WHERE year = ? AND month = ?", (year, month))
+        conn.commit()
+        return True
+    except sqlite3.Error as e:
+        print(f"DB Error on unlock_month: {e}")
+        return False
+    finally:
+        conn.close()
+
+
+def is_month_locked(year, month):
+    """Prüft, ob ein Monat gesperrt ist."""
+    conn = create_connection()
+    try:
+        cursor = conn.cursor()
+        cursor.execute("SELECT 1 FROM locked_months WHERE year = ? AND month = ?", (year, month))
+        return cursor.fetchone() is not None
+    except sqlite3.Error as e:
+        print(f"DB Error on is_month_locked: {e}")
+        return False # Im Zweifel lieber nicht sperren
+    finally:
+        conn.close()
+
+
+def admin_reset_password(user_id, new_password):
+    """Resets a user's password and forces them to change it on next login."""
+    conn = create_connection()
+    try:
+        cursor = conn.cursor()
+        cursor.execute(
+            "UPDATE users SET password_hash = ?, password_changed = 0 WHERE id = ?",
+            (hash_password(new_password), user_id)
+        )
+        conn.commit()
+        return True, "Passwort wurde zurückgesetzt. Der Benutzer muss es beim nächsten Login ändern."
+    except sqlite3.Error as e:
+        return False, f"Datenbankfehler: {e}"
     finally:
         conn.close()
 
@@ -1150,13 +1229,39 @@ def update_user(user_id, data):
     conn = create_connection()
     try:
         cursor = conn.cursor()
-        data['urlaub_rest'] = data.get('urlaub_gesamt', 30)
         cursor.execute(
-            "UPDATE users SET vorname = ?, name = ?, geburtstag = ?, telefon = ?, diensthund = ?, urlaub_gesamt = ?, urlaub_rest = ?, role = ?, entry_date = ? WHERE id = ?",
-            (data['vorname'], data['name'], data['geburtstag'], data['telefon'], data['diensthund'],
-             data['urlaub_gesamt'], data['urlaub_rest'], data['role'], data['entry_date'], user_id))
+            """UPDATE users SET 
+               vorname = ?, name = ?, geburtstag = ?, telefon = ?, diensthund = ?, 
+               urlaub_gesamt = ?, role = ?, entry_date = ?, 
+               has_seen_tutorial = ?, password_changed = ?
+               WHERE id = ?""",
+            (data.get('vorname'), data.get('name'), data.get('geburtstag', ''),
+             data.get('telefon', ''), data.get('diensthund', ''), data.get('urlaub_gesamt', 30),
+             data.get('role', 'Benutzer'), data.get('entry_date', ''),
+             data.get('has_seen_tutorial', 0), data.get('password_changed', 0),
+             user_id)
+        )
         conn.commit()
         return True
+    except sqlite3.Error as e:
+        print(f"DB Error on update_user: {e}")
+        return False
+    finally:
+        conn.close()
+
+
+def change_password(user_id, new_password):
+    conn = create_connection()
+    try:
+        cursor = conn.cursor()
+        cursor.execute(
+            "UPDATE users SET password_hash = ?, password_changed = 1 WHERE id = ?",
+            (hash_password(new_password), user_id)
+        )
+        conn.commit()
+        return True, "Passwort erfolgreich geändert."
+    except sqlite3.Error as e:
+        return False, f"Datenbankfehler: {e}"
     finally:
         conn.close()
 
@@ -1165,13 +1270,17 @@ def create_user_by_admin(data):
     conn = create_connection()
     try:
         cursor = conn.cursor()
+        urlaub_gesamt = data.get('urlaub_gesamt') if data.get('urlaub_gesamt') else 30
         cursor.execute(
             "INSERT INTO users (vorname, name, password_hash, role, geburtstag, telefon, diensthund, urlaub_gesamt, urlaub_rest, entry_date) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (data['vorname'], data['name'], hash_password(data['password']), data['role'], data['geburtstag'],
-             data['telefon'], data['diensthund'], data['urlaub_gesamt'], data['urlaub_gesamt'], data['entry_date']))
+            (data['vorname'], data['name'], hash_password(data['password']), data['role'], data.get('geburtstag', ''),
+             data.get('telefon', ''), data.get('diensthund', ''), urlaub_gesamt, urlaub_gesamt, data.get('entry_date', '')))
         conn.commit()
         return True
     except sqlite3.IntegrityError:
+        return False
+    except Exception as e:
+        print(f"Error in create_user_by_admin: {e}")
         return False
     finally:
         conn.close()
@@ -1464,5 +1573,90 @@ def mark_vacation_requests_as_notified(request_ids):
         query = f"UPDATE vacation_requests SET user_notified = 1 WHERE id IN ({placeholders})"
         cursor.execute(query, request_ids)
         conn.commit()
+    finally:
+        conn.close()
+
+
+def request_password_reset(vorname, name):
+    conn = create_connection()
+    try:
+        cursor = conn.cursor()
+        cursor.execute("SELECT id FROM users WHERE lower(vorname) = ? AND lower(name) = ?", (vorname.lower(), name.lower()))
+        user = cursor.fetchone()
+        if user:
+            user_id = user['id']
+            timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            cursor.execute(
+                "INSERT INTO password_reset_requests (user_id, timestamp) VALUES (?, ?)",
+                (user_id, timestamp)
+            )
+            _create_admin_notification(cursor, f"Benutzer {vorname} {name} hat ein Passwort-Reset angefordert.")
+            conn.commit()
+            return True, "Ihre Anfrage wurde an einen Administrator gesendet."
+        else:
+            return False, "Benutzer nicht gefunden."
+    except sqlite3.Error as e:
+        return False, f"Datenbankfehler: {e}"
+    finally:
+        conn.close()
+
+
+def get_pending_password_resets():
+    conn = create_connection()
+    try:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT pr.id, u.vorname, u.name, pr.timestamp
+            FROM password_reset_requests pr
+            JOIN users u ON pr.user_id = u.id
+            WHERE pr.status = 'Ausstehend'
+            ORDER BY pr.timestamp ASC
+        """)
+        return [dict(row) for row in cursor.fetchall()]
+    finally:
+        conn.close()
+
+
+def approve_password_reset(request_id, new_password):
+    conn = create_connection()
+    try:
+        cursor = conn.cursor()
+        cursor.execute("SELECT user_id FROM password_reset_requests WHERE id = ?", (request_id,))
+        result = cursor.fetchone()
+        if result:
+            user_id = result['user_id']
+            cursor.execute(
+                "UPDATE users SET password_hash = ?, password_changed = 0 WHERE id = ?",
+                (hash_password(new_password), user_id)
+            )
+            cursor.execute("UPDATE password_reset_requests SET status = 'Genehmigt' WHERE id = ?", (request_id,))
+            conn.commit()
+            return True, f"Passwort für Benutzer ID {user_id} wurde zurückgesetzt."
+        return False, "Anfrage nicht gefunden."
+    except sqlite3.Error as e:
+        return False, f"Datenbankfehler: {e}"
+    finally:
+        conn.close()
+
+
+def reject_password_reset(request_id):
+    conn = create_connection()
+    try:
+        cursor = conn.cursor()
+        cursor.execute("UPDATE password_reset_requests SET status = 'Abgelehnt' WHERE id = ?", (request_id,))
+        conn.commit()
+        return True, "Anfrage abgelehnt."
+    except sqlite3.Error as e:
+        return False, f"Datenbankfehler: {e}"
+    finally:
+        conn.close()
+
+
+def get_pending_password_resets_count():
+    conn = create_connection()
+    try:
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) FROM password_reset_requests WHERE status = 'Ausstehend'")
+        return cursor.fetchone()[0]
     finally:
         conn.close()

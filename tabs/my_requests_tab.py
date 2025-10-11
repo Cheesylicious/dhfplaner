@@ -15,7 +15,6 @@ from ..dialogs.rejection_reason_dialog import RejectionReasonDialog
 class MyRequestsTab(ttk.Frame):
     def __init__(self, master, user_data):
         super().__init__(master)
-        # KORREKTUR: 'app' wird jetzt korrekt als 'user_data' behandelt
         self.user_data = user_data
         self.shift_types = [st['abbreviation'] for st in get_all_shift_types()]
         self.selected_request_id = None
@@ -27,7 +26,6 @@ class MyRequestsTab(ttk.Frame):
         main_frame = ttk.Frame(self, padding="10")
         main_frame.pack(fill="both", expand=True)
 
-        # Neuer Antrag Frame
         new_request_frame = ttk.LabelFrame(main_frame, text="Neuer Antrag", padding="10")
         new_request_frame.pack(fill="x", pady=(0, 10))
         new_request_frame.columnconfigure(1, weight=1)
@@ -47,20 +45,23 @@ class MyRequestsTab(ttk.Frame):
         ttk.Button(button_frame, text="Schichtwunsch senden", command=self.submit_shift_request).pack(side="left",
                                                                                                       padx=5)
 
-        # Bestehende Anträge Frame
         requests_frame = ttk.LabelFrame(main_frame, text="Meine Anträge", padding="10")
         requests_frame.pack(fill="both", expand=True)
 
-        self.tree = ttk.Treeview(requests_frame, columns=('Datum', 'Anfrage', 'Status', 'Grund'), show='headings')
+        self.tree = ttk.Treeview(requests_frame, columns=('Datum', 'Anfrage', 'Angefragt von', 'Status', 'Grund'),
+                                 show='headings')
         self.tree.heading('Datum', text='Datum')
         self.tree.heading('Anfrage', text='Anfrage')
+        self.tree.heading('Angefragt von', text='Angefragt von')
         self.tree.heading('Status', text='Status')
         self.tree.heading('Grund', text='Grund (bei Ablehnung)')
         self.tree.pack(side="left", fill="both", expand=True)
 
         self.tree.tag_configure('Ausstehend', background='#FFF3CD')
-        self.tree.tag_configure('Genehmigt', background='#D4EDDA')
-        self.tree.tag_configure('Abgelehnt', background='#F8D7DA')
+        self.tree.tag_configure('Akzeptiert von Admin', background='#D4EDDA')
+        self.tree.tag_configure('Akzeptiert von Benutzer', background='#D4EDDA')
+        self.tree.tag_configure('Abgelehnt von Admin', background='#F8D7DA')
+        self.tree.tag_configure('Abgelehnt von Benutzer', background='#F8D7DA')
 
         scrollbar = ttk.Scrollbar(requests_frame, orient="vertical", command=self.tree.yview)
         self.tree.configure(yscrollcommand=scrollbar.set)
@@ -69,19 +70,26 @@ class MyRequestsTab(ttk.Frame):
         ttk.Button(main_frame, text="Ausgewählten Antrag zurückziehen", command=self.withdraw_request).pack(pady=10)
 
     def refresh_data(self):
-        """Lädt die Anträge für den Benutzer neu."""
         for i in self.tree.get_children():
             self.tree.delete(i)
 
-        # KORREKTUR: Greift direkt auf die user_data zu
         requests = get_all_requests_by_user(self.user_data['id'])
 
         for req in requests:
             req_date = datetime.strptime(req['request_date'], '%Y-%m-%d').strftime('%d.%m.%Y')
-            anfrage = "Wunschfrei" if req['requested_shift'] == 'WF' else f"Wunsch: {req['requested_shift']}"
+            requested_by = "Admin" if req.get('requested_by') == 'admin' else "Benutzer"
+
+            if requested_by == "Admin":
+                anfrage = f"Anfrage vom Admin: {req['requested_shift']}"
+            else:
+                anfrage = "Wunschfrei" if req[
+                                              'requested_shift'] == 'WF' else f"Eigener Wunsch: {req['requested_shift']}"
+
             reason = req.get('rejection_reason', '')
-            self.tree.insert('', 'end', iid=req['id'], values=(req_date, anfrage, req['status'], reason),
-                             tags=(req['status'],))
+            status = req['status']
+
+            self.tree.insert('', 'end', iid=req['id'], values=(req_date, anfrage, requested_by, status, reason),
+                             tags=(status,))
 
     def submit_frei_request(self):
         req_date = self.date_entry.get_date()
