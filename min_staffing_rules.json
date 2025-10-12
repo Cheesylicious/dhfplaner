@@ -1,0 +1,30 @@
+{
+    "Colors": {
+        "alert_bg": "#FF5555",
+        "success_bg": "#90EE90",
+        "overstaffed_bg": "#FFFF99",
+        "weekend_bg": "#42aeff",
+        "holiday_bg": "#FFD700",
+        "quartals_ausbildung_bg": "#ff80ff",
+        "schiessen_bg": "#ffff00",
+        "Ausstehend": "orange",
+        "Admin_Ausstehend": "#E0B0FF"
+    },
+    "Mo-Do": {
+        "T.": 1
+    },
+    "Fr": {
+        "6": 1,
+        "T.": 1
+    },
+    "Sa-So": {
+        "T.": 2
+    },
+    "Holiday": {
+        "T.": 2
+    },
+    "Daily": {
+        "24": 2,
+        "N.": 2
+    }
+}
