@@ -3,6 +3,20 @@ import hashlib
 import json
 from datetime import datetime
 
+# ==============================================================================
+# 💥 NEU: HARTKODIERTE DATENBANK-KONFIGURATION (Option 2) 💥
+# Diese Daten werden jetzt direkt im Code verwendet, um die Verbindung aufzubauen.
+# BITTE DIE PLATZHALTER ANPASSEN!
+# ==============================================================================
+DB_CONFIG = {
+    "host": "100.118.148.97",  # z.B. "localhost" oder "192.168.1.10"
+    "user": "planer_user",             # z.B. "root"
+    "password": "PlanerNeu-2025#",             # ACHTUNG: Dein echtes Passwort eintragen!
+    "database": "planer_db"         # z.B. "dhf_planer_db"
+}
+# ==============================================================================
+
+
 # Die Rollen-Hierarchie bleibt unverändert
 ROLE_HIERARCHY = {"Gast": 1, "Benutzer": 2, "Admin": 3, "SuperAdmin": 4}
 
@@ -12,23 +26,18 @@ def hash_password(password):
     return hashlib.sha256(password.encode('utf-8')).hexdigest()
 
 
+# 💥 GEÄNDERT: LÄDT NICHT MEHR AUS DATEI 💥
 def get_db_config():
-    """Lädt die Datenbankkonfiguration aus der config.json-Datei."""
-    try:
-        with open('config.json', 'r') as f:
-            config = json.load(f)
-            return config['database']
-    except FileNotFoundError:
-        print("Fehler: Die Datei 'config.json' wurde nicht gefunden. Bitte erstellen Sie sie im Hauptverzeichnis.")
-        return None
-    except json.JSONDecodeError:
-        print("Fehler: Die Datei 'config.json' ist nicht korrekt formatiert.")
-        return None
-    except KeyError:
-        print("Fehler: Der Schlüssel 'database' wurde in der 'config.json' nicht gefunden.")
+    """Gibt die hartkodierte Datenbankkonfiguration zurück."""
+    # Wir stellen sicher, dass alle Schlüssel vorhanden sind
+    if all(key in DB_CONFIG for key in ["host", "user", "password", "database"]):
+        return DB_CONFIG
+    else:
+        print("Fehler: Die hartkodierte DB_CONFIG ist unvollständig.")
         return None
 
 
+# 💥 GEÄNDERT: NUTZT get_db_config() 💥
 def create_connection():
     """Erstellt eine Verbindung zur MySQL-Datenbank."""
     config = get_db_config()
@@ -36,7 +45,7 @@ def create_connection():
         return None
 
     try:
-        # **config entpackt das Dictionary in die passenden Argumente für connect()
+        # **config entpackt das hartkodierte Dictionary in die passenden Argumente
         conn = mysql.connector.connect(**config)
         return conn
     except mysql.connector.Error as e:
@@ -48,9 +57,9 @@ def create_connection():
 
 def _add_column_if_not_exists(cursor, table_name, column_name, column_type):
     """Fügt eine Spalte zu einer Tabelle hinzu, falls sie nicht existiert (MySQL-Version)."""
-    config = get_db_config()
-    if not config: return
-    db_name = config.get('database')
+    # Hier verwenden wir eine Kopie der Konfiguration, da initialize_db() diese manipuliert
+    current_config = DB_CONFIG.copy()
+    db_name = current_config.get('database')
 
     cursor.execute(f"""
         SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS
@@ -65,7 +74,8 @@ def initialize_db():
     """
     Initialisiert die Datenbank: Erstellt die DB (falls nötig) und dann die Tabellen.
     """
-    config = get_db_config()
+    # Wir verwenden eine Kopie der globalen Konfiguration, da pop() verwendet wird
+    config = DB_CONFIG.copy()
     if not config:
         print("Initialisierung abgebrochen: Konfiguration konnte nicht geladen werden.")
         return
@@ -74,7 +84,7 @@ def initialize_db():
 
     try:
         # Schritt 1: Verbindung zum Server herstellen (ohne DB-Auswahl)
-        conn_server = mysql.connector.connect(**config)
+        conn_server = mysql.connector.connect(**config) # Verbindet mit Host/User/Passwort
         cursor_server = conn_server.cursor()
 
         # Schritt 2: Datenbank erstellen, falls sie nicht existiert
@@ -88,8 +98,7 @@ def initialize_db():
         print(f"KRITISCHER FEHLER: Konnte die Datenbank nicht erstellen: {e}")
         return
 
-    # Die Konfiguration wieder vervollständigen für die nächste Funktion
-    config['database'] = db_name
+    # Die Konfiguration für create_connection() ist bereits global in DB_CONFIG gesetzt
 
     # Schritt 3: Jetzt mit der existierenden Datenbank verbinden
     conn = create_connection()
@@ -252,7 +261,7 @@ def initialize_db():
             );
         """)
 
-        # --- Dieser Block ist jetzt wieder korrekt an Ort und Stelle ---
+        # --- Spalten-Checks ---
         cursor_check = conn.cursor()
         _add_column_if_not_exists(cursor_check, "users", "entry_date", "TEXT")
         _add_column_if_not_exists(cursor_check, "shift_types", "color", "TEXT DEFAULT '#FFFFFF'")
@@ -263,7 +272,7 @@ def initialize_db():
         _add_column_if_not_exists(cursor_check, "wunschfrei_requests", "rejection_reason", "TEXT")
         _add_column_if_not_exists(cursor_check, "wunschfrei_requests", "requested_shift", "TEXT")
         _add_column_if_not_exists(cursor_check, "wunschfrei_requests", "requested_by",
-                                  "VARCHAR(255) DEFAULT 'user'")  # VARCHAR für Konsistenz
+                                  "VARCHAR(255) DEFAULT 'user'")
         _add_column_if_not_exists(cursor_check, "shift_types", "start_time", "TEXT")
         _add_column_if_not_exists(cursor_check, "shift_types", "end_time", "TEXT")
         _add_column_if_not_exists(cursor_check, "bug_reports", "user_notified", "INT NOT NULL DEFAULT 1")
