@@ -8,7 +8,6 @@ class UserOrderWindow(tk.Toplevel):
         super().__init__(parent)
         self.callback = callback
         self.title("Mitarbeiter-Reihenfolge und Sichtbarkeit")
-        self.geometry("600x500")
         self.transient(parent)
         self.grab_set()
 
@@ -16,6 +15,33 @@ class UserOrderWindow(tk.Toplevel):
 
         self.create_widgets()
         self.load_users()
+
+        # --- Fenstergröße dynamisch anpassen und zentrieren ---
+        self.update_idletasks()
+
+        header_height = 30
+        row_height = 28  # Feste Annahme für die Zeilenhöhe
+        button_frame_height = 60
+        label_height = 40
+
+        total_height = header_height + (len(self.users_data) * row_height) + button_frame_height + label_height
+
+        max_height = int(parent.winfo_height() * 0.8)
+        total_height = min(total_height, max_height)
+
+        # --- KORREKTUR: Mindestbreite erhöht ---
+        min_width = 700
+
+        parent_x = parent.winfo_x()
+        parent_y = parent.winfo_y()
+        parent_width = parent.winfo_width()
+        parent_height = parent.winfo_height()
+
+        position_x = parent_x + (parent_width // 2) - (min_width // 2)
+        position_y = parent_y + (parent_height // 2) - (total_height // 2)
+
+        self.geometry(f"{min_width}x{total_height}+{position_x}+{position_y}")
+        self.minsize(min_width, 300)
 
     def create_widgets(self):
         main_frame = ttk.Frame(self, padding="10")
@@ -31,77 +57,81 @@ class UserOrderWindow(tk.Toplevel):
         list_frame.rowconfigure(0, weight=1)
 
         self.tree = ttk.Treeview(list_frame, columns=("name", "role", "visible"), show="headings", selectmode="browse")
+        self.tree.grid(row=0, column=0, sticky="nsew")
+
         self.tree.heading("name", text="Name")
         self.tree.heading("role", text="Rolle")
-        self.tree.heading("visible", text="Sichtbarkeit")
-        self.tree.column("name", width=300)
-        self.tree.column("role", width=150)
-        self.tree.column("visible", width=150, anchor="center")
-        self.tree.grid(row=0, column=0, sticky="nsew")
+        self.tree.heading("visible", text="Sichtbar im Plan")
+
+        # --- KORREKTUR: "name"-Spalte dehnbar gemacht ---
+        self.tree.column("name", minwidth=300, stretch=tk.YES)
+        self.tree.column("role", width=150, stretch=tk.NO)
+        self.tree.column("visible", width=150, anchor="center", stretch=tk.NO)
 
         scrollbar = ttk.Scrollbar(list_frame, orient="vertical", command=self.tree.yview)
         self.tree.configure(yscrollcommand=scrollbar.set)
         scrollbar.grid(row=0, column=1, sticky="ns")
 
-        # --- KORREKTUR: Buttons für die Sortierung hinzugefügt ---
         button_subframe = ttk.Frame(list_frame)
         button_subframe.grid(row=0, column=2, sticky="ns", padx=(10, 0))
-        ttk.Button(button_subframe, text="↑ Hoch", command=lambda: self.move_item(-1)).pack(pady=2, fill="x")
-        ttk.Button(button_subframe, text="↓ Runter", command=lambda: self.move_item(1)).pack(pady=2, fill="x")
 
-        self.tree.bind("<ButtonPress-1>", self.on_press)
-        self.tree.bind("<B1-Motion>", self.on_drag)
-        self.tree.bind("<ButtonRelease-1>", self.on_release)
+        up_button = ttk.Button(button_subframe, text="▲", command=lambda: self.move_entry(-1))
+        up_button.pack(pady=5)
+
+        down_button = ttk.Button(button_subframe, text="▼", command=lambda: self.move_entry(1))
+        down_button.pack(pady=5)
+
         self.tree.bind("<Double-1>", self.toggle_visibility)
+        self.tree.bind("<B1-Motion>", self.move_item_dnd)
+        self.tree.bind("<ButtonRelease-1>", self.on_dnd_release)
 
-        button_frame = ttk.Frame(self)
-        button_frame.pack(fill="x", pady=10, padx=10)
+        bottom_frame = ttk.Frame(main_frame)
+        bottom_frame.pack(fill="x", pady=(10, 0))
 
-        save_button = ttk.Button(button_frame, text="Speichern & Schließen", command=self.save_order)
-        save_button.pack(side="right", padx=5)
-        cancel_button = ttk.Button(button_frame, text="Abbrechen", command=self.destroy)
-        cancel_button.pack(side="right")
+        save_button = ttk.Button(bottom_frame, text="Speichern & Schließen", command=self.save_order)
+        save_button.pack(side="right")
+
+        cancel_button = ttk.Button(bottom_frame, text="Abbrechen", command=self.destroy)
+        cancel_button.pack(side="right", padx=10)
 
     def load_users(self):
         self.users_data = get_ordered_users_for_schedule(include_hidden=True)
         self.populate_tree()
 
     def populate_tree(self):
-        for item in self.tree.get_children():
-            self.tree.delete(item)
+        for i in self.tree.get_children():
+            self.tree.delete(i)
 
         for user in self.users_data:
-            visible_text = "Ja (Sichtbar)" if user.get('is_visible', 1) == 1 else "Nein (Ausgeblendet)"
+            visibility_text = "Ja" if user.get('is_visible', 1) else "Nein"
+            tags = ()
+            if not user.get('is_visible', 1):
+                tags = ('hidden',)
+            self.tree.tag_configure('hidden', foreground='gray')
             self.tree.insert("", "end", iid=user['id'],
-                             values=(f"{user['vorname']} {user['name']}", user['role'], visible_text))
+                             values=(f"{user['name']}, {user['vorname']}", user['role'], visibility_text),
+                             tags=tags)
 
-    def on_press(self, event):
-        self.drag_item = self.tree.identify_row(event.y)
+    def move_item_dnd(self, event):
+        item_id = self.tree.identify_row(event.y)
+        if item_id:
+            self.tree.move(item_id, "", self.tree.index(item_id))
 
-    def on_drag(self, event):
-        if self.drag_item:
-            moveto_item = self.tree.identify_row(event.y)
-            if moveto_item and moveto_item != self.drag_item:
-                self.tree.move(self.drag_item, '', self.tree.index(moveto_item))
+    def on_dnd_release(self, event):
+        ordered_ids = self.tree.get_children()
+        id_map = {str(u['id']): u for u in self.users_data}
+        self.users_data = [id_map[str(uid)] for uid in ordered_ids if str(uid) in id_map]
 
-    def on_release(self, event):
-        self.drag_item = None
-
-    # --- KORREKTUR: Logik zum Verschieben mit Buttons hinzugefügt ---
-    def move_item(self, direction):
-        selection = self.tree.selection()
-        if not selection:
+    def move_entry(self, direction):
+        selected_items = self.tree.selection()
+        if not selected_items:
             return
-
-        item_id = selection[0]
+        item_id = selected_items[0]
         current_index = self.tree.index(item_id)
 
-        # Verschiebe das Item in der Treeview-Anzeige
         self.tree.move(item_id, '', current_index + direction)
 
-        # Stelle sicher, dass das verschobene Item selektiert bleibt
-        self.tree.selection_set(item_id)
-        self.tree.focus(item_id)
+        self.on_dnd_release(None)
 
     def toggle_visibility(self, event):
         item_id = self.tree.identify_row(event.y)
@@ -114,7 +144,6 @@ class UserOrderWindow(tk.Toplevel):
                 break
 
         self.populate_tree()
-        # Selektion wiederherstellen
         self.tree.selection_set(item_id)
         self.tree.focus(item_id)
 
@@ -124,16 +153,18 @@ class UserOrderWindow(tk.Toplevel):
         user_map = {str(u['id']): u for u in self.users_data}
 
         final_order_list = []
-        for user_id in ordered_ids:
+        for index, user_id in enumerate(ordered_ids):
             if user_id in user_map:
-                final_order_list.append(user_map[user_id])
+                user_data = user_map[user_id]
+                user_data['order_index'] = index
+                final_order_list.append(user_data)
 
         success, message = save_user_order(final_order_list)
 
         if success:
             messagebox.showinfo("Erfolg", message, parent=self)
             if self.callback:
-                self.callback()  # Ruft refresh_all_tabs() im Hauptfenster auf
+                self.callback()
             self.destroy()
         else:
-            messagebox.showerror("Fehler", f"Fehler beim Speichern der Benutzerreihenfolge: {message}", parent=self)
+            messagebox.showerror("Fehler", message, parent=self)

@@ -13,7 +13,10 @@ class PasswordChangeWindow(tk.Toplevel):
         self.withdraw()
         self.title("Initiales Passwort ändern")
 
-        self.geometry("400x250")
+        # --- KORREKTUR: Feste Größe durch Vollbildmodus ersetzt ---
+        self.attributes('-fullscreen', True)
+        # self.geometry("400x250") # Alte Zeile entfernt
+
         self.resizable(False, False)
         style = ttk.Style(self)
         style.theme_use('clam')
@@ -30,9 +33,14 @@ class PasswordChangeWindow(tk.Toplevel):
         self.focus_force()
 
     def create_widgets(self, style):
-        # Bleibt unverändert
-        main_frame = ttk.Frame(self, padding="20")
-        main_frame.pack(expand=True, fill='both')
+        # Container-Frame, um den Inhalt im Vollbild zu zentrieren
+        container_frame = ttk.Frame(self)
+        container_frame.pack(expand=True, fill='both')
+
+        main_frame = ttk.Frame(container_frame, padding="20")
+        # Platziert den eigentlichen Inhalt in der Mitte des Fensters
+        main_frame.place(relx=0.5, rely=0.5, anchor="center")
+
         ttk.Label(main_frame, text="Bitte ändern Sie Ihr initiales Passwort.", style='Header.TLabel').pack(pady=(0, 15))
         ttk.Label(main_frame, text="Neues Passwort:").pack(fill='x', padx=5)
         self.new_password_entry = ttk.Entry(main_frame, show="*", style='TEntry')
@@ -43,7 +51,7 @@ class PasswordChangeWindow(tk.Toplevel):
         self.confirm_password_entry.pack(fill='x', padx=5, pady=(0, 20))
         self.confirm_password_entry.bind("<Return>", self.change_password)
         change_button = ttk.Button(main_frame, text="Passwort ändern und Anmelden", command=self.change_password,
-                                   style='TButton')
+                                     style='TButton')
         change_button.pack()
 
     def change_password(self, event=None):

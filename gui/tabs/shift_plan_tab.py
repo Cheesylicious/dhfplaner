@@ -1,3 +1,4 @@
+# gui/tabs/shift_plan_tab.py
 import tkinter as tk
 from tkinter import ttk, messagebox
 from datetime import date, datetime, timedelta
@@ -719,3 +720,6 @@ class ShiftPlanTab(ttk.Frame):
             self.app.refresh_antragssperre_views()
         else:
             messagebox.showerror("Fehler", "Der Status konnte nicht gespeichert werden.", parent=self)
+
+    def refresh_plan(self):
+        self.build_shift_plan_grid(self.app.current_display_date.year, self.app.current_display_date.month)

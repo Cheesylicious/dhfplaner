@@ -12,9 +12,6 @@ class LoginWindow(tk.Toplevel):
         super().__init__(master)
         self.app = app
 
-        # --- FINALE KORREKTUR ---
-        # Wir entfernen alle Befehle, die einen Deadlock verursachen können
-        # und machen das Fenster manuell sichtbar.
         self.withdraw()  # Zuerst unsichtbar machen, um Flackern zu vermeiden
 
         self.title("DHF-Planer - Login")
@@ -31,24 +28,32 @@ class LoginWindow(tk.Toplevel):
         self.protocol("WM_DELETE_WINDOW", self.app.on_app_close)
         self.create_widgets(style)
 
-        # Fenster zentrieren und sichtbar machen
-        self.update_idletasks()
-        w = 500
-        h = 350
-        sw = self.winfo_screenwidth()
-        sh = self.winfo_screenheight()
-        x = (sw / 2) - (w / 2)
-        y = (sh / 2) - (h / 2)
-        self.geometry('%dx%d+%d+%d' % (w, h, x, y))
+        # --- NEU: Auf Vollbildmodus umgestellt ---
+        self.attributes('-fullscreen', True)
+
+        # Zentrierung und feste Größe entfernt, da jetzt Vollbild
+        # self.update_idletasks()
+        # w = 500
+        # h = 350
+        # sw = self.winfo_screenwidth()
+        # sh = self.winfo_screenheight()
+        # x = (sw / 2) - (w / 2)
+        # y = (sh / 2) - (h / 2)
+        # self.geometry('%dx%d+%d+%d' % (w, h, x, y))
+
         self.deiconify()
         self.lift()
         self.focus_force()
         print("[DEBUG] LoginWindow.__init__: Initialisierung abgeschlossen, Fenster sichtbar.")
 
     def create_widgets(self, style):
-        # Diese Methode bleibt unverändert
-        wrapper_frame = ttk.Frame(self, style='TFrame')
-        wrapper_frame.pack(expand=True)
+        # Der Inhalt wird nun in einem Frame zentriert, damit es im Vollbild gut aussieht
+        container = ttk.Frame(self, style='TFrame')
+        container.pack(fill="both", expand=True)
+
+        wrapper_frame = ttk.Frame(container, style='TFrame')
+        wrapper_frame.place(relx=0.5, rely=0.5, anchor="center")  # Zentriert den Login-Block
+
         main_frame = ttk.Frame(wrapper_frame, padding="40", style='TFrame')
         main_frame.pack()
         ttk.Label(main_frame, text="DHF Planer v1.0.0", font=("Segoe UI", 28, "bold")).pack(pady=(0, 40))
