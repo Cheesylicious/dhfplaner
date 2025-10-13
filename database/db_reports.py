@@ -1,17 +1,28 @@
+# database/db_reports.py
 from datetime import datetime
 from .db_core import create_connection, _create_admin_notification
 import mysql.connector
 
-def submit_bug_report(user_id, title, description):
-    """Reicht einen Bug-Report ein."""
+SEVERITY_ORDER = {
+    "Kritischer Fehler": 5,
+    "Mittlerer Fehler": 4,
+    "Kleiner Fehler": 3,
+    "Schönheitsfehler": 2,
+    "Unwichtiger Fehler": 1
+}
+
+
+def create_bug_report(user_id, title, description, category):
+    """Reicht einen Bug-Report ein, jetzt mit Kategorie."""
     conn = create_connection()
     if conn is None: return False, "Keine Datenbankverbindung."
     try:
-        cursor = conn.cursor(dictionary=True) # dictionary=True, um auf Spalten per Namen zugreifen zu können
+        cursor = conn.cursor(dictionary=True)
         timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+
         cursor.execute(
-            "INSERT INTO bug_reports (user_id, title, description, timestamp, user_notified) VALUES (%s, %s, %s, %s, 1)",
-            (user_id, title, description, timestamp)
+            "INSERT INTO bug_reports (user_id, title, description, category, timestamp, status, user_notified) VALUES (%s, %s, %s, %s, %s, 'Neu', 1)",
+            (user_id, title, description, category, timestamp)
         )
 
         cursor.execute("SELECT role FROM users WHERE id = %s", (user_id,))
@@ -30,14 +41,72 @@ def submit_bug_report(user_id, title, description):
             conn.close()
 
 
-def get_open_bug_reports_count():
-    """Gibt die Anzahl der offenen Bug-Reports zurück."""
+def get_reports_awaiting_feedback_for_user(user_id):
+    """Holt die IDs der Reports, die auf Feedback vom Benutzer warten."""
+    conn = create_connection()
+    if conn is None: return []
+    try:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT id FROM bug_reports WHERE user_id = %s AND status = 'Warte auf Rückmeldung' ORDER BY timestamp DESC",
+            (user_id,))
+        return [item[0] for item in cursor.fetchall()]
+    finally:
+        if conn and conn.is_connected():
+            cursor.close()
+            conn.close()
+
+
+def get_reports_with_user_feedback_count():
+    """Gibt die Anzahl der Reports mit User-Feedback für den Admin zurück."""
     conn = create_connection()
     if conn is None: return 0
     try:
         cursor = conn.cursor()
-        cursor.execute("SELECT COUNT(*) FROM bug_reports WHERE status != 'Erledigt' AND archived = 0")
-        return cursor.fetchone()[0]
+        cursor.execute(
+            "SELECT COUNT(*) FROM bug_reports WHERE status IN ('Rückmeldung (Offen)', 'Rückmeldung (Behoben)')")
+        count = cursor.fetchone()[0]
+        return count
+    except mysql.connector.Error as e:
+        print(f"Fehler beim Zählen der Bug-Reports mit User-Feedback: {e}")
+        return 0
+    finally:
+        if conn and conn.is_connected():
+            cursor.close()
+            conn.close()
+
+
+def submit_user_feedback(report_id, is_fixed, user_note):
+    """Speichert das Feedback des Benutzers und benachrichtigt den Admin."""
+    conn = create_connection()
+    if conn is None: return False, "Keine Datenbankverbindung."
+    try:
+        cursor = conn.cursor(dictionary=True)
+
+        cursor.execute("SELECT title FROM bug_reports WHERE id = %s", (report_id,))
+        report = cursor.fetchone()
+        report_title = report['title'] if report else "Unbekannt"
+
+        new_status = "Rückmeldung (Behoben)" if is_fixed else "Rückmeldung (Offen)"
+
+        formatted_note = ""
+        if user_note:
+            formatted_note = f"[User-Feedback am {datetime.now().strftime('%d.%m.%Y %H:%M')}]:\n{user_note}"
+
+        # Hängt das User-Feedback an bestehende user_notes an
+        cursor.execute(
+            "UPDATE bug_reports SET status = %s, user_notes = CONCAT_WS('\n\n', user_notes, %s) WHERE id = %s",
+            (new_status, formatted_note, report_id)
+        )
+
+        _create_admin_notification(cursor,
+                                   f"User-Feedback zu '{report_title[:30]}...': Status ist jetzt '{new_status}'")
+
+        conn.commit()
+        return True, "Dein Feedback wurde erfolgreich übermittelt."
+    except mysql.connector.Error as e:
+        conn.rollback()
+        return False, f"Datenbankfehler: {e}"
     finally:
         if conn and conn.is_connected():
             cursor.close()
@@ -45,18 +114,35 @@ def get_open_bug_reports_count():
 
 
 def get_all_bug_reports():
-    """Holt alle Bug-Reports."""
+    """Holt alle Bug-Reports und sortiert sie nach Schweregrad."""
     conn = create_connection()
     if conn is None: return []
     try:
         cursor = conn.cursor(dictionary=True)
         cursor.execute("""
-            SELECT b.id, u.vorname, u.name, b.timestamp, b.title, b.description, b.status, b.archived, b.admin_notes
-            FROM bug_reports b
-            JOIN users u ON b.user_id = u.id
-            ORDER BY b.archived ASC, b.timestamp DESC
-        """)
-        return cursor.fetchall()
+                       SELECT b.id,
+                              u.vorname,
+                              u.name,
+                              b.timestamp,
+                              b.title,
+                              b.description,
+                              b.status,
+                              b.category,
+                              b.archived,
+                              b.admin_notes,
+                              b.user_notes
+                       FROM bug_reports b
+                                LEFT JOIN users u ON b.user_id = u.id
+                       """)
+        reports = cursor.fetchall()
+
+        reports.sort(key=lambda r: (
+            r.get('archived', 0),
+            -SEVERITY_ORDER.get(r.get('category'), 0),
+            r.get('timestamp')
+        ), reverse=False)
+
+        return reports
     finally:
         if conn and conn.is_connected():
             cursor.close()
@@ -70,12 +156,32 @@ def get_visible_bug_reports():
     try:
         cursor = conn.cursor(dictionary=True)
         cursor.execute("""
-            SELECT b.id, b.timestamp, b.title, b.description, b.status, b.admin_notes
-            FROM bug_reports b
-            WHERE b.archived = 0
-            ORDER BY b.timestamp DESC
-        """)
-        return cursor.fetchall()
+                       SELECT id, timestamp, title, description, status, category, admin_notes, user_notes
+                       FROM bug_reports
+                       WHERE archived = 0
+                       """)
+        reports = cursor.fetchall()
+        reports.sort(key=lambda r: (-SEVERITY_ORDER.get(r.get('category'), 0), r.get('timestamp')), reverse=False)
+        return reports
+    finally:
+        if conn and conn.is_connected():
+            cursor.close()
+            conn.close()
+
+
+def get_open_bug_reports_count():
+    """Gibt die Anzahl der offenen Bug-Reports zurück (ohne die, die nur auf Feedback warten)."""
+    conn = create_connection()
+    if conn is None: return 0
+    try:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT COUNT(*) FROM bug_reports WHERE status NOT IN ('Erledigt', 'Geschlossen', 'Rückmeldung (Behoben)') AND archived = 0")
+        count = cursor.fetchone()[0]
+        return count
+    except mysql.connector.Error as e:
+        print(f"Fehler beim Zählen der offenen Bug-Reports: {e}")
+        return 0
     finally:
         if conn and conn.is_connected():
             cursor.close()
@@ -88,6 +194,9 @@ def update_bug_report_status(bug_id, new_status):
     if conn is None: return False, "Keine Datenbankverbindung."
     try:
         cursor = conn.cursor()
+        # Setzt user_notes zurück, wenn der Admin den Fall wieder öffnet
+        if new_status == "Warte auf Rückmeldung":
+            cursor.execute("UPDATE bug_reports SET user_notes = NULL WHERE id = %s", (bug_id,))
         cursor.execute(
             "UPDATE bug_reports SET status = %s, user_notified = 0 WHERE id = %s",
             (new_status, bug_id)
@@ -102,18 +211,36 @@ def update_bug_report_status(bug_id, new_status):
             conn.close()
 
 
-def update_bug_report_notes(bug_id, notes):
-    """Aktualisiert die Admin-Notizen für einen Bug-Report."""
+def update_bug_report_category(report_id, new_category):
+    """Aktualisiert die Kategorie eines Bug-Reports."""
     conn = create_connection()
     if conn is None: return False, "Keine Datenbankverbindung."
     try:
         cursor = conn.cursor()
+        cursor.execute("UPDATE bug_reports SET category = %s WHERE id = %s", (new_category, report_id))
+        conn.commit()
+        return True, "Kategorie aktualisiert."
+    except mysql.connector.Error as e:
+        return False, f"Datenbankfehler: {e}"
+    finally:
+        if conn and conn.is_connected():
+            cursor.close()
+            conn.close()
+
+
+def append_admin_note(bug_id, note):
+    """Hängt eine neue Admin-Notiz an einen Bug-Report an."""
+    conn = create_connection()
+    if conn is None: return False, "Keine Datenbankverbindung."
+    try:
+        cursor = conn.cursor()
+        timestamped_note = f"[Admin-Notiz am {datetime.now().strftime('%d.%m.%Y %H:%M')}]:\n{note}"
         cursor.execute(
-            "UPDATE bug_reports SET admin_notes = %s WHERE id = %s",
-            (notes, bug_id)
+            "UPDATE bug_reports SET admin_notes = CONCAT_WS('\n\n', admin_notes, %s) WHERE id = %s",
+            (timestamped_note, bug_id)
         )
         conn.commit()
-        return True, "Notizen gespeichert."
+        return True, "Notiz hinzugefügt."
     except mysql.connector.Error as e:
         return False, f"Datenbankfehler: {e}"
     finally:
@@ -128,7 +255,7 @@ def archive_bug_report(bug_id):
     if conn is None: return False, "Keine Datenbankverbindung."
     try:
         cursor = conn.cursor()
-        cursor.execute( "UPDATE bug_reports SET archived = 1 WHERE id = %s", (bug_id,))
+        cursor.execute("UPDATE bug_reports SET archived = 1 WHERE id = %s", (bug_id,))
         conn.commit()
         return True, "Bug-Report wurde archiviert."
     except mysql.connector.Error as e:
@@ -159,7 +286,6 @@ def unarchive_bug_report(bug_id):
 def delete_bug_reports(report_ids):
     """Löscht Bug-Reports."""
     if not report_ids: return False, "Keine IDs zum Löschen übergeben."
-
     conn = create_connection()
     if conn is None: return False, "Keine Datenbankverbindung."
     try:
@@ -168,12 +294,10 @@ def delete_bug_reports(report_ids):
         query = f"DELETE FROM bug_reports WHERE id IN ({placeholders})"
         cursor.execute(query, tuple(report_ids))
         conn.commit()
-
         if cursor.rowcount > 0:
             return True, f"{cursor.rowcount} Bug-Report(s) endgültig gelöscht."
         else:
             return False, "Keine passenden Bug-Reports zum Löschen gefunden."
-
     except mysql.connector.Error as e:
         conn.rollback()
         return False, f"Datenbankfehler: {e}"
@@ -223,17 +347,15 @@ def get_all_logs_formatted():
     if conn is None: return []
     try:
         cursor = conn.cursor(dictionary=True)
-        # MySQL verwendet die CONCAT()-Funktion statt '||'
         cursor.execute("""
-            SELECT
-                a.timestamp,
-                COALESCE(CONCAT(u.vorname, ' ', u.name), 'Unbekannt') as user_name,
-                a.action_type,
-                a.details
-            FROM activity_log a
-            LEFT JOIN users u ON a.user_id = u.id
-            ORDER BY a.timestamp DESC
-        """)
+                       SELECT a.timestamp,
+                              COALESCE(CONCAT(u.vorname, ' ', u.name), 'Unbekannt') as user_name,
+                              a.action_type,
+                              a.details
+                       FROM activity_log a
+                                LEFT JOIN users u ON a.user_id = u.id
+                       ORDER BY a.timestamp DESC
+                       """)
         return cursor.fetchall()
     finally:
         if conn and conn.is_connected():
