@@ -1,4 +1,3 @@
-# gui/main_user_window.py
 import tkinter as tk
 from tkinter import ttk, messagebox
 import json
@@ -6,6 +5,7 @@ import os
 from datetime import date, datetime, timedelta
 import calendar
 
+# --- Alle deine Imports bleiben unverändert ---
 from .tabs.user_shift_plan_tab import UserShiftPlanTab
 from .tabs.vacation_tab import VacationTab
 from .tabs.my_requests_tab import MyRequestsTab
@@ -17,7 +17,7 @@ from .event_manager import EventManager
 from database.db_shifts import get_all_shift_types
 from database.db_requests import get_unnotified_requests, mark_requests_as_notified, get_unnotified_vacation_requests_for_user, mark_vacation_requests_as_notified, get_pending_admin_requests_for_user
 from database.db_reports import get_unnotified_bug_reports_for_user, mark_bug_reports_as_notified
-from database.db_users import set_user_tutorial_seen
+from database.db_users import mark_tutorial_seen
 from .tab_lock_manager import TabLockManager
 
 USER_TAB_ORDER_FILE = 'user_tab_order_config.json'
@@ -118,9 +118,10 @@ class TabOrderWindow(tk.Toplevel):
 
 
 class MainUserWindow(tk.Toplevel):
-    def __init__(self, master, user_data):
+    # --- FINALE KORREKTUR ---
+    def __init__(self, master, user_data, app):
         super().__init__(master)
-        self.master = master
+        self.app = app
         self.user_data = user_data
 
         self.show_request_popups = True
@@ -164,12 +165,20 @@ class MainUserWindow(tk.Toplevel):
         self.setup_ui()
         self.setup_footer()
 
-        self.protocol("WM_DELETE_WINDOW", self.master.on_app_close)
+        self.protocol("WM_DELETE_WINDOW", self.on_close)
         self.after(500, self.check_all_notifications)
         self.after(500, self.check_for_admin_requests)
 
         if not self.user_data.get('has_seen_tutorial'):
             self.show_tutorial()
+
+    def on_close(self):
+        """Wird aufgerufen, wenn das Fenster geschlossen wird."""
+        self.app.on_app_close()
+
+    def logout(self):
+        """Zerstört das Hauptfenster, um zum Login zurückzukehren."""
+        self.app.on_logout(self)
 
     def setup_ui(self):
         header_frame = ttk.Frame(self)
@@ -247,11 +256,8 @@ class MainUserWindow(tk.Toplevel):
 
     def show_tutorial(self):
         TutorialWindow(self)
-
-    def logout(self):
-        self.withdraw()
-        self.master.login_window.clear_input_fields()
-        self.master.login_window.deiconify()
+        mark_tutorial_seen(self.user_data['id'])
+        self.user_data['has_seen_tutorial'] = 1
 
     def open_tab_order_window(self):
         all_tab_names = list(self.tab_frames.keys())

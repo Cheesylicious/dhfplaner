@@ -1,10 +1,10 @@
-# gui/user_edit_window.py
 import tkinter as tk
 from tkinter import ttk, messagebox, simpledialog
 from datetime import datetime
 from tkcalendar import DateEntry
 from database.db_dogs import get_available_dogs
-from database.db_users import update_user
+# HIER WIRD 'update_user' durch 'update_user_details' ersetzt
+from database.db_users import update_user_details
 from database.db_admin import create_user_by_admin, admin_reset_password
 
 
@@ -12,6 +12,7 @@ class UserEditWindow(tk.Toplevel):
     def __init__(self, master, user_id, user_data, callback, is_new, allowed_roles):
         super().__init__(master)
         self.user_id = user_id
+        # Stelle sicher, dass user_data ein Dictionary ist, auch wenn None übergeben wird
         self.user_data = user_data if user_data is not None else {}
         self.callback = callback
         self.is_new = is_new
@@ -57,7 +58,7 @@ class UserEditWindow(tk.Toplevel):
                 date_val = None
                 if self.user_data.get(key):
                     try:
-                        date_val = datetime.strptime(self.user_data.get(key), '%Y-%m-%d').date()
+                        date_val = datetime.strptime(str(self.user_data.get(key)), '%Y-%m-%d').date()
                     except (ValueError, TypeError):
                         pass
                 widget = DateEntry(main_frame, date_pattern='dd.mm.yyyy', date=date_val)
@@ -86,8 +87,8 @@ class UserEditWindow(tk.Toplevel):
 
             else:
                 self.vars[key] = tk.StringVar(value=str(self.user_data.get(key, "")))
-                style = "Readonly.TEntry" if key in readonly_fields else "TEntry"
-                widget = ttk.Entry(main_frame, textvariable=self.vars[key], style=style)
+                style_name = "Readonly.TEntry" if key in readonly_fields else "TEntry"
+                widget = ttk.Entry(main_frame, textvariable=self.vars[key], style=style_name)
                 if key in readonly_fields:
                     widget.config(state='readonly')
 
@@ -117,6 +118,8 @@ class UserEditWindow(tk.Toplevel):
         new_password = simpledialog.askstring("Passwort zurücksetzen", "Geben Sie ein neues temporäres Passwort ein:",
                                               parent=self, show='*')
         if new_password:
+            # Annahme: user_id des angemeldeten Admins wird hier nicht benötigt,
+            # da die Aktion von einem Admin-Fenster aus gestartet wird.
             success, message = admin_reset_password(self.user_id, new_password)
             if success:
                 messagebox.showinfo("Erfolg", message, parent=self)
@@ -151,11 +154,12 @@ class UserEditWindow(tk.Toplevel):
         success = False
         message = ""
         if self.is_new:
-            success = create_user_by_admin(updated_data)
-            message = "Mitarbeiter erfolgreich hinzugefügt." if success else "Ein Mitarbeiter mit diesem Namen existiert bereits."
+            # Annahme: create_user_by_admin erwartet ein Dictionary mit den Benutzerdaten
+            success, message = create_user_by_admin(updated_data)
         else:
-            success = update_user(self.user_id, updated_data)
-            message = "Mitarbeiterdaten erfolgreich aktualisiert." if success else "Fehler beim Aktualisieren der Mitarbeiterdaten."
+            # HIER WIRD der Funktionsaufruf angepasst
+            # Wir übergeben die ID, die Daten und die ID des aktuellen Benutzers (hier: self.user_id des Bearbeiters)
+            success, message = update_user_details(self.user_id, updated_data, self.user_id)
 
         if success:
             messagebox.showinfo("Erfolg", message, parent=self)

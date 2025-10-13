@@ -1,65 +1,73 @@
-# gui/registration_window.py
 import tkinter as tk
 from tkinter import ttk, messagebox
-from database.db_users import add_user, get_user_count
-
+# HIER WIRD 'add_user' durch 'register_user' ersetzt
+from database.db_users import register_user, get_user_count
 
 class RegistrationWindow(tk.Toplevel):
-    def __init__(self, master, callback=None):
+    def __init__(self, master):
         super().__init__(master)
-        self.callback = callback
-        self.title("Neuen Benutzer registrieren")
-        self.geometry("400x420")
+        self.title("Registrierung")
+        self.geometry("400x300")
+        self.resizable(False, False)
         self.transient(master)
         self.grab_set()
 
-        main_frame = ttk.Frame(self, padding="20")
-        main_frame.pack(fill="both", expand=True)
-
+        # Style-Konfiguration
         style = ttk.Style(self)
-        style.configure("TEntry", fieldbackground="white", foreground="black", font=("Segoe UI", 10))
+        style.theme_use('clam')
+        style.configure('TLabel', font=('Helvetica', 10))
+        style.configure('TButton', font=('Helvetica', 10), padding=5)
+        style.configure('TEntry', font=('Helvetica', 10), padding=5)
 
-        if get_user_count() == 0:
-            ttk.Label(main_frame, text="Der erste registrierte Benutzer wird automatisch zum Administrator.",
-                      wraplength=350, foreground="blue").pack(pady=(0, 15))
+        self.create_widgets(style)
 
-        fields = {
-            "Vorname:": tk.StringVar(),
-            "Nachname:": tk.StringVar(),
-            "Passwort:": tk.StringVar(),
-            "Passwort wiederholen:": tk.StringVar()
-        }
-        self.vars = list(fields.values())
+    def create_widgets(self, style):
+        main_frame = ttk.Frame(self, padding="20")
+        main_frame.pack(expand=True, fill='both')
 
-        for label, var in fields.items():
-            ttk.Label(main_frame, text=label).pack(anchor="w")
-            entry = ttk.Entry(main_frame, textvariable=var)
-            if "Passwort" in label:
-                entry.config(show="*")
-            entry.pack(fill="x", pady=(2, 10), ipady=2)
+        ttk.Label(main_frame, text="Vorname:", style='TLabel').grid(row=0, column=0, sticky='w', pady=5, padx=5)
+        self.vorname_entry = ttk.Entry(main_frame, style='TEntry')
+        self.vorname_entry.grid(row=0, column=1, sticky='ew', pady=5, padx=5)
 
-        ttk.Button(main_frame, text="Registrieren", command=self.attempt_registration).pack(pady=15)
-        self.protocol("WM_DELETE_WINDOW", self.on_close)
+        ttk.Label(main_frame, text="Name:", style='TLabel').grid(row=1, column=0, sticky='w', pady=5, padx=5)
+        self.name_entry = ttk.Entry(main_frame, style='TEntry')
+        self.name_entry.grid(row=1, column=1, sticky='ew', pady=5, padx=5)
 
-    def on_close(self):
-        if self.callback:
-            self.callback()
-        self.destroy()
+        ttk.Label(main_frame, text="Passwort:", style='TLabel').grid(row=2, column=0, sticky='w', pady=5, padx=5)
+        self.password_entry = ttk.Entry(main_frame, show="*", style='TEntry')
+        self.password_entry.grid(row=2, column=1, sticky='ew', pady=5, padx=5)
 
-    def attempt_registration(self):
-        vorname, name, pw1, pw2 = [var.get().strip() for var in self.vars]
+        ttk.Label(main_frame, text="Passwort bestätigen:", style='TLabel').grid(row=3, column=0, sticky='w', pady=5, padx=5)
+        self.confirm_password_entry = ttk.Entry(main_frame, show="*", style='TEntry')
+        self.confirm_password_entry.grid(row=3, column=1, sticky='ew', pady=5, padx=5)
 
-        if not all((vorname, name, pw1, pw2)):
-            messagebox.showwarning("Fehlende Eingabe", "Bitte füllen Sie alle Felder aus.", parent=self)
+        reg_button = ttk.Button(main_frame, text="Registrieren", command=self.register, style='TButton')
+        reg_button.grid(row=4, column=0, columnspan=2, pady=20)
+
+        main_frame.columnconfigure(1, weight=1)
+
+    def register(self):
+        vorname = self.vorname_entry.get()
+        name = self.name_entry.get()
+        password = self.password_entry.get()
+        confirm_password = self.confirm_password_entry.get()
+
+        if not all([vorname, name, password, confirm_password]):
+            messagebox.showerror("Fehler", "Alle Felder müssen ausgefüllt sein.", parent=self)
             return
-        if pw1 != pw2:
+
+        if password != confirm_password:
             messagebox.showerror("Fehler", "Die Passwörter stimmen nicht überein.", parent=self)
             return
 
-        success, message = add_user(vorname, name, pw1)
+        # Wenn noch kein Benutzer existiert, wird der erste als SuperAdmin registriert
+        role = "SuperAdmin" if get_user_count() == 0 else "Benutzer"
+
+        # HIER WIRD der Funktionsaufruf angepasst
+        success, message = register_user(vorname, name, password, role)
 
         if success:
-            messagebox.showinfo("Erfolg", "Der Benutzer wurde erfolgreich angelegt!", parent=self)
-            self.on_close()
+            messagebox.showinfo("Erfolg", message, parent=self)
+            self.destroy()
         else:
-            messagebox.showerror("Fehler", message, parent=self)
+            messagebox.showerror("Fehler bei der Registrierung", message, parent=self)

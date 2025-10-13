@@ -2,7 +2,7 @@
 import tkinter as tk
 from tkinter import ttk, messagebox
 from gui.user_edit_window import UserEditWindow
-from database.db_users import get_all_users, delete_user
+from database.db_users import get_all_users_with_details, delete_user  # Wir nehmen die detailliertere Funktion
 from database.db_admin import get_pending_password_resets_count
 from .password_reset_requests_window import PasswordResetRequestsWindow
 
@@ -11,6 +11,8 @@ class UserManagementTab(ttk.Frame):
     def __init__(self, master, controller):
         super().__init__(master)
         self.controller = controller
+        # self.users wird jetzt in load_users() als Dictionary initialisiert
+        self.users = {}
         self.create_widgets()
         self.load_users()
 
@@ -40,37 +42,62 @@ class UserManagementTab(ttk.Frame):
         self.tree.pack(expand=True, fill="both", pady=5)
 
     def load_users(self):
+        # --- HIER IST DIE KORREKTUR ---
+        # 1. Alte Einträge aus der Baumansicht löschen
         for i in self.tree.get_children():
             self.tree.delete(i)
-        self.users = get_all_users()
+
+        # 2. Benutzer als Liste von Dictionaries von der DB holen
+        users_list = get_all_users_with_details()
+
+        # 3. Die Liste in ein Dictionary umwandeln, wobei die User-ID der Schlüssel ist.
+        #    Das ist wichtig, damit die edit_user Funktion weiterhin funktioniert.
+        self.users = {str(user['id']): user for user in users_list}
+
+        # 4. Über das neu erstellte Dictionary iterieren, um die Baumansicht zu füllen
         for user_id, user_data in self.users.items():
-            self.tree.insert("", "end", iid=user_id, values=(user_data['vorname'], user_data['name'], user_data['role']))
+            self.tree.insert("", "end", iid=user_id,
+                             values=(user_data['vorname'], user_data['name'], user_data['role']))
 
     def add_user(self):
         allowed_roles = self.controller.get_allowed_roles()
-        UserEditWindow(self, user_id=None, user_data=None, callback=self.load_users, is_new=True, allowed_roles=allowed_roles)
+        # Wir übergeben 'self' als master, da UserEditWindow ein Toplevel ist
+        UserEditWindow(self, user_id=None, user_data=None, callback=self.load_users, is_new=True,
+                       allowed_roles=allowed_roles)
 
     def edit_user(self):
         selected_item = self.tree.selection()
         if not selected_item:
-            messagebox.showerror("Fehler", "Bitte wählen Sie einen Mitarbeiter aus.")
+            messagebox.showerror("Fehler", "Bitte wählen Sie einen Mitarbeiter aus.", parent=self)
             return
+
         user_id = selected_item[0]
-        user_data = self.users[str(user_id)]
-        allowed_roles = self.controller.get_allowed_roles()
-        UserEditWindow(self, user_id=user_id, user_data=user_data, callback=self.load_users, is_new=False, allowed_roles=allowed_roles)
+        # Funktioniert jetzt wieder, da self.users ein Dictionary ist
+        user_data = self.users.get(user_id)
+
+        if user_data:
+            allowed_roles = self.controller.get_allowed_roles()
+            UserEditWindow(self, user_id=user_id, user_data=user_data, callback=self.load_users, is_new=False,
+                           allowed_roles=allowed_roles)
+        else:
+            messagebox.showerror("Fehler", "Benutzerdaten konnten nicht geladen werden.", parent=self)
 
     def delete_user(self):
         selected_item = self.tree.selection()
         if not selected_item:
-            messagebox.showerror("Fehler", "Bitte wählen Sie einen Mitarbeiter aus.")
+            messagebox.showerror("Fehler", "Bitte wählen Sie einen Mitarbeiter aus.", parent=self)
             return
-        user_id = selected_item[0]
+
+        user_id = int(selected_item[0])
+        current_user_id = self.controller.user_data['id']
+
         if messagebox.askyesno("Bestätigen", "Möchten Sie diesen Mitarbeiter wirklich löschen?"):
-            if delete_user(user_id):
+            success, message = delete_user(user_id, current_user_id)
+            if success:
                 self.load_users()
+                messagebox.showinfo("Erfolg", message, parent=self)
             else:
-                messagebox.showerror("Fehler", "Fehler beim Löschen des Mitarbeiters.")
+                messagebox.showerror("Fehler", f"Fehler beim Löschen des Mitarbeiters:\n{message}", parent=self)
 
     def open_password_resets(self):
         PasswordResetRequestsWindow(self, self.update_password_reset_button)

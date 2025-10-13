@@ -1,4 +1,3 @@
-# gui/tabs/shift_plan_tab.py
 import tkinter as tk
 from tkinter import ttk, messagebox
 from datetime import date, datetime, timedelta
@@ -107,7 +106,8 @@ class ShiftPlanTab(ttk.Frame):
 
     def print_shift_plan(self):
         year, month = self.app.current_display_date.year, self.app.current_display_date.month
-        users = get_ordered_users_for_schedule(include_hidden=False)
+        # --- KORREKTUR: Der Parameter 'include_hidden' wird hier entfernt ---
+        users = get_ordered_users_for_schedule()
         shifts_data = get_shifts_for_month(year, month)
         wunschfrei_data = get_wunschfrei_requests_for_month(year, month)
         processed_vacations = self._process_vacations(year, month)
@@ -227,7 +227,8 @@ class ShiftPlanTab(ttk.Frame):
         self.grid_widgets = {'cells': {}, 'user_totals': {}, 'daily_counts': {}}
         self.update_lock_status()
         self.processed_vacations = self._process_vacations(year, month)
-        self.current_user_order = get_ordered_users_for_schedule(include_hidden=False)
+        # --- KORREKTUR: Der Parameter 'include_hidden' wird hier entfernt ---
+        self.current_user_order = get_ordered_users_for_schedule()
         self.shift_schedule_data = get_shifts_for_month(year, month)
         wunschfrei_data = get_wunschfrei_requests_for_month(year, month)
         daily_counts = get_daily_shift_counts_for_month(year, month)
