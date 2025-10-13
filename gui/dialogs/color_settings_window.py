@@ -1,7 +1,8 @@
-# dialogs/color_settings_window.py
+# gui/dialogs/color_settings_window.py
 import tkinter as tk
 from tkinter import ttk, colorchooser, messagebox
-import json
+# NEUE IMPORTS FÜR DB-ZENTRALISIERUNG
+from database.db_core import load_config_json, save_config_json
 
 
 class ColorSettingsWindow(tk.Toplevel):
@@ -12,6 +13,7 @@ class ColorSettingsWindow(tk.Toplevel):
         self.grab_set()
         self.callback = callback
 
+        # 💥 DB PERSISTENCE: Läd Regeln aus der DB 💥
         self.rules = self.load_rules()
         self.color_vars = {}
 
@@ -49,11 +51,12 @@ class ColorSettingsWindow(tk.Toplevel):
         ttk.Button(button_frame, text="Abbrechen", command=self.destroy).pack(side="right", padx=5)
 
     def load_rules(self):
-        try:
-            with open('min_staffing_rules.json', 'r', encoding='utf-8') as f:
-                return json.load(f)
-        except (FileNotFoundError, json.JSONDecodeError):
-            return {}
+        """Läd die Besetzungsregeln (inklusive Farb-Key) aus der Datenbank."""
+        # Nutzt die zentrale DB-Funktion
+        rules = load_config_json('MIN_STAFFING_RULES')
+        # Stellt sicher, dass ein gültiges Dictionary zurückgegeben wird
+        return rules if rules is not None else {"Daily": {}, "Sa-So": {}, "Fr": {}, "Mo-Do": {}, "Holiday": {},
+                                                "Colors": {}}
 
     def create_color_picker(self, parent, label_text, key, default_color, row):
         color = self.rules.get('Colors', {}).get(key, default_color)
@@ -78,20 +81,23 @@ class ColorSettingsWindow(tk.Toplevel):
             color_var.set(color_code[1])
 
     def save_settings(self):
+        """Speichert die aktualisierten Farbregeln direkt in der Datenbank."""
         if 'Colors' not in self.rules:
             self.rules['Colors'] = {}
         for key, var in self.color_vars.items():
             self.rules['Colors'][key] = var.get()
 
-        try:
-            with open('min_staffing_rules.json', 'w', encoding='utf-8') as f:
-                json.dump(self.rules, f, indent=4)
+        # 💥 DB PERSISTENCE: Speichere die gesamte Rules-Struktur zurück in die DB 💥
+        success = save_config_json('MIN_STAFFING_RULES', self.rules)
+
+        if success:
             messagebox.showinfo("Gespeichert", "Die Farbeinstellungen wurden erfolgreich gespeichert.", parent=self)
 
             if self.callback:
+                # Callback ruft refresh_all_tabs() im MainAdminWindow auf
                 self.callback()
 
             self.destroy()
 
-        except Exception as e:
-            messagebox.showerror("Fehler", f"Fehler beim Speichern der Einstellungen: {e}", parent=self)
+        else:
+            messagebox.showerror("Fehler", f"Fehler beim Speichern der Einstellungen.", parent=self)

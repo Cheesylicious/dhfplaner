@@ -2,10 +2,10 @@
 import tkinter as tk
 from tkinter import ttk, messagebox
 from datetime import date
-import os
-import json
+# os und json sind nicht mehr nötig
 from tkcalendar import DateEntry
 from gui.holiday_manager import HolidayManager
+
 
 class EditHolidayDialog(tk.Toplevel):
     def __init__(self, master, year, existing_holidays, holiday_to_edit=None):
@@ -132,15 +132,20 @@ class HolidaySettingsWindow(tk.Toplevel):
             self.populate_tree()
 
     def save_and_close(self):
-        all_holidays = {}
-        if os.path.exists(HolidayManager.HOLIDAYS_FILE):
-            with open(HolidayManager.HOLIDAYS_FILE, 'r', encoding='utf-8') as f:
-                try:
-                    all_holidays = json.load(f)
-                except json.JSONDecodeError:
-                    pass
+        """Läd alle Feiertage aus der DB, aktualisiert das aktuelle Jahr und speichert alles zurück."""
+
+        # 1. Lade alle vorhandenen Feiertage aus der DB im Rohformat
+        all_holidays = HolidayManager.get_holidays_from_db_raw()
+
+        # 2. Füge die Feiertage des aktuellen Jahres hinzu/überschreibe sie (Konvertierung zu ISO-String-Format)
         all_holidays[str(self.year)] = {dt.isoformat(): name for dt, name in self.holidays.items()}
-        HolidayManager.save_holidays(all_holidays)
-        messagebox.showinfo("Gespeichert", "Die Feiertage wurden erfolgreich gespeichert.", parent=self)
-        self.callback()
-        self.destroy()
+
+        # 3. Speichere die vollständige Struktur in der DB
+        success = HolidayManager.save_holidays(all_holidays)
+
+        if success:
+            messagebox.showinfo("Gespeichert", "Die Feiertage wurden erfolgreich gespeichert.", parent=self)
+            self.callback()
+            self.destroy()
+        else:
+            messagebox.showerror("Fehler", "Feiertage konnten nicht gespeichert werden.", parent=self)
