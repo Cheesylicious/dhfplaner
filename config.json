@@ -1,0 +1,8 @@
+{
+    "database": {
+        "host": "100.118.148.97",
+        "user": "planer_user",
+        "password": "PlanerNeu-2025#",
+        "database": "planer_db"
+    }
+}

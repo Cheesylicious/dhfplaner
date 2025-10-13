@@ -1,96 +1,133 @@
-# database/db_dogs.py
-import sqlite3
 from .db_core import create_connection
+import mysql.connector
+
 
 def get_all_dogs():
-    """Fetches all dogs."""
+    """Holt alle Hunde aus der Datenbank."""
     conn = create_connection()
+    if conn is None: return []
     try:
-        cursor = conn.cursor()
+        cursor = conn.cursor(dictionary=True)
         cursor.execute("SELECT * FROM dogs ORDER BY name")
-        return [dict(row) for row in cursor.fetchall()]
+        return cursor.fetchall()
     finally:
-        conn.close()
+        if conn and conn.is_connected():
+            cursor.close()
+            conn.close()
 
 
 def add_dog(data):
-    """Adds a new dog."""
+    """Fügt einen neuen Hund hinzu."""
     conn = create_connection()
+    if conn is None: return False
     try:
         cursor = conn.cursor()
-        cursor.execute(
-            "INSERT INTO dogs (name, breed, birth_date, chip_number, acquisition_date, departure_date, last_dpo_date, vaccination_info) VALUES (:name, :breed, :birth_date, :chip_number, :acquisition_date, :departure_date, :last_dpo_date, :vaccination_info)",
-            data)
+        query = """
+            INSERT INTO dogs (name, breed, birth_date, chip_number, acquisition_date, departure_date, last_dpo_date, vaccination_info) 
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+        """
+        params = (data['name'], data['breed'], data['birth_date'], data['chip_number'], data['acquisition_date'],
+                  data['departure_date'], data['last_dpo_date'], data['vaccination_info'])
+        cursor.execute(query, params)
         conn.commit()
         return True
-    except sqlite3.IntegrityError:
+    except mysql.connector.IntegrityError:
+        # Fängt Fehler ab, wenn z.B. der Name oder die Chipnummer bereits existiert (UNIQUE constraint)
         return False
     finally:
-        conn.close()
+        if conn and conn.is_connected():
+            cursor.close()
+            conn.close()
 
 
 def update_dog(dog_id, data):
-    """Updates a dog's data."""
-    data['id'] = dog_id
+    """Aktualisiert die Daten eines Hundes."""
     conn = create_connection()
+    if conn is None: return False
     try:
         cursor = conn.cursor()
-        cursor.execute(
-            "UPDATE dogs SET name = :name, breed = :breed, birth_date = :birth_date, chip_number = :chip_number, acquisition_date = :acquisition_date, departure_date = :departure_date, last_dpo_date = :last_dpo_date, vaccination_info = :vaccination_info WHERE id = :id",
-            data)
+        query = """
+            UPDATE dogs SET name = %s, breed = %s, birth_date = %s, chip_number = %s, 
+            acquisition_date = %s, departure_date = %s, last_dpo_date = %s, vaccination_info = %s 
+            WHERE id = %s
+        """
+        params = (data['name'], data['breed'], data['birth_date'], data['chip_number'], data['acquisition_date'],
+                  data['departure_date'], data['last_dpo_date'], data['vaccination_info'], dog_id)
+        cursor.execute(query, params)
         conn.commit()
         return True
-    except sqlite3.IntegrityError:
+    except mysql.connector.IntegrityError:
         return False
     finally:
-        conn.close()
+        if conn and conn.is_connected():
+            cursor.close()
+            conn.close()
 
 
 def delete_dog(dog_id):
-    """Deletes a dog."""
+    """Löscht einen Hund."""
     conn = create_connection()
+    if conn is None: return False
     try:
-        cursor = conn.cursor()
-        cursor.execute("UPDATE users SET diensthund = '' WHERE diensthund = (SELECT name FROM dogs WHERE id = ?)",
-                       (dog_id,))
-        cursor.execute("DELETE FROM dogs WHERE id = ?", (dog_id,))
+        cursor = conn.cursor(dictionary=True)
+        # Zuerst den Namen des Hundes holen, um die Zuweisung bei den Benutzern zu entfernen
+        cursor.execute("SELECT name FROM dogs WHERE id = %s", (dog_id,))
+        dog_data = cursor.fetchone()
+        if dog_data:
+            dog_name = dog_data['name']
+            cursor.execute("UPDATE users SET diensthund = '' WHERE diensthund = %s", (dog_name,))
+
+        # Dann den Hund löschen
+        cursor.execute("DELETE FROM dogs WHERE id = %s", (dog_id,))
         conn.commit()
         return True
-    except sqlite3.Error:
+    except mysql.connector.Error as e:
+        print(f"DB Fehler in delete_dog: {e}")
+        conn.rollback()
         return False
     finally:
-        conn.close()
+        if conn and conn.is_connected():
+            cursor.close()
+            conn.close()
 
 
 def get_dog_handlers(dog_name):
-    """Fetches the handlers of a dog."""
+    """Holt die Hundeführer eines bestimmten Hundes."""
     if not dog_name: return []
     conn = create_connection()
+    if conn is None: return []
     try:
-        cursor = conn.cursor()
-        cursor.execute("SELECT id, vorname, name FROM users WHERE diensthund = ?", (dog_name,))
+        cursor = conn.cursor(dictionary=True)
+        cursor.execute("SELECT id, vorname, name FROM users WHERE diensthund = %s", (dog_name,))
         return cursor.fetchall()
     finally:
-        conn.close()
+        if conn and conn.is_connected():
+            cursor.close()
+            conn.close()
 
 
 def get_dog_assignment_count(dog_name):
-    """Gets the assignment count of a dog."""
+    """Gibt die Anzahl der Zuweisungen für einen Hund zurück."""
     if not dog_name or dog_name == "Kein": return 0
     conn = create_connection()
+    if conn is None: return 0
     try:
         cursor = conn.cursor()
-        cursor.execute("SELECT COUNT(*) FROM users WHERE diensthund = ?", (dog_name,))
+        cursor.execute("SELECT COUNT(*) FROM users WHERE diensthund = %s", (dog_name,))
         return cursor.fetchone()[0]
     finally:
-        conn.close()
+        if conn and conn.is_connected():
+            cursor.close()
+            conn.close()
 
 
 def get_available_dogs():
-    """Fetches all available dogs."""
+    """Holt alle Hunde, die weniger als zweimal zugewiesen sind."""
     conn = create_connection()
+    if conn is None: return []
     try:
-        cursor = conn.cursor()
+        cursor = conn.cursor(dictionary=True)
+        # Diese Logik bleibt gleich, da sie Standard-SQL ist
         cursor.execute("""
             SELECT d.name FROM dogs d
             LEFT JOIN (
@@ -103,19 +140,24 @@ def get_available_dogs():
         """)
         return [row['name'] for row in cursor.fetchall()]
     finally:
-        conn.close()
+        if conn and conn.is_connected():
+            cursor.close()
+            conn.close()
 
 
 def assign_dog(dog_name, user_id):
-    """Assigns a dog to a user."""
+    """Weist einem Benutzer einen Hund zu."""
     conn = create_connection()
+    if conn is None: return False
     try:
         cursor = conn.cursor()
-        cursor.execute("UPDATE users SET diensthund = ? WHERE id = ?", (dog_name, user_id))
+        cursor.execute("UPDATE users SET diensthund = %s WHERE id = %s", (dog_name, user_id))
         conn.commit()
         return True
-    except sqlite3.Error as e:
+    except mysql.connector.Error as e:
         print(f"Fehler bei der Zuweisung: {e}")
         return False
     finally:
-        conn.close()
+        if conn and conn.is_connected():
+            cursor.close()
+            conn.close()
