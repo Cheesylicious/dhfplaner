@@ -6,7 +6,16 @@ from datetime import date, timedelta
 import calendar
 from collections import defaultdict
 
-# --- (Alle deine Imports bleiben unverändert) ---
+# --- Importiere alle notwendigen DB-Funktionen ---
+from database.db_core import (
+    ROLE_HIERARCHY,
+    load_config_json,
+    save_config_json,
+    load_shift_frequency,
+    save_shift_frequency,
+    reset_shift_frequency
+)
+
 from .tabs.shift_plan_tab import ShiftPlanTab
 from .tabs.user_management_tab import UserManagementTab
 from .tabs.dog_management_tab import DogManagementTab
@@ -33,23 +42,19 @@ from database.db_shifts import get_all_shift_types
 from database.db_requests import get_pending_wunschfrei_requests, get_pending_vacation_requests_count
 from database.db_reports import get_open_bug_reports_count
 from database.db_admin import get_pending_password_resets_count
-from database.db_core import ROLE_HIERARCHY
 from .tabs.password_reset_requests_window import PasswordResetRequestsWindow
 
 
 class MainAdminWindow(tk.Toplevel):
-    # --- HIER IST DIE KORREKTUR ---
-    # Wir akzeptieren jetzt 'master', 'user_data' und die 'app'-Instanz
     def __init__(self, master, user_data, app):
         super().__init__(master)
-        self.app = app  # Speichert die Referenz zur Haupt-App
+        self.app = app
         self.user_data = user_data
 
         full_name = f"{self.user_data['vorname']} {self.user_data['name']}".strip()
         self.title(f"Planer - Angemeldet als {full_name} (Admin)")
         self.attributes('-fullscreen', True)
 
-        # --- (Der Rest des Codes bleibt exakt gleich, bis auf die letzten beiden Methoden) ---
         self.style = ttk.Style(self)
         try:
             self.style.theme_use('clam')
@@ -63,14 +68,19 @@ class MainAdminWindow(tk.Toplevel):
         self.style.configure('Notification.TButton', font=('Segoe UI', 10, 'bold'), padding=(10, 5))
         self.style.map('Notification.TButton', background=[('active', '#e0e0e0')], relief=[('pressed', 'sunken')])
         self.style.configure('Settings.TMenubutton', font=('Segoe UI', 10, 'bold'), padding=(10, 5))
+
         self.shift_types_data = {}
-        self.staffing_rules = {}
+        self.staffing_rules = {}  # Wird in load_all_data gesetzt
         self.events = {}
+
         today = date.today()
         days_in_month = calendar.monthrange(today.year, today.month)[1]
         self.current_display_date = today.replace(day=1) + timedelta(days=days_in_month)
         self.current_year_holidays = {}
+
+        # 💥 DB PERSISTENCE: Schichthäufigkeit aus DB laden 💥
         self.shift_frequency = self.load_shift_frequency()
+
         self.load_all_data()
         self.header_frame = ttk.Frame(self, padding=(10, 5, 10, 0))
         self.header_frame.pack(fill='x')
@@ -84,14 +94,15 @@ class MainAdminWindow(tk.Toplevel):
         self.after(1000, self.check_for_updates)
 
     def on_close(self):
-        """Wird aufgerufen, wenn das Fenster geschlossen wird."""
+        """Wird aufgerufen, wenn das Fenster geschlossen wird. Speichert Schichthäufigkeit."""
+        self.save_shift_frequency()  # DB Speicherung
         self.app.on_app_close()
 
     def logout(self):
-        """Zerstört das Hauptfenster, um zum Login zurückzukehren."""
+        """Zerstört das Hauptfenster, um zum Login zurückzukehren. Speichert Schichthäufigkeit."""
+        self.save_shift_frequency()  # DB Speicherung
         self.app.on_logout(self)
 
-    # --- (Alle anderen Methoden in der Mitte bleiben unverändert) ---
     def setup_header(self):
         self.notification_frame = ttk.Frame(self.header_frame)
         self.notification_frame.pack(side="left", fill="x", expand=True)
@@ -166,9 +177,10 @@ class MainAdminWindow(tk.Toplevel):
     def check_for_updates(self):
         self.update_tab_titles()
         self.update_header_notifications()
+        # BugReportsTab hat jetzt einen eigenen Timer, aber wir prüfen trotzdem den Mitarbeiter-Tab
         if hasattr(self.tab_frames["Mitarbeiter"], 'update_password_reset_button'): self.tab_frames[
             "Mitarbeiter"].update_password_reset_button()
-        self.after(60000, self.check_for_updates)
+        self.after(60000, self.check_for_updates) # 60 Sekunden Timer für Header-Updates
 
     def update_tab_titles(self):
         pending_wunsch_count = len(get_pending_wunschfrei_requests())
@@ -239,12 +251,15 @@ class MainAdminWindow(tk.Toplevel):
     def load_shift_types(self):
         self.shift_types_data = {st['abbreviation']: st for st in get_all_shift_types()}
 
+    # 💥 DB PERSISTENCE: Läd Besetzungsregeln aus der Datenbank 💥
     def load_staffing_rules(self):
-        try:
-            with open('min_staffing_rules.json', 'r', encoding='utf-8') as f:
-                self.staffing_rules = json.load(f)
-        except (FileNotFoundError, json.JSONDecodeError):
+        """Läd die Besetzungsregeln aus der Datenbank."""
+        rules = load_config_json('MIN_STAFFING_RULES')
+
+        if rules is None:
             self.staffing_rules = {"Daily": {}, "Sa-So": {}, "Fr": {}, "Mo-Do": {}, "Holiday": {}, "Colors": {}}
+        else:
+            self.staffing_rules = rules
 
     def _load_holidays_for_year(self, year):
         self.current_year_holidays = HolidayManager.get_holidays_for_year(year)
@@ -267,27 +282,31 @@ class MainAdminWindow(tk.Toplevel):
         except ValueError:
             return 'black'
 
+    # 💥 DB PERSISTENCE: Läd Schichthäufigkeit aus der Datenbank 💥
     def load_shift_frequency(self):
-        try:
-            with open('shift_frequency.json', 'r', encoding='utf-8') as f:
-                return defaultdict(int, json.load(f))
-        except (FileNotFoundError, json.JSONDecodeError):
-            return defaultdict(int)
+        """Läd die Schichthäufigkeit aus der Datenbank."""
+        freq_data = load_shift_frequency()
+        return defaultdict(int, freq_data)
 
+    # 💥 DB PERSISTENCE: Speichert Schichthäufigkeit in der Datenbank 💥
     def save_shift_frequency(self):
-        try:
-            with open('shift_frequency.json', 'w', encoding='utf-8') as f:
-                json.dump(self.shift_frequency, f, indent=4)
-        except IOError:
-            messagebox.showwarning("Speicherfehler", "Die Schichthäufigkeit konnte nicht gespeichert werden.",
+        """Speichert die Schichthäufigkeit in der Datenbank."""
+        success = save_shift_frequency(self.shift_frequency)
+        if not success:
+            messagebox.showwarning("Speicherfehler",
+                                   "Die Schichthäufigkeit konnte nicht in der Datenbank gespeichert werden.",
                                    parent=self)
 
+    # 💥 DB PERSISTENCE: Setzt Schichthäufigkeit in der Datenbank zurück 💥
     def reset_shift_frequency(self):
         if messagebox.askyesno("Bestätigen", "Möchten Sie den Zähler für die Schichthäufigkeit wirklich zurücksetzen?",
                                parent=self):
-            self.shift_frequency.clear()
-            self.save_shift_frequency()
-            messagebox.showinfo("Erfolg", "Der Zähler wurde zurückgesetzt.", parent=self)
+            success = reset_shift_frequency()
+            if success:
+                self.shift_frequency.clear()
+                messagebox.showinfo("Erfolg", "Der Zähler wurde zurückgesetzt.", parent=self)
+            else:
+                messagebox.showerror("Fehler", "Fehler beim Zurücksetzen in der Datenbank.", parent=self)
 
     def get_allowed_roles(self):
         admin_level = ROLE_HIERARCHY.get(self.user_data['role'], 0)
@@ -301,8 +320,17 @@ class MainAdminWindow(tk.Toplevel):
     def open_shift_order_window(self):
         ShiftOrderWindow(self, callback=self.refresh_all_tabs)
 
+    # 💥 DB PERSISTENCE: Speichert Regeln über Callback in DB 💥
     def open_staffing_rules_window(self):
-        MinStaffingWindow(self, callback=self.refresh_all_tabs)
+        """Öffnet das Fenster und speichert Regeln über Callback in der DB."""
+
+        def save_and_refresh(new_rules):
+            if save_config_json('MIN_STAFFING_RULES', new_rules):
+                self.refresh_all_tabs()
+            else:
+                messagebox.showerror("Fehler", "Besetzungsregeln konnten nicht gespeichert werden.", parent=self)
+
+        MinStaffingWindow(self, callback=save_and_refresh)
 
     def open_holiday_settings_window(self):
         HolidaySettingsWindow(self, year=self.current_display_date.year, callback=self.refresh_all_tabs)
