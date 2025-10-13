@@ -1,3 +1,4 @@
+# gui/main_user_window.py
 import tkinter as tk
 from tkinter import ttk, messagebox
 import json
@@ -5,7 +6,6 @@ import os
 from datetime import date, datetime, timedelta
 import calendar
 
-# --- Alle deine Imports bleiben unverändert ---
 from .tabs.user_shift_plan_tab import UserShiftPlanTab
 from .tabs.vacation_tab import VacationTab
 from .tabs.my_requests_tab import MyRequestsTab
@@ -15,14 +15,17 @@ from .dialogs.tutorial_window import TutorialWindow
 from .holiday_manager import HolidayManager
 from .event_manager import EventManager
 from database.db_shifts import get_all_shift_types
-from database.db_requests import get_unnotified_requests, mark_requests_as_notified, get_unnotified_vacation_requests_for_user, mark_vacation_requests_as_notified, get_pending_admin_requests_for_user
-from database.db_reports import get_unnotified_bug_reports_for_user, mark_bug_reports_as_notified
+from database.db_requests import (get_unnotified_requests, mark_requests_as_notified,
+                                  get_unnotified_vacation_requests_for_user, mark_vacation_requests_as_notified,
+                                  get_pending_admin_requests_for_user)
+from database.db_reports import (get_unnotified_bug_reports_for_user, mark_bug_reports_as_notified,
+                                 get_reports_awaiting_feedback_for_user)
 from database.db_users import mark_tutorial_seen
 from .tab_lock_manager import TabLockManager
+from database.db_core import load_config_json
 
 USER_TAB_ORDER_FILE = 'user_tab_order_config.json'
-STAFFING_RULES_FILE = 'min_staffing_rules.json'
-DEFAULT_RULES = {"Colors": {}}
+DEFAULT_RULES = {"Daily": {}, "Sa-So": {}, "Fr": {}, "Mo-Do": {}, "Holiday": {}, "Colors": {}}
 
 
 class TabOrderManager:
@@ -118,41 +121,20 @@ class TabOrderWindow(tk.Toplevel):
 
 
 class MainUserWindow(tk.Toplevel):
-    # --- FINALE KORREKTUR ---
     def __init__(self, master, user_data, app):
         super().__init__(master)
         self.app = app
         self.user_data = user_data
-
         self.show_request_popups = True
-
         full_name = f"{self.user_data['vorname']} {self.user_data['name']}".strip()
         self.title(f"Planer - Angemeldet als {full_name}")
         self.attributes('-fullscreen', True)
-
-        style = ttk.Style(self)
-        try:
-            style.theme_use('clam')
-        except tk.TclError:
-            pass
-
-        style.configure('Bug.TButton', background='dodgerblue', foreground='white', font=('Segoe UI', 9, 'bold'))
-        style.map('Bug.TButton',
-                  background=[('active', '#0056b3')],
-                  foreground=[('active', 'white')])
-
-        style.configure('Logout.TButton', background='gold', foreground='black', font=('Segoe UI', 10, 'bold'),
-                        padding=6)
-        style.map('Logout.TButton',
-                  background=[('active', 'goldenrod')],
-                  foreground=[('active', 'black')])
-
+        self.setup_styles()
         today = date.today()
         if today.month == 12:
             self.current_display_date = today.replace(year=today.year + 1, month=1, day=1)
         else:
             self.current_display_date = today.replace(month=today.month + 1, day=1)
-
         self.shift_types_data = {}
         self.staffing_rules = self.load_staffing_rules()
         self.current_year_holidays = {}
@@ -161,37 +143,40 @@ class MainUserWindow(tk.Toplevel):
         self.load_shift_types()
         self._load_holidays_for_year(self.current_display_date.year)
         self._load_events_for_year(self.current_display_date.year)
-
         self.setup_ui()
         self.setup_footer()
-
         self.protocol("WM_DELETE_WINDOW", self.on_close)
-        self.after(500, self.check_all_notifications)
-        self.after(500, self.check_for_admin_requests)
-
+        self.after(500, self.run_periodic_checks)
         if not self.user_data.get('has_seen_tutorial'):
             self.show_tutorial()
 
+    def setup_styles(self):
+        style = ttk.Style(self)
+        try:
+            style.theme_use('clam')
+        except tk.TclError:
+            pass
+        style.configure('Bug.TButton', background='dodgerblue', foreground='white', font=('Segoe UI', 9, 'bold'))
+        style.map('Bug.TButton', background=[('active', '#0056b3')], foreground=[('active', 'white')])
+        style.configure('Logout.TButton', background='gold', foreground='black', font=('Segoe UI', 10, 'bold'),
+                        padding=6)
+        style.map('Logout.TButton', background=[('active', 'goldenrod')], foreground=[('active', 'black')])
+
     def on_close(self):
-        """Wird aufgerufen, wenn das Fenster geschlossen wird."""
         self.app.on_app_close()
 
     def logout(self):
-        """Zerstört das Hauptfenster, um zum Login zurückzukehren."""
         self.app.on_logout(self)
 
     def setup_ui(self):
         header_frame = ttk.Frame(self)
         header_frame.pack(fill="x", padx=10, pady=(5, 0))
-
         ttk.Button(header_frame, text="Tutorial", command=self.show_tutorial).pack(side="left", padx=(0, 5))
         ttk.Button(header_frame, text="Reiter anpassen", command=self.open_tab_order_window).pack(side="right")
-
-        self.admin_request_frame = tk.Frame(self, bg='orange', height=40)
-
+        self.admin_request_frame = tk.Frame(self, bg='orange', height=40, cursor="hand2")
+        self.bug_feedback_frame = tk.Frame(self, bg='deepskyblue', height=40, cursor="hand2")
         self.notebook = ttk.Notebook(self)
         self.notebook.pack(fill="both", expand=True, padx=10, pady=10)
-
         self.tab_frames = {}
         self.setup_tabs()
 
@@ -203,40 +188,30 @@ class MainUserWindow(tk.Toplevel):
             "Bug-Reports": UserBugReportTab(self.notebook, self)
         }
         saved_order = TabOrderManager.load_order()
-
-        final_order = []
-        existing_tabs = list(self.tab_frames.keys())
-        for tab_name in saved_order:
-            if tab_name in existing_tabs:
-                final_order.append(tab_name)
-                existing_tabs.remove(tab_name)
-        final_order.extend(existing_tabs)
-
+        final_order = [tab for tab in saved_order if tab in self.tab_frames]
+        final_order.extend([tab for tab in self.tab_frames if tab not in final_order])
         for tab_name in final_order:
             frame = self.tab_frames.get(tab_name)
             if frame:
                 self.notebook.add(frame, text=tab_name)
-
                 if TabLockManager.is_tab_locked(tab_name):
-                    overlay = tk.Frame(frame, bg='gray90', relief='raised', borderwidth=2)
-                    overlay.place(relx=0, rely=0, relwidth=1, relheight=1, anchor='nw')
+                    self.create_lock_overlay(frame)
 
-                    msg_frame = ttk.Frame(overlay, style="Overlay.TFrame")
-                    msg_frame.place(relx=0.5, rely=0.5, anchor='center')
-
-                    style = ttk.Style()
-                    style.configure("Overlay.TFrame", background='gray90')
-
-                    ttk.Label(msg_frame, text="🔧", font=('Segoe UI', 48, 'bold'), background='gray90',
-                              foreground='gray60').pack(pady=10)
-                    ttk.Label(msg_frame, text="Wartungsarbeiten", font=('Segoe UI', 22, 'bold'), background='gray90',
-                              foreground='gray60').pack(pady=5)
-                    ttk.Label(msg_frame,
-                              text="Dieser Bereich wird gerade überarbeitet und ist in Kürze wieder verfügbar.",
-                              font=('Segoe UI', 12), background='gray90', foreground='gray60').pack(pady=10)
-
-                    overlay.bind("<Button-1>", lambda e: "break")
-                    overlay.bind("<B1-Motion>", lambda e: "break")
+    def create_lock_overlay(self, parent_frame):
+        overlay = tk.Frame(parent_frame, bg='gray90', relief='raised', borderwidth=2)
+        overlay.place(relx=0, rely=0, relwidth=1, relheight=1, anchor='nw')
+        msg_frame = ttk.Frame(overlay, style="Overlay.TFrame")
+        msg_frame.place(relx=0.5, rely=0.5, anchor='center')
+        style = ttk.Style()
+        style.configure("Overlay.TFrame", background='gray90')
+        ttk.Label(msg_frame, text="🔧", font=('Segoe UI', 48, 'bold'), background='gray90', foreground='gray60').pack(
+            pady=10)
+        ttk.Label(msg_frame, text="Wartungsarbeiten", font=('Segoe UI', 22, 'bold'), background='gray90',
+                  foreground='gray60').pack(pady=5)
+        ttk.Label(msg_frame, text="Dieser Bereich wird gerade überarbeitet und ist in Kürze wieder verfügbar.",
+                  font=('Segoe UI', 12), background='gray90', foreground='gray60').pack(pady=10)
+        overlay.bind("<Button-1>", lambda e: "break")
+        overlay.bind("<B1-Motion>", lambda e: "break")
 
     def get_tab(self, tab_name):
         return self.tab_frames.get(tab_name)
@@ -244,10 +219,8 @@ class MainUserWindow(tk.Toplevel):
     def setup_footer(self):
         footer_frame = ttk.Frame(self, padding=5)
         footer_frame.pack(fill="x", side="bottom")
-
         ttk.Button(footer_frame, text="Abmelden", command=self.logout, style='Logout.TButton').pack(side="left",
                                                                                                     padx=10, pady=5)
-
         ttk.Button(footer_frame, text="Bug / Fehler melden", command=self.open_bug_report_dialog,
                    style='Bug.TButton').pack(side="right", padx=10, pady=5)
 
@@ -268,53 +241,89 @@ class MainUserWindow(tk.Toplevel):
             selected_tab_name = self.notebook.tab(self.notebook.select(), "text")
         except tk.TclError:
             selected_tab_name = None
-
-        all_tabs = list(self.notebook.tabs())
-        for tab in all_tabs:
+        for tab in self.notebook.tabs():
             self.notebook.forget(tab)
-
         for tab_name in new_order:
             frame = self.tab_frames.get(tab_name)
             if frame:
                 self.notebook.add(frame, text=tab_name)
-
         if selected_tab_name in new_order:
             for i, tab in enumerate(self.notebook.tabs()):
                 if self.notebook.tab(tab, "text") == selected_tab_name:
                     self.notebook.select(i)
                     break
-        elif len(self.notebook.tabs()) > 0:
+        elif self.notebook.tabs():
             self.notebook.select(0)
+
+    def run_periodic_checks(self):
+        self.check_all_notifications()
+        self.check_for_admin_requests()
+        self.check_for_bug_feedback_requests()
+        self.after(60000, self.run_periodic_checks)
 
     def check_for_admin_requests(self):
         for widget in self.admin_request_frame.winfo_children():
             widget.destroy()
-
         count = get_pending_admin_requests_for_user(self.user_data['id'])
         if count > 0:
             self.admin_request_frame.pack(fill='x', side='top', ipady=5, before=self.notebook)
-
             label_text = f"Sie haben {count} offene Schichtanfrage vom Admin!" if count > 1 else "Sie haben 1 offene Schichtanfrage vom Admin!"
 
-            notification_label = tk.Label(self.admin_request_frame, text=label_text, bg='orange', fg='black',
-                                          font=('Segoe UI', 12, 'bold'))
-            notification_label.pack(side='left', padx=15, pady=5)
+            action = lambda event=None: self.go_to_shift_plan()
 
-            show_button = ttk.Button(self.admin_request_frame, text="Anzeigen", command=self.go_to_shift_plan)
+            notification_label = tk.Label(self.admin_request_frame, text=label_text, bg='orange', fg='black',
+                                          font=('Segoe UI', 12, 'bold'), cursor="hand2")
+            notification_label.pack(side='left', padx=15, pady=5)
+            notification_label.bind("<Button-1>", action)
+            self.admin_request_frame.bind("<Button-1>", action)
+
+            show_button = ttk.Button(self.admin_request_frame, text="Anzeigen", command=action)
             show_button.pack(side='right', padx=15)
         else:
             self.admin_request_frame.pack_forget()
 
+    def check_for_bug_feedback_requests(self):
+        for widget in self.bug_feedback_frame.winfo_children():
+            widget.destroy()
+
+        report_ids = get_reports_awaiting_feedback_for_user(self.user_data['id'])
+        count = len(report_ids)
+
+        if count > 0:
+            first_report_id = report_ids[0]
+            action = lambda event=None: self.go_to_bug_reports(first_report_id)
+
+            self.bug_feedback_frame.pack(fill='x', side='top', ipady=5, before=self.notebook)
+            self.bug_feedback_frame.bind("<Button-1>", action)
+
+            label_text = f"Deine Rückmeldung wird für {count} Bug-Report(s) benötigt!"
+            notification_label = tk.Label(self.bug_feedback_frame, text=label_text, bg='deepskyblue', fg='white',
+                                          font=('Segoe UI', 12, 'bold'), cursor="hand2")
+            notification_label.pack(side='left', padx=15, pady=5)
+            notification_label.bind("<Button-1>", action)
+
+            show_button = ttk.Button(self.bug_feedback_frame, text="Anzeigen", command=action)
+            show_button.pack(side='right', padx=15)
+        else:
+            self.bug_feedback_frame.pack_forget()
+
     def go_to_shift_plan(self):
-        for i in range(len(self.notebook.tabs())):
-            if self.notebook.tab(i, "text") == "Schichtplan":
+        for i, tab in enumerate(self.notebook.tabs()):
+            if self.notebook.tab(tab, "text") == "Schichtplan":
                 self.notebook.select(i)
+                break
+
+    def go_to_bug_reports(self, report_id=None):
+        for i, tab in enumerate(self.notebook.tabs()):
+            if "Bug-Reports" in self.notebook.tab(tab, "text"):
+                self.notebook.select(i)
+                if report_id and "Bug-Reports" in self.tab_frames:
+                    self.after(100, lambda: self.tab_frames["Bug-Reports"].select_report(report_id))
                 break
 
     def check_all_notifications(self):
         all_messages = []
         tabs_to_refresh = []
-
         unnotified_requests = get_unnotified_requests(self.user_data['id'])
         if unnotified_requests:
             message_lines = ["Sie haben Neuigkeiten zu Ihren 'Wunschfrei'-Anträgen:"]
@@ -328,7 +337,6 @@ class MainUserWindow(tk.Toplevel):
             all_messages.append("\n".join(message_lines))
             mark_requests_as_notified(notified_ids)
             tabs_to_refresh.append("Meine Anfragen")
-
         unnotified_vacation = get_unnotified_vacation_requests_for_user(self.user_data['id'])
         if unnotified_vacation:
             message_lines = ["Es gibt Neuigkeiten zu Ihren Urlaubsanträgen:"]
@@ -340,7 +348,6 @@ class MainUserWindow(tk.Toplevel):
             all_messages.append("\n".join(message_lines))
             mark_vacation_requests_as_notified(notified_ids)
             tabs_to_refresh.append("Mein Urlaub")
-
         unnotified_reports = get_unnotified_bug_reports_for_user(self.user_data['id'])
         if unnotified_reports:
             message_lines = ["Es gibt Neuigkeiten zu Ihren Fehlerberichten:"]
@@ -352,8 +359,7 @@ class MainUserWindow(tk.Toplevel):
             all_messages.append("\n".join(message_lines))
             mark_bug_reports_as_notified(notified_ids)
             tabs_to_refresh.append("Bug-Reports")
-
-        if all_messages:
+        if all_messages and self.show_request_popups:
             messagebox.showinfo("Benachrichtigungen", "\n\n".join(all_messages), parent=self)
             if self.winfo_exists():
                 if "Meine Anfragen" in tabs_to_refresh and "Meine Anfragen" in self.tab_frames:
@@ -361,7 +367,9 @@ class MainUserWindow(tk.Toplevel):
                 if "Mein Urlaub" in tabs_to_refresh and "Mein Urlaub" in self.tab_frames:
                     self.tab_frames["Mein Urlaub"].refresh_data()
                 if "Bug-Reports" in tabs_to_refresh and "Bug-Reports" in self.tab_frames:
-                    self.tab_frames["Bug-Reports"].load_reports()
+                    # Die Methode heißt load_reports im user_bug_report_tab
+                    if hasattr(self.tab_frames["Bug-Reports"], 'load_reports'):
+                        self.tab_frames["Bug-Reports"].load_reports()
 
     def _load_holidays_for_year(self, year):
         self.current_year_holidays = HolidayManager.get_holidays_for_year(year)
@@ -388,16 +396,8 @@ class MainUserWindow(tk.Toplevel):
             return 'black'
 
     def load_staffing_rules(self):
-        if os.path.exists(STAFFING_RULES_FILE):
-            try:
-                with open(STAFFING_RULES_FILE, 'r') as f:
-                    rules = json.load(f)
-                    if 'Colors' not in rules:
-                        rules['Colors'] = DEFAULT_RULES['Colors']
-                    return rules
-            except json.JSONDecodeError:
-                return DEFAULT_RULES
-        return DEFAULT_RULES
+        rules = load_config_json('MIN_STAFFING_RULES')
+        return rules if rules and 'Colors' in rules else DEFAULT_RULES
 
     def load_shift_frequency(self):
         try:
@@ -407,5 +407,9 @@ class MainUserWindow(tk.Toplevel):
             return {}
 
     def save_shift_frequency(self):
-        with open('shift_frequency.json', 'w') as f:
-            json.dump(self.shift_frequency, f, indent=4)
+        try:
+            with open('shift_frequency.json', 'w') as f:
+                json.dump(self.shift_frequency, f, indent=4)
+        except IOError:
+            messagebox.showwarning("Speicherfehler", "Die Schichthäufigkeit konnte nicht gespeichert werden.",
+                                   parent=self)

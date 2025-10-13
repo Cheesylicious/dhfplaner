@@ -1,141 +1,190 @@
 # gui/tabs/user_bug_report_tab.py
 import tkinter as tk
-from tkinter import ttk
+from tkinter import ttk, messagebox
 from datetime import datetime
-
-# --- Hier ist die Korrektur ---
-from database.db_reports import get_visible_bug_reports
-
-
-# --- Ende der Korrektur ---
+from database.db_reports import get_visible_bug_reports, submit_user_feedback
 
 
 class UserBugReportTab(ttk.Frame):
-    def __init__(self, master, app_logic):
+    def __init__(self, master, app):
         super().__init__(master)
-        self.app = app_logic
-        self.all_reports_data = {}
+        self.app = app
+        self.reports = []
+        self.selected_report_id = None
+        self.category_colors = {
+            "Unwichtiger Fehler": "#FFFFE0",
+            "Schönheitsfehler": "#FFD700",
+            "Kleiner Fehler": "#FFA500",
+            "Mittlerer Fehler": "#FF4500",
+            "Kritischer Fehler": "#B22222",
+            "Erledigt": "#90EE90",
+            "Warte auf Rückmeldung": "#87CEFA"
+        }
         self.setup_ui()
-        self.load_bug_reports()
+        self.load_reports()
 
     def setup_ui(self):
-        main_pane = ttk.PanedWindow(self, orient=tk.HORIZONTAL)
-        main_pane.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        main_frame = ttk.Frame(self, padding="10")
+        main_frame.pack(fill="both", expand=True)
+        main_frame.grid_rowconfigure(0, weight=1)
+        main_frame.grid_columnconfigure(0, weight=1)
 
-        # Linke Seite: Liste der Bug-Reports
-        list_frame = ttk.Frame(main_pane, padding=5)
-        self.setup_ui_list(list_frame)
-        main_pane.add(list_frame, weight=1)
+        self.tree = ttk.Treeview(main_frame, columns=("category", "timestamp", "title", "status"), show="headings",
+                                 selectmode="browse")
+        self.tree.grid(row=0, column=0, sticky="nsew")
 
-        # Rechte Seite: Details des ausgewählten Reports
-        details_frame = ttk.Frame(main_pane, padding=10)
-        self.setup_ui_details(details_frame)
-        main_pane.add(details_frame, weight=2)
-
-    def setup_ui_list(self, parent):
-        top_frame = ttk.Frame(parent)
-        top_frame.pack(fill=tk.X, pady=(0, 5))
-        ttk.Label(top_frame, text="Aktuelle Bug-Meldungen", font=("Segoe UI", 12, "bold")).pack(side=tk.LEFT,
-                                                                                                anchor="w")
-        ttk.Button(top_frame, text="Aktualisieren", command=self.load_bug_reports).pack(side=tk.RIGHT)
-
-        tree_frame = ttk.Frame(parent)
-        tree_frame.pack(fill=tk.BOTH, expand=True)
-
-        cols = ("gemeldet_am", "titel", "status")
-        self.tree = ttk.Treeview(tree_frame, columns=cols, show="headings")
-
-        self.tree.heading("gemeldet_am", text="Gemeldet am")
-        self.tree.column("gemeldet_am", width=120, anchor=tk.W)
-        self.tree.heading("titel", text="Titel")
-        self.tree.column("titel", width=200, anchor=tk.W)
+        self.tree.heading("category", text="Kategorie")
+        self.tree.heading("timestamp", text="Gemeldet am")
+        self.tree.heading("title", text="Titel")
         self.tree.heading("status", text="Status")
-        self.tree.column("status", width=100, anchor=tk.CENTER)
+        self.tree.column("category", width=120, anchor='w')
+        self.tree.column("timestamp", width=140, anchor='w')
+        self.tree.column("title", width=300, anchor='w')
+        self.tree.column("status", width=100, anchor='center')
 
-        self.tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-
-        vsb = ttk.Scrollbar(tree_frame, orient="vertical", command=self.tree.yview)
-        vsb.pack(side=tk.RIGHT, fill=tk.Y)
+        vsb = ttk.Scrollbar(main_frame, orient="vertical", command=self.tree.yview)
+        vsb.grid(row=0, column=1, sticky="ns")
         self.tree.configure(yscrollcommand=vsb.set)
 
-        self.tree.bind("<<TreeviewSelect>>", self.on_bug_select)
+        for name, color in self.category_colors.items():
+            tag_name = name.replace(" ", "_").lower()
+            self.tree.tag_configure(tag_name, background=color)
 
-    def setup_ui_details(self, parent):
-        parent.columnconfigure(1, weight=1)
+        self.tree.bind("<<TreeviewSelect>>", self.on_report_selected)
 
-        ttk.Label(parent, text="Details zur Meldung", font=("Segoe UI", 12, "bold")).grid(row=0, column=0, columnspan=2,
-                                                                                          sticky="w", pady=(0, 10))
+        self.bottom_frame = ttk.Frame(main_frame)
+        self.bottom_frame.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(10, 0))
+        self.bottom_frame.grid_columnconfigure(0, weight=1)
 
-        self.detail_title_var = tk.StringVar(value="Bitte eine Meldung auswählen")
-        self.detail_status_var = tk.StringVar()
-        self.detail_timestamp_var = tk.StringVar()
+        self.details_frame = ttk.LabelFrame(self.bottom_frame, text="Details des Reports", padding="10")
+        self.details_frame.grid(row=0, column=0, sticky="nsew")
+        self.details_frame.grid_columnconfigure(0, weight=1)
+        self.details_text = tk.Text(self.details_frame, height=10, wrap="word", state="disabled", relief="flat")
+        self.details_text.grid(row=0, column=0, sticky="nsew")
+        self.details_text.tag_configure("bold", font=("Segoe UI", 10, "bold"))
 
-        ttk.Label(parent, text="Titel:", font=("Segoe UI", 10, "bold")).grid(row=1, column=0, sticky="nw")
-        ttk.Label(parent, textvariable=self.detail_title_var, wraplength=500).grid(row=1, column=1, sticky="w", pady=2)
-        ttk.Label(parent, text="Status:", font=("Segoe UI", 10, "bold")).grid(row=2, column=0, sticky="nw")
-        ttk.Label(parent, textvariable=self.detail_status_var).grid(row=2, column=1, sticky="w", pady=2)
-        ttk.Label(parent, text="Gemeldet am:", font=("Segoe UI", 10, "bold")).grid(row=3, column=0, sticky="nw")
-        ttk.Label(parent, textvariable=self.detail_timestamp_var).grid(row=3, column=1, sticky="w", pady=2)
+        self.feedback_frame = ttk.LabelFrame(self.bottom_frame, text="Deine Rückmeldung ist gefragt!", padding="10")
+        self.feedback_frame.grid_columnconfigure(0, weight=1)
 
-        ttk.Label(parent, text="Beschreibung:", font=("Segoe UI", 10, "bold")).grid(row=4, column=0, sticky="nw",
-                                                                                    pady=(10, 0))
-        self.description_text = tk.Text(parent, height=8, width=60, wrap=tk.WORD, relief=tk.SOLID, borderwidth=1,
-                                        state=tk.DISABLED, bg="#f0f0f0")
-        self.description_text.grid(row=5, column=0, columnspan=2, sticky="nsew", pady=2)
+        ttk.Label(self.feedback_frame, text="Notiz vom Admin:").pack(anchor="w")
+        self.admin_notes_text = tk.Text(self.feedback_frame, height=4, wrap="word", relief="solid", borderwidth=1,
+                                        state="disabled", font=("Segoe UI", 9, "italic"), foreground="gray")
+        self.admin_notes_text.pack(fill="x", expand=True, pady=(0, 10))
 
-        ttk.Label(parent, text="Notizen vom Admin:", font=("Segoe UI", 10, "bold")).grid(row=6, column=0, sticky="nw",
-                                                                                         pady=(10, 0))
-        self.admin_notes_text = tk.Text(parent, height=8, width=60, wrap=tk.WORD, relief=tk.SOLID, borderwidth=1,
-                                        state=tk.DISABLED, bg="#f0f0f0")
-        self.admin_notes_text.grid(row=7, column=0, columnspan=2, sticky="nsew", pady=2)
+        ttk.Label(self.feedback_frame, text="Deine Anmerkung (optional):").pack(anchor="w")
+        self.feedback_text = tk.Text(self.feedback_frame, height=4, wrap="word", relief="solid", borderwidth=1)
+        self.feedback_text.pack(fill="x", expand=True, pady=5)
 
-        parent.rowconfigure(5, weight=1)
-        parent.rowconfigure(7, weight=1)
-
-    def load_bug_reports(self):
-        for i in self.tree.get_children():
-            self.tree.delete(i)
-
-        # --- Hier ist die zweite Korrektur ---
-        self.all_reports_data = {str(report['id']): report for report in get_visible_bug_reports()}
-        # --- Ende der Korrektur ---
-
-        for report_id, report in self.all_reports_data.items():
-            ts = datetime.strptime(report['timestamp'], '%Y-%m-%d %H:%M:%S').strftime('%d.%m.%Y %H:%M')
-            self.tree.insert("", "end", iid=report_id, values=(ts, report['title'], report['status']))
+        button_bar = ttk.Frame(self.feedback_frame)
+        button_bar.pack(fill="x", pady=5)
+        ttk.Button(button_bar, text="✅ Problem ist behoben", command=lambda: self.send_feedback(True)).pack(side="left",
+                                                                                                            expand=True,
+                                                                                                            fill="x",
+                                                                                                            padx=2)
+        ttk.Button(button_bar, text="❌ Problem besteht weiterhin", command=lambda: self.send_feedback(False)).pack(
+            side="left", expand=True, fill="x", padx=2)
 
         self.clear_details()
 
-    def on_bug_select(self, event):
-        selection = self.tree.selection()
-        if selection:
-            self.display_bug_details(selection[0])
+    def load_reports(self):
+        self.clear_details()
+        for item in self.tree.get_children():
+            self.tree.delete(item)
 
-    def display_bug_details(self, bug_id):
-        bug = self.all_reports_data.get(bug_id)
-        if not bug:
+        self.reports = get_visible_bug_reports()
+
+        for report in self.reports:
+            try:
+                ts = datetime.strptime(report['timestamp'], '%Y-%m-%d %H:%M:%S').strftime('%d.%m.%Y %H:%M')
+            except (ValueError, TypeError):
+                ts = report['timestamp']
+
+            tag_to_apply = ''
+            status = report.get('status')
+            category = report.get('category')
+
+            if status == 'Warte auf Rückmeldung':
+                tag_to_apply = 'warte_auf_rückmeldung'
+            elif status == 'Erledigt':
+                tag_to_apply = 'erledigt'
+            elif category and category in self.category_colors:
+                tag_to_apply = category.replace(" ", "_").lower()
+
+            values = (category or 'N/A', ts, report['title'], status)
+            self.tree.insert("", "end", iid=report['id'], values=values, tags=(tag_to_apply,))
+
+    def on_report_selected(self, event):
+        selection = self.tree.selection()
+        if not selection:
             self.clear_details()
             return
 
-        self.detail_title_var.set(bug.get('title', 'N/A'))
-        self.detail_status_var.set(bug.get('status', 'N/A'))
-        ts = datetime.strptime(bug['timestamp'], '%Y-%m-%d %H:%M:%S').strftime('%d.%m.%Y um %H:%M Uhr')
-        self.detail_timestamp_var.set(ts)
+        self.selected_report_id = int(selection[0])
+        selected_report = next((r for r in self.reports if r['id'] == self.selected_report_id), None)
 
-        for text_widget, content in [
-            (self.description_text, bug.get('description', '')),
-            (self.admin_notes_text, bug.get('admin_notes') or 'Keine Notizen vorhanden.')
-        ]:
-            text_widget.config(state=tk.NORMAL)
-            text_widget.delete("1.0", tk.END)
-            text_widget.insert(tk.END, content)
-            text_widget.config(state=tk.DISABLED)
+        if selected_report:
+            if selected_report.get('status') == 'Warte auf Rückmeldung':
+                self.details_frame.grid_remove()
+                self.feedback_frame.grid(row=0, column=0, sticky="nsew")
+
+                self.admin_notes_text.config(state="normal")
+                self.admin_notes_text.delete("1.0", tk.END)
+                admin_notes = selected_report.get('admin_notes')
+                if admin_notes:
+                    self.admin_notes_text.insert("1.0", admin_notes)
+                else:
+                    self.admin_notes_text.insert("1.0", "Keine Notiz vom Admin vorhanden.")
+                self.admin_notes_text.config(state="disabled")
+
+                self.feedback_text.delete("1.0", tk.END)
+            else:
+                self.feedback_frame.grid_remove()
+                self.details_frame.grid(row=0, column=0, sticky="nsew")
+                self.display_report_details(selected_report)
+
+    def display_report_details(self, report):
+        self.details_text.config(state="normal")
+        self.details_text.delete("1.0", tk.END)
+
+        title = report.get('title', 'Kein Titel')
+        description = report.get('description', 'Keine Beschreibung vorhanden.')
+        admin_notes = report.get('admin_notes')
+
+        self.details_text.insert("1.0", f"Titel: {title}\n\n", "bold")
+        self.details_text.insert(tk.END, f"Beschreibung:\n{description}\n\n")
+
+        if admin_notes:
+            self.details_text.insert(tk.END, "Notizen vom Admin:\n", "bold")
+            self.details_text.insert(tk.END, admin_notes)
+
+        self.details_text.config(state="disabled")
 
     def clear_details(self):
-        self.detail_title_var.set("Bitte eine Meldung aus der Liste links auswählen.")
-        self.detail_status_var.set("")
-        self.detail_timestamp_var.set("")
-        for text_widget in [self.description_text, self.admin_notes_text]:
-            text_widget.config(state=tk.NORMAL)
-            text_widget.delete("1.0", tk.END)
-            text_widget.config(state=tk.DISABLED)
+        self.selected_report_id = None
+        self.feedback_frame.grid_remove()
+        self.details_frame.grid(row=0, column=0, sticky="nsew")
+        self.details_text.config(state="normal")
+        self.details_text.delete("1.0", tk.END)
+        self.details_text.config(state="disabled")
+
+    def send_feedback(self, is_fixed):
+        if not self.selected_report_id: return
+        note = self.feedback_text.get("1.0", tk.END).strip()
+        success, message = submit_user_feedback(self.selected_report_id, is_fixed, note)
+
+        if success:
+            messagebox.showinfo("Danke!", message, parent=self)
+            self.load_reports()
+            self.clear_details()
+            if hasattr(self.app, 'check_for_bug_feedback_requests'):
+                self.app.check_for_bug_feedback_requests()
+        else:
+            messagebox.showerror("Fehler", message, parent=self)
+
+    def select_report(self, report_id):
+        """Wählt einen bestimmten Report in der Liste aus."""
+        if self.tree.exists(str(report_id)):
+            self.tree.selection_set(str(report_id))
+            self.tree.focus(str(report_id))
+            self.tree.see(str(report_id))
+            self.on_report_selected(None)

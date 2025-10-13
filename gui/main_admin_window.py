@@ -1,12 +1,10 @@
 # gui/main_admin_window.py
 import tkinter as tk
 from tkinter import ttk, messagebox
-import json
 from datetime import date, timedelta
 import calendar
 from collections import defaultdict
 
-# --- Importiere alle notwendigen DB-Funktionen ---
 from database.db_core import (
     ROLE_HIERARCHY,
     load_config_json,
@@ -40,7 +38,7 @@ from .holiday_manager import HolidayManager
 from .event_manager import EventManager
 from database.db_shifts import get_all_shift_types
 from database.db_requests import get_pending_wunschfrei_requests, get_pending_vacation_requests_count
-from database.db_reports import get_open_bug_reports_count
+from database.db_reports import get_open_bug_reports_count, get_reports_with_user_feedback_count
 from database.db_admin import get_pending_password_resets_count
 from .tabs.password_reset_requests_window import PasswordResetRequestsWindow
 
@@ -70,7 +68,7 @@ class MainAdminWindow(tk.Toplevel):
         self.style.configure('Settings.TMenubutton', font=('Segoe UI', 10, 'bold'), padding=(10, 5))
 
         self.shift_types_data = {}
-        self.staffing_rules = {}  # Wird in load_all_data gesetzt
+        self.staffing_rules = {}
         self.events = {}
 
         today = date.today()
@@ -78,7 +76,6 @@ class MainAdminWindow(tk.Toplevel):
         self.current_display_date = today.replace(day=1) + timedelta(days=days_in_month)
         self.current_year_holidays = {}
 
-        # 💥 DB PERSISTENCE: Schichthäufigkeit aus DB laden 💥
         self.shift_frequency = self.load_shift_frequency()
 
         self.load_all_data()
@@ -95,12 +92,12 @@ class MainAdminWindow(tk.Toplevel):
 
     def on_close(self):
         """Wird aufgerufen, wenn das Fenster geschlossen wird. Speichert Schichthäufigkeit."""
-        self.save_shift_frequency()  # DB Speicherung
+        self.save_shift_frequency()
         self.app.on_app_close()
 
     def logout(self):
         """Zerstört das Hauptfenster, um zum Login zurückzukehren. Speichert Schichthäufigkeit."""
-        self.save_shift_frequency()  # DB Speicherung
+        self.save_shift_frequency()
         self.app.on_logout(self)
 
     def setup_header(self):
@@ -177,10 +174,9 @@ class MainAdminWindow(tk.Toplevel):
     def check_for_updates(self):
         self.update_tab_titles()
         self.update_header_notifications()
-        # BugReportsTab hat jetzt einen eigenen Timer, aber wir prüfen trotzdem den Mitarbeiter-Tab
-        if hasattr(self.tab_frames["Mitarbeiter"], 'update_password_reset_button'): self.tab_frames[
-            "Mitarbeiter"].update_password_reset_button()
-        self.after(60000, self.check_for_updates) # 60 Sekunden Timer für Header-Updates
+        if hasattr(self.tab_frames["Mitarbeiter"], 'update_password_reset_button'):
+            self.tab_frames["Mitarbeiter"].update_password_reset_button()
+        self.after(60000, self.check_for_updates)
 
     def update_tab_titles(self):
         pending_wunsch_count = len(get_pending_wunschfrei_requests())
@@ -188,11 +184,13 @@ class MainAdminWindow(tk.Toplevel):
         if pending_wunsch_count > 0: tab_text_wunsch += f" ({pending_wunsch_count})"
         if "Wunschanfragen" in self.tab_frames: self.notebook.tab(self.tab_frames["Wunschanfragen"],
                                                                   text=tab_text_wunsch)
+
         pending_urlaub_count = get_pending_vacation_requests_count()
         tab_text_urlaub = "Urlaubsanträge"
         if pending_urlaub_count > 0: tab_text_urlaub += f" ({pending_urlaub_count})"
         if "Urlaubsanträge" in self.tab_frames: self.notebook.tab(self.tab_frames["Urlaubsanträge"],
                                                                   text=tab_text_urlaub)
+
         open_bug_count = get_open_bug_reports_count()
         tab_text_bugs = "Bug-Reports"
         if open_bug_count > 0: tab_text_bugs += f" ({open_bug_count})"
@@ -201,31 +199,42 @@ class MainAdminWindow(tk.Toplevel):
     def update_header_notifications(self):
         for widget in self.notification_frame.winfo_children(): widget.destroy()
         notifications = []
+
         pending_password_resets = get_pending_password_resets_count()
-        if pending_password_resets > 0: notifications.append(
-            {"text": f"{pending_password_resets} Passwort-Reset(s)", "bg": "mediumpurple", "fg": "white",
-             "action": self.open_password_resets_window})
+        if pending_password_resets > 0:
+            notifications.append(
+                {"text": f"{pending_password_resets} Passwort-Reset(s)", "bg": "mediumpurple", "fg": "white",
+                 "action": self.open_password_resets_window})
+
         pending_wunsch_count = len(get_pending_wunschfrei_requests())
-        if pending_wunsch_count > 0: notifications.append(
-            {"text": f"{pending_wunsch_count} Offene Wunschanfrage(n)", "bg": "orange", "fg": "black",
-             "tab": "Wunschanfragen"})
+        if pending_wunsch_count > 0:
+            notifications.append(
+                {"text": f"{pending_wunsch_count} Offene Wunschanfrage(n)", "bg": "orange", "fg": "black",
+                 "tab": "Wunschanfragen"})
+
         pending_urlaub_count = get_pending_vacation_requests_count()
-        if pending_urlaub_count > 0: notifications.append(
-            {"text": f"{pending_urlaub_count} Offene Urlaubsanträge", "bg": "lightblue", "fg": "black",
-             "tab": "Urlaubsanträge"})
+        if pending_urlaub_count > 0:
+            notifications.append(
+                {"text": f"{pending_urlaub_count} Offene Urlaubsanträge", "bg": "lightblue", "fg": "black",
+                 "tab": "Urlaubsanträge"})
+
+        user_feedback_count = get_reports_with_user_feedback_count()
+        if user_feedback_count > 0:
+            notifications.append({"text": f"{user_feedback_count} User-Feedback(s)", "bg": "springgreen", "fg": "black",
+                                  "tab": "Bug-Reports"})
+
         open_bug_count = get_open_bug_reports_count()
-        if open_bug_count > 0: notifications.append(
-            {"text": f"{open_bug_count} Offene Bug-Report(s)", "bg": "tomato", "fg": "white", "tab": "Bug-Reports"})
+        if open_bug_count > 0:
+            notifications.append(
+                {"text": f"{open_bug_count} Offene Bug-Report(s)", "bg": "tomato", "fg": "white", "tab": "Bug-Reports"})
+
         if not notifications:
             ttk.Label(self.notification_frame, text="Keine neuen Benachrichtigungen",
                       font=('Segoe UI', 10, 'italic')).pack()
         else:
             for i, notif in enumerate(notifications):
                 self.style.configure(f'Notif{i}.TButton', background=notif["bg"], foreground=notif["fg"])
-                if "action" in notif:
-                    command = notif["action"]
-                else:
-                    command = lambda tab=notif["tab"]: self.switch_to_tab(tab)
+                command = notif.get("action", lambda tab=notif["tab"]: self.switch_to_tab(tab))
                 btn = ttk.Button(self.notification_frame, text=notif["text"], style=f'Notif{i}.TButton',
                                  command=command)
                 btn.pack(side="left", padx=5, fill="x", expand=True)
@@ -251,11 +260,9 @@ class MainAdminWindow(tk.Toplevel):
     def load_shift_types(self):
         self.shift_types_data = {st['abbreviation']: st for st in get_all_shift_types()}
 
-    # 💥 DB PERSISTENCE: Läd Besetzungsregeln aus der Datenbank 💥
     def load_staffing_rules(self):
         """Läd die Besetzungsregeln aus der Datenbank."""
         rules = load_config_json('MIN_STAFFING_RULES')
-
         if rules is None:
             self.staffing_rules = {"Daily": {}, "Sa-So": {}, "Fr": {}, "Mo-Do": {}, "Holiday": {}, "Colors": {}}
         else:
@@ -282,13 +289,11 @@ class MainAdminWindow(tk.Toplevel):
         except ValueError:
             return 'black'
 
-    # 💥 DB PERSISTENCE: Läd Schichthäufigkeit aus der Datenbank 💥
     def load_shift_frequency(self):
         """Läd die Schichthäufigkeit aus der Datenbank."""
         freq_data = load_shift_frequency()
         return defaultdict(int, freq_data)
 
-    # 💥 DB PERSISTENCE: Speichert Schichthäufigkeit in der Datenbank 💥
     def save_shift_frequency(self):
         """Speichert die Schichthäufigkeit in der Datenbank."""
         success = save_shift_frequency(self.shift_frequency)
@@ -297,7 +302,6 @@ class MainAdminWindow(tk.Toplevel):
                                    "Die Schichthäufigkeit konnte nicht in der Datenbank gespeichert werden.",
                                    parent=self)
 
-    # 💥 DB PERSISTENCE: Setzt Schichthäufigkeit in der Datenbank zurück 💥
     def reset_shift_frequency(self):
         if messagebox.askyesno("Bestätigen", "Möchten Sie den Zähler für die Schichthäufigkeit wirklich zurücksetzen?",
                                parent=self):
@@ -320,10 +324,7 @@ class MainAdminWindow(tk.Toplevel):
     def open_shift_order_window(self):
         ShiftOrderWindow(self, callback=self.refresh_all_tabs)
 
-    # 💥 DB PERSISTENCE: Speichert Regeln über Callback in DB 💥
     def open_staffing_rules_window(self):
-        """Öffnet das Fenster und speichert Regeln über Callback in der DB."""
-
         def save_and_refresh(new_rules):
             if save_config_json('MIN_STAFFING_RULES', new_rules):
                 self.refresh_all_tabs()
