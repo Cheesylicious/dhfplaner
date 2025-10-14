@@ -22,9 +22,9 @@ def save_shift_entry(user_id, shift_date_str, shift_abbrev, keep_request_record=
             query = """
                 INSERT INTO shift_schedule (user_id, shift_date, shift_abbrev)
                 VALUES (%s, %s, %s)
-                ON DUPLICATE KEY UPDATE shift_abbrev = VALUES(shift_abbrev)
+                ON DUPLICATE KEY UPDATE shift_abbrev = %s
             """
-            cursor.execute(query, (user_id, shift_date_str, shift_abbrev))
+            cursor.execute(query, (user_id, shift_date_str, shift_abbrev, shift_abbrev))
 
         # Prüfe, ob es sich um ein Event-Datum handelt (Ausbildung/Schießen)
         if shift_abbrev and shift_abbrev not in ["", "FREI"]:

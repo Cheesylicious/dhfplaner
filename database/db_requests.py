@@ -295,13 +295,13 @@ def submit_user_request(user_id, request_date_str, requested_shift=None):
             INSERT INTO wunschfrei_requests (user_id, request_date, requested_shift, status, notified, rejection_reason, requested_by)
             VALUES (%s, %s, %s, 'Ausstehend', 0, NULL, 'user')
             ON DUPLICATE KEY UPDATE
-                requested_shift = VALUES(requested_shift),
+                requested_shift = %s,
                 status = 'Ausstehend',
                 notified = 0,
                 rejection_reason = NULL,
                 requested_by = 'user'
         """
-        cursor.execute(query, (user_id, request_date_str, shift_to_store))
+        cursor.execute(query, (user_id, request_date_str, shift_to_store, shift_to_store))
         conn.commit()
         return True, "Anfrage erfolgreich gestellt oder aktualisiert."
     except mysql.connector.Error as e:
@@ -322,11 +322,11 @@ def admin_submit_request(user_id, request_date_str, requested_shift):
             INSERT INTO wunschfrei_requests (user_id, request_date, requested_shift, status, requested_by)
             VALUES (%s, %s, %s, 'Ausstehend', 'admin')
             ON DUPLICATE KEY UPDATE
-                requested_shift = VALUES(requested_shift),
+                requested_shift = %s,
                 status = 'Ausstehend',
                 requested_by = 'admin'
         """
-        cursor.execute(query, (user_id, request_date_str, requested_shift))
+        cursor.execute(query, (user_id, request_date_str, requested_shift, requested_shift))
         conn.commit()
         return True, "Anfrage erfolgreich an den Benutzer gesendet."
     except mysql.connector.Error as e:
@@ -509,8 +509,12 @@ def get_wunschfrei_requests_for_month(year, month):
             user_id_str = str(row['user_id'])
             if user_id_str not in requests:
                 requests[user_id_str] = {}
-            requests[user_id_str][row['request_date']] = (row['status'], row['requested_shift'], row['requested_by'])
+            # --- KORREKTUR: Platzhalter für Timestamp entfernt ---
+            requests[user_id_str][row['request_date']] = (row['status'], row['requested_shift'], row['requested_by'], None)
         return requests
+    except mysql.connector.Error as e:
+        print(f"Fehler beim Abrufen der Wunschfrei-Anträge: {e}")
+        return {}
     finally:
         if conn and conn.is_connected():
             cursor.close()
@@ -594,3 +598,4 @@ def mark_requests_as_notified(request_ids):
         if conn and conn.is_connected():
             cursor.close()
             conn.close()
+
