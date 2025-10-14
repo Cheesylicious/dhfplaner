@@ -8,10 +8,11 @@ import os
 import tempfile
 
 from database.db_shifts import get_shifts_for_month, get_daily_shift_counts_for_month, get_ordered_shift_abbrevs, save_shift_entry
-from database.db_requests import get_wunschfrei_requests_for_month, get_wunschfrei_request_by_user_and_date, get_all_vacation_requests_for_month, admin_submit_request
+from database.db_requests import get_wunschfrei_requests_for_month, get_wunschfrei_request_by_user_and_date, get_all_vacation_requests_for_month, admin_submit_request, update_wunschfrei_status
 from database.db_users import get_ordered_users_for_schedule
 from gui.admin_menu_config_manager import AdminMenuConfigManager
 from ..request_lock_manager import RequestLockManager
+from gui.dialogs.rejection_reason_dialog import RejectionReasonDialog
 
 
 class ShiftPlanTab(ttk.Frame):
@@ -107,7 +108,6 @@ class ShiftPlanTab(ttk.Frame):
 
     def print_shift_plan(self):
         year, month = self.app.current_display_date.year, self.app.current_display_date.month
-        # --- KORREKTUR: Der Parameter 'include_hidden' wird hier entfernt ---
         users = get_ordered_users_for_schedule()
         shifts_data = get_shifts_for_month(year, month)
         wunschfrei_data = get_wunschfrei_requests_for_month(year, month)
@@ -228,7 +228,6 @@ class ShiftPlanTab(ttk.Frame):
         self.grid_widgets = {'cells': {}, 'user_totals': {}, 'daily_counts': {}}
         self.update_lock_status()
         self.processed_vacations = self._process_vacations(year, month)
-        # --- KORREKTUR: Der Parameter 'include_hidden' wird hier entfernt ---
         self.current_user_order = get_ordered_users_for_schedule()
         self.shift_schedule_data = get_shifts_for_month(year, month)
         wunschfrei_data = get_wunschfrei_requests_for_month(year, month)
@@ -302,12 +301,17 @@ class ShiftPlanTab(ttk.Frame):
                 elif vacation_status == 'Ausstehend':
                     display_text = "U?"
                 elif request_info:
-                    status, requested_shift, requested_by = request_info
+                    status, requested_shift, requested_by, _ = request_info
                     if status == 'Ausstehend':
                         if requested_by == 'admin':
                             display_text = f"{requested_shift} (A)?"
                         else:
-                            display_text = 'WF' if requested_shift == 'WF' else f"{requested_shift}?"
+                            if requested_shift == 'WF':
+                                display_text = 'WF'
+                            elif requested_shift == 'T/N':
+                                display_text = 'T./N.?'
+                            else:
+                                display_text = f"{requested_shift}?"
                     elif "Akzeptiert" in status or "Genehmigt" in status:
                         if requested_shift == 'WF':
                             display_text = 'X'
@@ -479,6 +483,13 @@ class ShiftPlanTab(ttk.Frame):
         context_menu.add_separator()
         anfragen_menu = tk.Menu(context_menu, tearoff=0)
         context_menu.add_cascade(label="Anfragen", menu=anfragen_menu)
+
+        # --- ANFANG DER ÄNDERUNG ---
+        anfragen_menu.add_command(label="Anfrage für 'T. oder N.'",
+                                  command=lambda s="T/N": self._admin_request_shift(user_id, shift_date_str, s))
+        anfragen_menu.add_separator()
+        # --- ENDE DER ÄNDERUNG ---
+
         all_abbrevs = list(self.app.shift_types_data.keys())
         menu_config = AdminMenuConfigManager.load_config(all_abbrevs)
         sorted_abbrevs = sorted(all_abbrevs, key=lambda s: self.app.shift_frequency.get(s, 0), reverse=True)
@@ -507,14 +518,43 @@ class ShiftPlanTab(ttk.Frame):
     def show_wunschfrei_context_menu(self, event, user_id, date_str):
         request = get_wunschfrei_request_by_user_and_date(user_id, date_str)
         if not request or request['status'] != 'Ausstehend': return
+
         context_menu = tk.Menu(self, tearoff=0)
-        wunschfrei_tab = self.app.tab_frames.get("Wunschanfragen")
-        if wunschfrei_tab:
-            context_menu.add_command(label="Genehmigen",
-                                     command=lambda: wunschfrei_tab.process_wunschfrei_by_id(request['id'], True))
+        requested_shift = request.get('requested_shift')
+
+        if requested_shift == 'T/N':
+            context_menu.add_command(label="Als Tagdienst genehmigen",
+                                     command=lambda: self._process_wish_request(request, "T."))
+            context_menu.add_command(label="Als Nachtdienst genehmigen",
+                                     command=lambda: self._process_wish_request(request, "N."))
+            context_menu.add_separator()
             context_menu.add_command(label="Ablehnen",
-                                     command=lambda: wunschfrei_tab.process_wunschfrei_by_id(request['id'], False))
-            context_menu.post(event.x_root, event.y_root)
+                                     command=lambda: self._process_wish_request(request, "Abgelehnt"))
+        else:
+            shift_to_approve = 'X' if requested_shift == 'WF' else requested_shift
+            context_menu.add_command(label=f"'{requested_shift}' genehmigen",
+                                     command=lambda: self._process_wish_request(request, shift_to_approve))
+            context_menu.add_command(label="Ablehnen",
+                                     command=lambda: self._process_wish_request(request, "Abgelehnt"))
+
+        context_menu.post(event.x_root, event.y_root)
+
+    def _process_wish_request(self, request_info, action):
+        user_id = request_info['user_id']
+        date_str = request_info['request_date']
+        request_id = request_info['id']
+
+        if action == "Abgelehnt":
+            dialog = RejectionReasonDialog(self)
+            if dialog.result:
+                reason = dialog.result
+                update_wunschfrei_status(request_id, "Abgelehnt", reason)
+                self.build_shift_plan_grid(self.app.current_display_date.year, self.app.current_display_date.month)
+        else:
+            save_shift_entry(user_id, date_str, action, keep_request_record=True)
+            update_wunschfrei_status(request_id, "Genehmigt")
+            self.build_shift_plan_grid(self.app.current_display_date.year, self.app.current_display_date.month)
+
 
     def _save_shift_and_update_ui(self, user_id, date_str, old_shift, new_shift):
         success, message = save_shift_entry(user_id, date_str, new_shift)
@@ -723,3 +763,4 @@ class ShiftPlanTab(ttk.Frame):
 
     def refresh_plan(self):
         self.build_shift_plan_grid(self.app.current_display_date.year, self.app.current_display_date.month)
+

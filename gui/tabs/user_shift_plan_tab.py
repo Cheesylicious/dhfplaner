@@ -171,12 +171,17 @@ class UserShiftPlanTab(ttk.Frame):
                 elif vacation_status == 'Ausstehend':
                     display_shift = "U?"
                 elif request_info:
-                    status, requested_shift, requested_by = request_info
+                    status, requested_shift, requested_by, _ = request_info
                     if status == 'Ausstehend':
                         if requested_by == 'admin':
                             display_shift = f"{requested_shift} (A)?"
                         else:
-                            display_shift = 'WF' if requested_shift == 'WF' else f"{requested_shift}?"
+                            if requested_shift == 'WF':
+                                display_shift = 'WF'
+                            elif requested_shift == 'T/N':
+                                display_shift = 'T./N.?'
+                            else:
+                                display_shift = f"{requested_shift}?"
                     elif "Akzeptiert" in status or "Genehmigt" in status:
                         if requested_shift == 'WF':
                             display_shift = 'X'
@@ -377,13 +382,30 @@ class UserShiftPlanTab(ttk.Frame):
             context_menu.add_command(label="Wunsch zurückziehen",
                                      command=lambda: self._withdraw_request(existing_request['id'], user_id, date_str))
             context_menu.add_separator()
+
         if request_config.get("WF", True):
             label = "Wunschfrei beantragen" if not existing_request else "Wunsch auf 'Frei' ändern"
             context_menu.add_command(label=label, command=lambda: self._handle_user_request(year, month, day, None))
-        shift_options_available = any(request_config.get(s, False) for s in ["T.", "N.", "6", "24"])
-        if shift_options_available:
+
+        context_menu.add_separator()
+
+        label_t = f"Wunsch: 'T.' eintragen" if not existing_request else f"Wunsch auf 'T.' ändern"
+        context_menu.add_command(label=label_t,
+                                 command=lambda: self._handle_user_request(year, month, day, "T."))
+
+        label_n = f"Wunsch: 'N.' eintragen" if not existing_request else f"Wunsch auf 'N.' ändern"
+        context_menu.add_command(label=label_n,
+                                 command=lambda: self._handle_user_request(year, month, day, "N."))
+
+        label_tn = f"Wunsch: 'T. oder N.' eintragen" if not existing_request else f"Wunsch auf 'T. oder N.' ändern"
+        context_menu.add_command(label=label_tn,
+                                  command=lambda: self._handle_user_request(year, month, day, "T/N"))
+
+
+        other_shifts_available = any(request_config.get(s, False) for s in ["6", "24"])
+        if other_shifts_available:
             context_menu.add_separator()
-        for shift in ["T.", "N.", "6", "24"]:
+        for shift in ["6", "24"]:
             if request_config.get(shift, False):
                 is_friday = request_date.weekday() == 4
                 is_holiday = self.app.is_holiday(request_date)
@@ -392,6 +414,7 @@ class UserShiftPlanTab(ttk.Frame):
                 label = f"Wunsch: '{shift}' eintragen" if not existing_request else f"Wunsch auf '{shift}' ändern"
                 context_menu.add_command(label=label,
                                          command=lambda s=shift: self._handle_user_request(year, month, day, s))
+
         if context_menu.index("end") is not None:
             context_menu.post(event.x_root, event.y_root)
         else:
@@ -400,13 +423,22 @@ class UserShiftPlanTab(ttk.Frame):
 
     def handle_admin_request(self, event, request_info):
         context_menu = tk.Menu(self, tearoff=0)
-        context_menu.add_command(label="Einverstanden",
-                                 command=lambda: self.respond_to_admin_request(request_info['id'], 'Genehmigt'))
-        context_menu.add_command(label="Ablehnen",
-                                 command=lambda: self.respond_to_admin_request(request_info['id'], 'Abgelehnt'))
+        if request_info.get('requested_shift') == 'T/N':
+            context_menu.add_command(label="Als Tagschicht annehmen",
+                                     command=lambda: self.respond_to_admin_request(request_info['id'], 'Genehmigt', 'T.'))
+            context_menu.add_command(label="Als Nachtschicht annehmen",
+                                     command=lambda: self.respond_to_admin_request(request_info['id'], 'Genehmigt', 'N.'))
+            context_menu.add_separator()
+            context_menu.add_command(label="Ablehnen",
+                                     command=lambda: self.respond_to_admin_request(request_info['id'], 'Abgelehnt'))
+        else:
+            context_menu.add_command(label="Einverstanden",
+                                     command=lambda: self.respond_to_admin_request(request_info['id'], 'Genehmigt'))
+            context_menu.add_command(label="Ablehnen",
+                                     command=lambda: self.respond_to_admin_request(request_info['id'], 'Abgelehnt'))
         context_menu.post(event.x_root, event.y_root)
 
-    def respond_to_admin_request(self, request_id, response):
+    def respond_to_admin_request(self, request_id, response, shift_to_set=None):
         request_info_before = get_wunschfrei_request_by_id(request_id)
         if not request_info_before:
             messagebox.showerror("Fehler", "Anfrage nicht gefunden.", parent=self)
@@ -416,10 +448,11 @@ class UserShiftPlanTab(ttk.Frame):
 
         if success:
             if response == 'Genehmigt':
+                final_shift = shift_to_set if shift_to_set else request_info_before['requested_shift']
                 save_shift_entry(
                     request_info_before['user_id'],
                     request_info_before['request_date'],
-                    request_info_before['requested_shift'],
+                    final_shift,
                     keep_request_record=True
                 )
             self.build_shift_plan_grid(self.app.current_display_date.year, self.app.current_display_date.month)
@@ -498,7 +531,7 @@ class UserShiftPlanTab(ttk.Frame):
             self.wunschfrei_data[user_id_str] = {}
         if request_info:
             self.wunschfrei_data[user_id_str][date_str] = (
-                request_info['status'], request_info['requested_shift'], request_info.get('requested_by', 'user'))
+                request_info['status'], request_info['requested_shift'], request_info.get('requested_by', 'user'), None) # No timestamp
         elif date_str in self.wunschfrei_data.get(user_id_str, {}):
             del self.wunschfrei_data[user_id_str][date_str]
 
@@ -511,7 +544,12 @@ class UserShiftPlanTab(ttk.Frame):
                 if requested_by == 'admin':
                     display_shift = f"{requested_shift} (A)?"
                 else:
-                    display_shift = 'WF' if requested_shift == 'WF' else f"{requested_shift}?"
+                    if requested_shift == 'WF':
+                        display_shift = 'WF'
+                    elif requested_shift == 'T/N':
+                        display_shift = 'T./N.?'
+                    else:
+                        display_shift = f"{requested_shift}?"
             elif "Akzeptiert" in status or "Genehmigt" in status:
                 if requested_shift == 'WF':
                     display_shift = 'X'
@@ -581,3 +619,4 @@ class UserShiftPlanTab(ttk.Frame):
             self.app._load_holidays_for_year(self.app.current_display_date.year)
             self.app._load_events_for_year(self.app.current_display_date.year)
         self.build_shift_plan_grid(self.app.current_display_date.year, self.app.current_display_date.month)
+
