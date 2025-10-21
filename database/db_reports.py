@@ -2,6 +2,8 @@
 from datetime import datetime
 from .db_core import create_connection, _create_admin_notification
 import mysql.connector
+# NEU: Import für das Abrufen von Benutzernamen in der neuen Log-Funktion
+from database.db_users import get_user_by_id
 
 SEVERITY_ORDER = {
     "Kritischer Fehler": 5,
@@ -361,3 +363,69 @@ def get_all_logs_formatted():
         if conn and conn.is_connected():
             cursor.close()
             conn.close()
+
+
+def get_login_logout_logs_formatted():
+    """
+    Holt alle Login- und Logout-Protokolleinträge, formatiert den Benutzernamen
+    und extrahiert die Sitzungsdauer für Logout-Einträge aus dem Detailfeld.
+    Dies wird für den neuen 'Protokoll'-Reiter verwendet.
+    """
+    conn = create_connection()
+    if conn is None:
+        return []
+
+    logs = []
+    try:
+        cursor = conn.cursor(dictionary=True)
+        # Nur Login- und Logout-Einträge abrufen
+        cursor.execute("""
+                       SELECT id, timestamp, user_id, action_type, details
+                       FROM activity_log
+                       WHERE action_type IN ('USER_LOGIN', 'USER_LOGOUT')
+                       ORDER BY id DESC
+                       """)
+        raw_logs = cursor.fetchall()
+
+        # Sammle alle User-IDs für effizientes Abrufen der Namen
+        user_ids = {log['user_id'] for log in raw_logs if log['user_id']}
+        user_map = {}
+        # Verwende get_user_by_id aus db_users für die Namen
+        for user_id in user_ids:
+            user_data = get_user_by_id(user_id)
+            if user_data:
+                user_map[user_id] = f"{user_data.get('vorname', '')} {user_data.get('name', '')}".strip()
+            else:
+                user_map[user_id] = f"Unbekannt (ID: {user_id})"
+
+        for log in raw_logs:
+            user_name = user_map.get(log['user_id'], 'System') if log['user_id'] else 'System'
+
+            session_duration = ""
+            if log['action_type'] == 'USER_LOGOUT':
+                # Suche im Detail-String nach der Dauer, die nach 'Sitzungsdauer:' steht.
+                details_parts = log['details'].split('Sitzungsdauer:')
+                if len(details_parts) > 1:
+                    duration_and_rest = details_parts[1].strip()
+                    duration_end_index = duration_and_rest.find('.')
+                    if duration_end_index != -1:
+                        session_duration = duration_and_rest[:duration_end_index].strip()
+                    else:
+                        session_duration = duration_and_rest.strip()
+
+            logs.append({
+                'timestamp': log['timestamp'],
+                'user_name': user_name,
+                'action_type': log['action_type'],
+                'details': log['details'],
+                'duration': session_duration
+            })
+
+    except Exception as e:
+        print(f"Fehler beim Abrufen der Protokoll-Logs: {e}")
+    finally:
+        if conn and conn.is_connected():
+            cursor.close()
+            conn.close()
+
+    return logs

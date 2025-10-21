@@ -157,7 +157,13 @@ def save_config_json(key, data_dict):
     try:
         cursor = conn.cursor()
         data_json = json.dumps(data_dict)
-        query = "INSERT INTO config_storage (config_key, config_json) VALUES (%s, %s) ON DUPLICATE KEY UPDATE config_json = VALUES(config_json)"
+        # KORRIGIERTE SQL-SYNTAX
+        query = """
+            INSERT INTO config_storage (config_key, config_json)
+            VALUES (%s, %s)
+            AS new
+            ON DUPLICATE KEY UPDATE config_json = new.config_json
+        """
         cursor.execute(query, (key, data_json))
         conn.commit()
         return True
@@ -251,7 +257,15 @@ def save_special_appointment(date_str, appointment_type, description=""):
     if conn is None: return False
     try:
         cursor = conn.cursor()
-        query = "INSERT INTO special_appointments (appointment_date, appointment_type, description) VALUES (%s, %s, %s) ON DUPLICATE KEY UPDATE description = VALUES(description)"
+        # KORRIGIERTE SQL-SYNTAX
+        query = """
+            INSERT INTO special_appointments (appointment_date, appointment_type, description)
+            VALUES (%s, %s, %s)
+            AS new
+            ON DUPLICATE KEY UPDATE
+                appointment_type = new.appointment_type,
+                description = new.description
+        """
         cursor.execute(query, (date_str, appointment_type, description))
         conn.commit()
         return True

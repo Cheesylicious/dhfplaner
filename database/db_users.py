@@ -1,3 +1,4 @@
+# database/db_users.py
 from database.db_core import create_connection, hash_password, _log_activity, _create_admin_notification
 from datetime import datetime
 import mysql.connector
@@ -16,6 +17,89 @@ def get_user_count():
     except Exception as e:
         print(f"Fehler beim Zählen der Benutzer: {e}")
         return 0
+    finally:
+        if conn and conn.is_connected():
+            cursor.close()
+            conn.close()
+
+
+def log_user_login(user_id, vorname, name):
+    """Protokolliert das Benutzer-Login."""
+    conn = create_connection()
+    if conn is None: return
+
+    timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    user_fullname = f"{vorname} {name}"
+
+    try:
+        cursor = conn.cursor()
+
+        # Log-Eintrag für Login erstellen
+        log_details = f'Benutzer {user_fullname} hat sich angemeldet.'
+        # USER_LOGIN ist der Schlüssel für die spätere Berechnung des Logouts
+        _log_activity(cursor, user_id, 'USER_LOGIN', log_details)
+
+        conn.commit()
+    except Exception as e:
+        print(f"Fehler beim Protokollieren des Logins: {e}")
+        conn.rollback()
+    finally:
+        if conn and conn.is_connected():
+            cursor.close()
+            conn.close()
+
+
+def log_user_logout(user_id, vorname, name):
+    """Protokolliert das Benutzer-Logout und berechnet die Sitzungsdauer basierend auf dem letzten Login-Eintrag."""
+    conn = create_connection()
+    if conn is None: return
+
+    logout_time = datetime.now()
+    user_fullname = f"{vorname} {name}"
+
+    try:
+        cursor = conn.cursor()
+
+        # Hole den letzten erfolgreichen Login-Eintrag vom selben Benutzer (absteigend nach ID)
+        cursor.execute("""
+                       SELECT timestamp
+                       FROM activity_log
+                       WHERE user_id = %s AND action_type = 'USER_LOGIN'
+                       ORDER BY id DESC LIMIT 1
+                       """, (user_id,))
+
+        result = cursor.fetchone()
+
+        if result:
+            login_time_str = result[0]
+            try:
+                login_time = datetime.strptime(login_time_str, '%Y-%m-%d %H:%M:%S')
+                duration = logout_time - login_time
+
+                # Formatierung der Dauer (z.B. 1h 5m 30s)
+                total_seconds = int(duration.total_seconds())
+                hours = total_seconds // 3600
+                minutes = (total_seconds % 3600) // 60
+                seconds = total_seconds % 60
+
+                duration_str = ""
+                if hours > 0: duration_str += f"{hours}h "
+                if minutes > 0: duration_str += f"{minutes}m "
+                duration_str += f"{seconds}s"
+
+                # Die Dauer wird explizit in das Detailfeld geschrieben, um später extrahiert zu werden.
+                log_details = f'Benutzer {user_fullname} hat sich abgemeldet. Sitzungsdauer: {duration_str.strip()}.'
+            except ValueError:
+                log_details = f'Benutzer {user_fullname} hat sich abgemeldet. Sitzungsdauer konnte nicht berechnet werden (Login-Zeitpunkt Fehler).'
+        else:
+            log_details = f'Benutzer {user_fullname} hat sich abgemeldet. Sitzungsdauer konnte nicht berechnet werden (kein Login-Eintrag gefunden).'
+
+        _log_activity(cursor, user_id, 'USER_LOGOUT', log_details)
+
+        conn.commit()
+    except Exception as e:
+        print(f"Fehler beim Protokollieren des Logouts: {e}")
+        conn.rollback()
     finally:
         if conn and conn.is_connected():
             cursor.close()
@@ -136,10 +220,10 @@ def get_ordered_users_for_schedule(include_hidden=False):
         cursor = conn.cursor(dictionary=True)
 
         query = """
-            SELECT u.*, COALESCE(uo.is_visible, 1) as is_visible 
-            FROM users u
-            LEFT JOIN user_order uo ON u.id = uo.user_id
-        """
+                SELECT u.*, COALESCE(uo.is_visible, 1) as is_visible
+                FROM users u
+                         LEFT JOIN user_order uo ON u.id = uo.user_id \
+                """
         if not include_hidden:
             query += " WHERE COALESCE(uo.is_visible, 1) = 1"
 
@@ -168,10 +252,12 @@ def save_user_order(user_order_list):
             user_id = user_info['id']
             is_visible = user_info.get('is_visible', 1)
             query = """
-                INSERT INTO user_order (user_id, sort_order, is_visible)
-                VALUES (%s, %s, %s)
-                ON DUPLICATE KEY UPDATE sort_order = VALUES(sort_order), is_visible = VALUES(is_visible)
-            """
+                    INSERT INTO user_order (user_id, sort_order, is_visible)
+                    VALUES (%s, %s, %s) ON DUPLICATE KEY \
+                    UPDATE sort_order = \
+                    VALUES (sort_order), is_visible = \
+                    VALUES (is_visible) \
+                    """
             cursor.execute(query, (user_id, index, is_visible))
         conn.commit()
         return True, "Reihenfolge erfolgreich gespeichert."
