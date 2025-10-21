@@ -116,6 +116,9 @@ class BugReportsTab(ttk.Frame):
             tag_name = name.replace(" ", "_").replace("(", "").replace(")", "").lower()
             self.tree.tag_configure(tag_name, background=color)
         self.tree.tag_configure("archived", foreground="grey", font=("Segoe UI", 9, "italic"))
+        # Tags für den Separator und erledigte Reports
+        self.tree.tag_configure('separator', background='#E0E0E0', foreground='gray')
+        self.tree.tag_configure('erledigt', foreground='gray')
 
         details_frame = ttk.LabelFrame(main_frame, text="Details und Bearbeitung", padding="10")
         details_frame.grid(row=0, column=1, sticky="nsew")
@@ -162,7 +165,9 @@ class BugReportsTab(ttk.Frame):
                                            command=self.close_bug)
 
     def sort_by_column(self, col, reverse):
-        data = [(self.tree.set(child, col), child) for child in self.tree.get_children('')]
+        # Filtere den Separator aus den zu sortierenden Daten heraus
+        children = [child for child in self.tree.get_children('') if child != 'separator']
+        data = [(self.tree.set(child, col), child) for child in children]
 
         if col == "category":
             data.sort(key=lambda item: SEVERITY_ORDER.get(item[0], 0), reverse=reverse)
@@ -171,24 +176,34 @@ class BugReportsTab(ttk.Frame):
 
         for index, (val, child) in enumerate(data):
             self.tree.move(child, '', index)
+
+        # Sorge dafür, dass der Separator (falls vorhanden) an der richtigen Stelle bleibt
+        self.refresh_data()
+
         self.tree.heading(col, command=lambda: self.sort_by_column(col, not reverse))
 
     def refresh_data(self, initial_load=False):
         selected_ids = self.tree.selection()
         scroll_pos = self.tree.yview()
+
         for item in self.tree.get_children():
             self.tree.delete(item)
         self.reports_data.clear()
 
-        reports = get_all_bug_reports()
+        all_reports = get_all_bug_reports()
         show_archived = self.show_archived_var.get()
 
-        for report in reports:
-            report_id = report['id']
-            self.reports_data[report_id] = report
-            if not show_archived and report.get('archived'):
-                continue
+        # Filtere zuerst archivierte Reports basierend auf der Checkbox
+        visible_reports = [r for r in all_reports if show_archived or not r.get('archived')]
 
+        self.reports_data = {r['id']: r for r in all_reports}
+
+        # Teile die sichtbaren Reports auf
+        active_reports = [r for r in visible_reports if r.get('status') != 'Erledigt']
+        completed_reports = [r for r in visible_reports if r.get('status') == 'Erledigt']
+
+        # Hilfsfunktion zum Einfügen eines Reports
+        def insert_report(report):
             user = f"{report.get('vorname', '')} {report.get('name', '')}".strip() or "Unbekannt"
             try:
                 ts = datetime.strptime(report['timestamp'], '%Y-%m-%d %H:%M:%S').strftime('%d.%m.%Y %H:%M')
@@ -201,6 +216,9 @@ class BugReportsTab(ttk.Frame):
 
             if report.get('archived'):
                 tags.append('archived')
+
+            if status == 'Erledigt':
+                tags.append('erledigt')
             else:
                 status_tag = status.replace(" ", "_").replace("(", "").replace(")", "").lower() if status else ""
                 if status and status in self.category_colors:
@@ -209,7 +227,21 @@ class BugReportsTab(ttk.Frame):
                     tags.append(category.replace(" ", "_").lower())
 
             values = (report.get('category', 'N/A'), user, ts, report['title'], status)
-            self.tree.insert("", tk.END, iid=report_id, values=values, tags=tags)
+            self.tree.insert("", tk.END, iid=report['id'], values=values, tags=tags)
+
+        # Füge aktive Reports ein
+        active_reports.sort(key=lambda r: SEVERITY_ORDER.get(r.get('category'), 0), reverse=True)
+        for report in active_reports:
+            insert_report(report)
+
+        # Füge Separator und erledigte Reports ein
+        if active_reports and completed_reports:
+            self.tree.insert("", tk.END, iid="separator", values=("", "--- ERLEDIGTE MELDUNGEN ---", "", "", ""),
+                             tags=('separator',))
+
+        completed_reports.sort(key=lambda r: r['timestamp'], reverse=True)
+        for report in completed_reports:
+            insert_report(report)
 
         if selected_ids:
             valid_ids = [sid for sid in selected_ids if self.tree.exists(sid)]
@@ -226,6 +258,12 @@ class BugReportsTab(ttk.Frame):
 
     def on_report_selected(self, event):
         selection = self.tree.selection()
+
+        # Klick auf Separator ignorieren
+        if "separator" in selection:
+            self.clear_details()
+            return
+
         self.feedback_response_bar.grid_remove()
         self.re_request_feedback_button.pack_forget()
         self.close_bug_button.pack_forget()
@@ -362,7 +400,12 @@ class BugReportsTab(ttk.Frame):
         if not selected_ids_str:
             messagebox.showwarning("Keine Auswahl", "Bitte wählen Sie die zu löschenden Reports aus.", parent=self)
             return
-        ids_to_delete = [int(id_str) for id_str in selected_ids_str]
+
+        # Filtere den Separator aus der Auswahl
+        ids_to_delete = [int(id_str) for id_str in selected_ids_str if id_str != "separator"]
+        if not ids_to_delete:
+            return
+
         msg = f"Möchten Sie die {len(ids_to_delete)} ausgewählten Bug-Report(s) wirklich endgültig löschen?"
         if messagebox.askyesno("Löschen bestätigen", msg, icon='warning', parent=self):
             success, message = delete_bug_reports(ids_to_delete)

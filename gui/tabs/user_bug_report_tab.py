@@ -50,6 +50,10 @@ class UserBugReportTab(ttk.Frame):
             tag_name = name.replace(" ", "_").lower()
             self.tree.tag_configure(tag_name, background=color)
 
+        # Neue Tags für den Separator und erledigte Meldungen
+        self.tree.tag_configure('separator', background='#E0E0E0', foreground='gray')
+        self.tree.tag_configure('erledigt_style', foreground='gray')
+
         self.tree.bind("<<TreeviewSelect>>", self.on_report_selected)
 
         self.bottom_frame = ttk.Frame(main_frame)
@@ -93,29 +97,53 @@ class UserBugReportTab(ttk.Frame):
 
         self.reports = get_visible_bug_reports()
 
-        for report in self.reports:
+        # Reports aufteilen in aktive und erledigte
+        active_reports = [r for r in self.reports if r.get('status') != 'Erledigt']
+        completed_reports = [r for r in self.reports if r.get('status') == 'Erledigt']
+
+        # Aktive Reports sortieren (neueste zuerst)
+        active_reports.sort(key=lambda r: r['timestamp'], reverse=True)
+        # Erledigte Reports sortieren (neueste zuerst)
+        completed_reports.sort(key=lambda r: r['timestamp'], reverse=True)
+
+        # Hilfsfunktion, um einen Report in die Treeview einzufügen
+        def insert_report(report, is_completed=False):
             try:
                 ts = datetime.strptime(report['timestamp'], '%Y-%m-%d %H:%M:%S').strftime('%d.%m.%Y %H:%M')
             except (ValueError, TypeError):
                 ts = report['timestamp']
 
-            tag_to_apply = ''
+            tags = []
             status = report.get('status')
             category = report.get('category')
 
-            if status == 'Warte auf Rückmeldung':
-                tag_to_apply = 'warte_auf_rückmeldung'
-            elif status == 'Erledigt':
-                tag_to_apply = 'erledigt'
-            elif category and category in self.category_colors:
-                tag_to_apply = category.replace(" ", "_").lower()
+            if is_completed:
+                tags.append('erledigt_style')
+            else:
+                if status == 'Warte auf Rückmeldung':
+                    tags.append('warte_auf_rückmeldung')
+                elif category and category in self.category_colors:
+                    tags.append(category.replace(" ", "_").lower())
 
             values = (category or 'N/A', ts, report['title'], status)
-            self.tree.insert("", "end", iid=report['id'], values=values, tags=(tag_to_apply,))
+            self.tree.insert("", "end", iid=report['id'], values=values, tags=tags)
+
+        # Aktive Reports einfügen
+        for report in active_reports:
+            insert_report(report, is_completed=False)
+
+        # Separator einfügen, wenn beide Listen gefüllt sind
+        if active_reports and completed_reports:
+            self.tree.insert("", "end", iid="separator", values=("", "--- ERLEDIGTE MELDUNGEN ---", "", ""),
+                             tags=('separator',))
+
+        # Erledigte Reports einfügen
+        for report in completed_reports:
+            insert_report(report, is_completed=True)
 
     def on_report_selected(self, event):
         selection = self.tree.selection()
-        if not selection:
+        if not selection or selection[0] == "separator":
             self.clear_details()
             return
 
@@ -166,6 +194,9 @@ class UserBugReportTab(ttk.Frame):
         self.details_text.config(state="normal")
         self.details_text.delete("1.0", tk.END)
         self.details_text.config(state="disabled")
+        # Auswahl in der Treeview aufheben
+        if self.tree.selection():
+            self.tree.selection_remove(self.tree.selection())
 
     def send_feedback(self, is_fixed):
         if not self.selected_report_id: return
