@@ -6,30 +6,66 @@ block_cipher = None
 # Da die Datenbank-Zugangsdaten hartkodiert sind und Tkinter jetzt korrekt funktioniert,
 # ist diese Liste für Deine Assets vorgesehen (z.B. Icons).
 added_files = [
-    # Hier nur zusätzliche Assets einfügen, falls vorhanden.
+    # Kopiere das gesamte 'gui'-Verzeichnis in den 'gui'-Unterordner des Bundles.
+    ('gui', 'gui'),
+    # Kopiere das gesamte 'database'-Verzeichnis in den 'database'-Unterordner des Bundles.
+    ('database', 'database'),
+
+    # WICHTIG: main.py MUSS wieder extern sein.
+    ('main.py', '.'),
+
+    # Die Datenbank-Datei planer.db in den 'database' Ordner kopieren.
+    ('planer.db', 'database'),
+
 ]
 
 # --- ENDE DER DATEN-DEFINITION ---
 
+# ERSTELLEN DER BINARIES-LISTE MIT PFADEN (KOMPLETT AUTOMATISIERT)
+# ------------------------------------------------------------------
+# Die Liste ist LEER. PyInstaller findet die DLLs aus der Conda-Umgebung selbst.
+binaries_to_add = []
+
+# ------------------------------------------------------------------
+
+
 a = Analysis(
-    ['main.py'],
-    # Passt den Pfad an Deine aktuelle Umgebung an:
-    pathex=['E:\\Programme\\Python313\\DHF Planer'],
-    binaries=[],
+    # KORREKTUR: Der Bootloader ist der einzige Code, der in die EXE kommt.
+    ['boot_loader.py'],
+
+    # Pathex ist der Pfad zum Projektordner
+    pathex=['C:\\Python313\\Projekte\\DHF Planer'],
+    # Leere Binärliste
+    binaries=binaries_to_add,
+
     datas=added_files,
 
-    # Versteckte Imports sind jetzt komplett und beheben das leere Fenster
+    # Versteckte Imports (alle Fixes beibehalten)
     hiddenimports=[
         'tkinter',
+        'tkinter.ttk',
+        'tkinter.messagebox',
+        'tkinter.filedialog',
+        'tkinter.simpledialog',
+        'tkinter.colorchooser',
+        'tkinter.scrolledtext',
+        'tkinter.tix',
+        'tkcalendar',
+        'calendar',
+        'email.mime.text',
         'babel.numbers',
         'mysql.connector',
-        'holidays.countries', # <-- DIESER IMPORT LÖST DEN FEHLER
+        'holidays.countries',
+        'mysql.connector.locales',
+        'mysql.connector.abstracts',
+        'mysql.connector.plugins.mysql_native_password',
     ],
 
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=[],
+    # WICHTIG: Die Pakete 'database' und 'gui' MÜSSEN EXCLUDED werden!
+    excludes=['database', 'gui'],
     win_no_prefer_redirects=False,
     win_private_assemblies=False,
     cipher=block_cipher,
@@ -52,7 +88,9 @@ exe = EXE(
     upx=True,
     upx_exclude=[],
     runtime_tmpdir=None,
-    console=False, # <-- Für eine GUI-Anwendung (keine Konsole sichtbar)
+
+    # WICHTIG: Konsole ANLASSEN, um den Fehler beim Laden der externen main.py zu sehen.
+    console=True,
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch=None,

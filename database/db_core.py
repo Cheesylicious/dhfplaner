@@ -9,22 +9,19 @@ from collections import defaultdict
 # ==============================================================================
 # 💥 HARTKODIERTE DATENBANK-KONFIGURATION (WICHTIG!) 💥
 # ==============================================================================
-# Diese Konfiguration wird jetzt für den Connection Pool verwendet.
 DB_CONFIG = {
     "host": "100.118.148.97",
     "user": "planer_user",
     "password": "PlanerNeu-2025#",
     "database": "planer_db",
-    "raise_on_warnings": True # Hinzugefügt für bessere Fehlerbehandlung im Pool
+    "raise_on_warnings": True
 }
 # ==============================================================================
 
-# GLOBALES CONNECTION POOL OBJEKT
-# Dieses Objekt wird nur einmal erstellt, wenn das Programm startet.
 try:
     print("Versuche, den Datenbank-Connection-Pool zu erstellen...")
     db_pool = pooling.MySQLConnectionPool(pool_name="dhf_pool",
-                                          pool_size=5,  # 5 gleichzeitige Verbindungen
+                                          pool_size=5,
                                           **DB_CONFIG)
     print("✅ Datenbank-Connection-Pool erfolgreich erstellt.")
 except mysql.connector.Error as err:
@@ -33,39 +30,30 @@ except mysql.connector.Error as err:
 
 
 def create_connection():
-    """
-    Holt sich eine Verbindung aus dem globalen Pool.
-    Gibt 'None' zurück, wenn der Pool nicht initialisiert werden konnte.
-    """
     if db_pool is None:
         print("❌ Fehler: Der Connection-Pool ist nicht verfügbar.")
         return None
     try:
-        # Holt eine freie Verbindung aus dem Pool.
         return db_pool.get_connection()
     except mysql.connector.Error as err:
         print(f"❌ Fehler beim Abrufen einer Verbindung aus dem Pool: {err}")
         return None
 
+
 def close_pool():
-    """Informiert, dass der Pool beim Beenden verwaltet wird."""
-    # Bei mysql.connector.pooling ist kein expliziter close()-Aufruf für den Pool vorgesehen.
-    # Die Verbindungen werden bei Beendigung des Skripts automatisch geschlossen.
     print("Der Datenbank-Connection-Pool wird bei Programmende verwaltet.")
 
 
-# Die Rollen-Hierarchie bleibt unverändert
+# --- Wichtige Konstanten ---
 ROLE_HIERARCHY = {"Gast": 1, "Benutzer": 2, "Admin": 3, "SuperAdmin": 4}
+MIN_STAFFING_RULES_CONFIG_KEY = "MIN_STAFFING_RULES"
 
 
 def hash_password(password):
-    """Hashes the password using SHA256."""
     return hashlib.sha256(password.encode('utf-8')).hexdigest()
 
-# Die Funktion get_db_config wird nicht mehr benötigt, da DB_CONFIG direkt verwendet wird.
 
 def _add_column_if_not_exists(cursor, table_name, column_name, column_type):
-    """Fügt eine Spalte zu einer Tabelle hinzu, falls sie nicht existiert (MySQL-Version)."""
     db_name = DB_CONFIG.get('database')
     cursor.execute(f"""
         SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS
@@ -77,14 +65,10 @@ def _add_column_if_not_exists(cursor, table_name, column_name, column_type):
 
 
 def initialize_db():
-    """
-    Initialisiert die Datenbank: Erstellt die DB (falls nötig) und dann die Tabellen.
-    """
     config_init = DB_CONFIG.copy()
     db_name = config_init.pop('database')
 
     try:
-        # Temporäre Verbindung ohne Pool nur für die DB-Erstellung
         conn_server = mysql.connector.connect(**config_init)
         cursor_server = conn_server.cursor()
         cursor_server.execute(f"CREATE DATABASE IF NOT EXISTS `{db_name}`")
@@ -102,24 +86,43 @@ def initialize_db():
 
     try:
         cursor = conn.cursor(dictionary=True)
-        # --- Alle CREATE TABLE und ALTER TABLE Anweisungen bleiben exakt wie in deiner Version ---
-        cursor.execute("CREATE TABLE IF NOT EXISTS config_storage (config_key VARCHAR(255) PRIMARY KEY, config_json TEXT NOT NULL);")
-        cursor.execute("CREATE TABLE IF NOT EXISTS shift_frequency (shift_abbrev VARCHAR(255) PRIMARY KEY, count INT NOT NULL DEFAULT 0);")
-        cursor.execute("CREATE TABLE IF NOT EXISTS special_appointments (id INT AUTO_INCREMENT PRIMARY KEY, appointment_date TEXT NOT NULL, appointment_type VARCHAR(255) NOT NULL, description TEXT, UNIQUE(appointment_date(255), appointment_type));")
-        cursor.execute("CREATE TABLE IF NOT EXISTS users (id INT AUTO_INCREMENT PRIMARY KEY, password_hash TEXT NOT NULL, role TEXT NOT NULL, vorname TEXT NOT NULL, name TEXT NOT NULL, geburtstag TEXT, telefon TEXT, diensthund TEXT, urlaub_gesamt INT DEFAULT 30, urlaub_rest INT DEFAULT 30, entry_date TEXT, has_seen_tutorial INT DEFAULT 0, password_changed INT DEFAULT 0, last_ausbildung TEXT, last_schiessen TEXT, UNIQUE (vorname(255), name(255)));")
-        cursor.execute("CREATE TABLE IF NOT EXISTS vacation_requests (id INT AUTO_INCREMENT PRIMARY KEY, user_id INT NOT NULL, start_date TEXT NOT NULL, end_date TEXT NOT NULL, status TEXT NOT NULL, request_date TEXT NOT NULL, archived INT DEFAULT 0, user_notified INT DEFAULT 1, FOREIGN KEY (user_id) REFERENCES users(id));")
-        cursor.execute("CREATE TABLE IF NOT EXISTS wunschfrei_requests (id INT AUTO_INCREMENT PRIMARY KEY, user_id INT NOT NULL, request_date TEXT NOT NULL, status VARCHAR(255) NOT NULL DEFAULT 'Ausstehend', notified INT DEFAULT 0, rejection_reason TEXT, requested_shift TEXT, requested_by VARCHAR(255) DEFAULT 'user', UNIQUE(user_id, request_date(255)), FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE);")
-        cursor.execute("CREATE TABLE IF NOT EXISTS dogs (id INT AUTO_INCREMENT PRIMARY KEY, name VARCHAR(255) UNIQUE NOT NULL, breed TEXT, birth_date TEXT, chip_number VARCHAR(255) UNIQUE, acquisition_date TEXT, departure_date TEXT, last_dpo_date TEXT, vaccination_info TEXT);")
-        cursor.execute("CREATE TABLE IF NOT EXISTS shift_types (id INT AUTO_INCREMENT PRIMARY KEY, name TEXT NOT NULL, abbreviation VARCHAR(255) UNIQUE NOT NULL, hours INT NOT NULL, description TEXT, color TEXT, start_time TEXT, end_time TEXT);")
-        cursor.execute("CREATE TABLE IF NOT EXISTS shift_schedule (id INT AUTO_INCREMENT PRIMARY KEY, user_id INT NOT NULL, shift_date TEXT NOT NULL, shift_abbrev VARCHAR(255) NOT NULL, UNIQUE(user_id, shift_date(255)), FOREIGN KEY (user_id) REFERENCES users(id), FOREIGN KEY (shift_abbrev) REFERENCES shift_types(abbreviation));")
-        cursor.execute("CREATE TABLE IF NOT EXISTS user_order (id INT AUTO_INCREMENT PRIMARY KEY, user_id INT NOT NULL UNIQUE, sort_order INT NOT NULL, is_visible INT DEFAULT 1, FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE);")
-        cursor.execute("CREATE TABLE IF NOT EXISTS shift_order (id INT AUTO_INCREMENT PRIMARY KEY, abbreviation VARCHAR(255) NOT NULL UNIQUE, sort_order INT NOT NULL, is_visible INT DEFAULT 1, check_for_understaffing INT DEFAULT 0);")
-        cursor.execute("CREATE TABLE IF NOT EXISTS activity_log (id INT AUTO_INCREMENT PRIMARY KEY, timestamp TEXT NOT NULL, user_id INT, action_type TEXT NOT NULL, details TEXT, FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE SET NULL);")
-        cursor.execute("CREATE TABLE IF NOT EXISTS admin_notifications (id INT AUTO_INCREMENT PRIMARY KEY, message TEXT NOT NULL, is_read INT NOT NULL DEFAULT 0, timestamp TEXT NOT NULL);")
-        cursor.execute("CREATE TABLE IF NOT EXISTS bug_reports (id INT AUTO_INCREMENT PRIMARY KEY, user_id INT NOT NULL, title TEXT NOT NULL, description TEXT NOT NULL, timestamp TEXT NOT NULL, status VARCHAR(255) NOT NULL DEFAULT 'Neu', is_read INT NOT NULL DEFAULT 0, user_notified INT NOT NULL DEFAULT 1, archived INT NOT NULL DEFAULT 0, admin_notes TEXT, FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE);")
-        cursor.execute("CREATE TABLE IF NOT EXISTS password_reset_requests (id INT AUTO_INCREMENT PRIMARY KEY, user_id INT NOT NULL, timestamp TEXT NOT NULL, status VARCHAR(255) NOT NULL DEFAULT 'Ausstehend', FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE);")
-        cursor.execute("CREATE TABLE IF NOT EXISTS locked_months (year INT NOT NULL, month INT NOT NULL, PRIMARY KEY (year, month));")
+        # --- Tabellen erstellen ---
+        cursor.execute(
+            "CREATE TABLE IF NOT EXISTS config_storage (config_key VARCHAR(255) PRIMARY KEY, config_json TEXT NOT NULL);")
+        cursor.execute(
+            "CREATE TABLE IF NOT EXISTS shift_frequency (shift_abbrev VARCHAR(255) PRIMARY KEY, count INT NOT NULL DEFAULT 0);")
+        cursor.execute(
+            "CREATE TABLE IF NOT EXISTS special_appointments (id INT AUTO_INCREMENT PRIMARY KEY, appointment_date TEXT NOT NULL, appointment_type VARCHAR(255) NOT NULL, description TEXT, UNIQUE(appointment_date(255), appointment_type));")
+        cursor.execute(
+            "CREATE TABLE IF NOT EXISTS users (id INT AUTO_INCREMENT PRIMARY KEY, password_hash TEXT NOT NULL, role TEXT NOT NULL, vorname TEXT NOT NULL, name TEXT NOT NULL, geburtstag TEXT, telefon TEXT, diensthund TEXT, urlaub_gesamt INT DEFAULT 30, urlaub_rest INT DEFAULT 30, entry_date TEXT, has_seen_tutorial INT DEFAULT 0, password_changed INT DEFAULT 0, last_ausbildung TEXT, last_schiessen TEXT, UNIQUE (vorname(255), name(255)));")
+        cursor.execute(
+            "CREATE TABLE IF NOT EXISTS vacation_requests (id INT AUTO_INCREMENT PRIMARY KEY, user_id INT NOT NULL, start_date TEXT NOT NULL, end_date TEXT NOT NULL, status TEXT NOT NULL, request_date TEXT NOT NULL, archived INT DEFAULT 0, user_notified INT DEFAULT 1, FOREIGN KEY (user_id) REFERENCES users(id));")
+        cursor.execute(
+            "CREATE TABLE IF NOT EXISTS wunschfrei_requests (id INT AUTO_INCREMENT PRIMARY KEY, user_id INT NOT NULL, request_date TEXT NOT NULL, status VARCHAR(255) NOT NULL DEFAULT 'Ausstehend', notified INT DEFAULT 0, rejection_reason TEXT, requested_shift TEXT, requested_by VARCHAR(255) DEFAULT 'user', UNIQUE(user_id, request_date(255)), FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE);")
+        cursor.execute(
+            "CREATE TABLE IF NOT EXISTS dogs (id INT AUTO_INCREMENT PRIMARY KEY, name VARCHAR(255) UNIQUE NOT NULL, breed TEXT, birth_date TEXT, chip_number VARCHAR(255) UNIQUE, acquisition_date TEXT, departure_date TEXT, last_dpo_date TEXT, vaccination_info TEXT);")
+        cursor.execute(
+            "CREATE TABLE IF NOT EXISTS shift_types (id INT AUTO_INCREMENT PRIMARY KEY, name TEXT NOT NULL, abbreviation VARCHAR(255) UNIQUE NOT NULL, hours INT NOT NULL, description TEXT, color TEXT, start_time TEXT, end_time TEXT);")
+        cursor.execute(
+            "CREATE TABLE IF NOT EXISTS shift_schedule (id INT AUTO_INCREMENT PRIMARY KEY, user_id INT NOT NULL, shift_date TEXT NOT NULL, shift_abbrev VARCHAR(255) NOT NULL, UNIQUE(user_id, shift_date(255)), FOREIGN KEY (user_id) REFERENCES users(id), FOREIGN KEY (shift_abbrev) REFERENCES shift_types(abbreviation));")
+        cursor.execute(
+            "CREATE TABLE IF NOT EXISTS user_order (id INT AUTO_INCREMENT PRIMARY KEY, user_id INT NOT NULL UNIQUE, sort_order INT NOT NULL, is_visible INT DEFAULT 1, FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE);")
+        cursor.execute(
+            "CREATE TABLE IF NOT EXISTS shift_order (id INT AUTO_INCREMENT PRIMARY KEY, abbreviation VARCHAR(255) NOT NULL UNIQUE, sort_order INT NOT NULL, is_visible INT DEFAULT 1, check_for_understaffing INT DEFAULT 0);")
+        cursor.execute(
+            "CREATE TABLE IF NOT EXISTS activity_log (id INT AUTO_INCREMENT PRIMARY KEY, timestamp TEXT NOT NULL, user_id INT, action_type TEXT NOT NULL, details TEXT, FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE SET NULL);")
+        cursor.execute(
+            "CREATE TABLE IF NOT EXISTS admin_notifications (id INT AUTO_INCREMENT PRIMARY KEY, message TEXT NOT NULL, is_read INT NOT NULL DEFAULT 0, timestamp TEXT NOT NULL);")
+        cursor.execute(
+            "CREATE TABLE IF NOT EXISTS bug_reports (id INT AUTO_INCREMENT PRIMARY KEY, user_id INT NOT NULL, title TEXT NOT NULL, description TEXT NOT NULL, timestamp TEXT NOT NULL, status VARCHAR(255) NOT NULL DEFAULT 'Neu', is_read INT NOT NULL DEFAULT 0, user_notified INT NOT NULL DEFAULT 1, archived INT NOT NULL DEFAULT 0, admin_notes TEXT, FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE);")
+        cursor.execute(
+            "CREATE TABLE IF NOT EXISTS password_reset_requests (id INT AUTO_INCREMENT PRIMARY KEY, user_id INT NOT NULL, timestamp TEXT NOT NULL, status VARCHAR(255) NOT NULL DEFAULT 'Ausstehend', FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE);")
+        cursor.execute(
+            "CREATE TABLE IF NOT EXISTS locked_months (year INT NOT NULL, month INT NOT NULL, PRIMARY KEY (year, month));")
+        cursor.execute(
+            "CREATE TABLE IF NOT EXISTS chat_messages (id INT AUTO_INCREMENT PRIMARY KEY, sender_id INT NOT NULL, recipient_id INT NOT NULL, message TEXT NOT NULL, timestamp DATETIME DEFAULT CURRENT_TIMESTAMP, is_read INT DEFAULT 0, FOREIGN KEY (sender_id) REFERENCES users(id) ON DELETE CASCADE, FOREIGN KEY (recipient_id) REFERENCES users(id) ON DELETE CASCADE);")
 
+        # --- Spalten hinzufügen ---
         _add_column_if_not_exists(cursor, "users", "entry_date", "TEXT")
         _add_column_if_not_exists(cursor, "shift_types", "color", "TEXT DEFAULT '#FFFFFF'")
         _add_column_if_not_exists(cursor, "user_order", "is_visible", "INT DEFAULT 1")
@@ -140,6 +143,7 @@ def initialize_db():
         _add_column_if_not_exists(cursor, "users", "password_changed", "INT DEFAULT 0")
         _add_column_if_not_exists(cursor, "users", "last_ausbildung", "TEXT")
         _add_column_if_not_exists(cursor, "users", "last_schiessen", "TEXT")
+        _add_column_if_not_exists(cursor, "users", "last_seen", "DATETIME")
 
         conn.commit()
         print("Datenbank und Tabellen erfolgreich initialisiert/überprüft.")
@@ -157,13 +161,7 @@ def save_config_json(key, data_dict):
     try:
         cursor = conn.cursor()
         data_json = json.dumps(data_dict)
-        # KORRIGIERTE SQL-SYNTAX
-        query = """
-            INSERT INTO config_storage (config_key, config_json)
-            VALUES (%s, %s)
-            AS new
-            ON DUPLICATE KEY UPDATE config_json = new.config_json
-        """
+        query = "INSERT INTO config_storage (config_key, config_json) VALUES (%s, %s) ON DUPLICATE KEY UPDATE config_json = VALUES(config_json)"
         cursor.execute(query, (key, data_json))
         conn.commit()
         return True
@@ -180,11 +178,11 @@ def load_config_json(key):
     conn = create_connection()
     if conn is None: return None
     try:
-        cursor = conn.cursor()
+        cursor = conn.cursor(dictionary=True)
         cursor.execute("SELECT config_json FROM config_storage WHERE config_key = %s", (key,))
         result = cursor.fetchone()
-        if result and result[0]:
-            return json.loads(result[0])
+        if result and result['config_json']:
+            return json.loads(result['config_json'])
         return None
     except mysql.connector.Error as e:
         print(f"DB Error on load_config_json ({key}): {e}")
@@ -257,15 +255,7 @@ def save_special_appointment(date_str, appointment_type, description=""):
     if conn is None: return False
     try:
         cursor = conn.cursor()
-        # KORRIGIERTE SQL-SYNTAX
-        query = """
-            INSERT INTO special_appointments (appointment_date, appointment_type, description)
-            VALUES (%s, %s, %s)
-            AS new
-            ON DUPLICATE KEY UPDATE
-                appointment_type = new.appointment_type,
-                description = new.description
-        """
+        query = "INSERT INTO special_appointments (appointment_date, appointment_type, description) VALUES (%s, %s, %s) ON DUPLICATE KEY UPDATE appointment_type=VALUES(appointment_type), description=VALUES(description)"
         cursor.execute(query, (date_str, appointment_type, description))
         conn.commit()
         return True
@@ -313,7 +303,6 @@ def get_special_appointments():
 
 
 def _log_activity(cursor, user_id, action_type, details):
-    """Logs an activity to the activity_log table."""
     timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     cursor.execute(
         "INSERT INTO activity_log (timestamp, user_id, action_type, details) VALUES (%s, %s, %s, %s)",
@@ -322,9 +311,85 @@ def _log_activity(cursor, user_id, action_type, details):
 
 
 def _create_admin_notification(cursor, message):
-    """Creates a notification for the admin."""
     timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     cursor.execute(
         "INSERT INTO admin_notifications (message, timestamp) VALUES (%s, %s)",
         (message, timestamp)
     )
+
+
+def run_db_update_v1():
+    """
+    Führt ein einmaliges Datenbank-Update durch, um die 'last_seen'-Spalte und die 'chat_messages'-Tabelle hinzuzufügen.
+    Gibt (True, "Meldung") bei Erfolg oder (False, "Fehlermeldung") bei einem Fehler zurück.
+    """
+    conn = create_connection()
+    if not conn:
+        return False, "Keine Datenbankverbindung."
+
+    try:
+        cursor = conn.cursor()
+
+        # --- Schritt 1: Spalte 'last_seen' hinzufügen ---
+        _add_column_if_not_exists(cursor, "users", "last_seen", "DATETIME")
+        conn.commit()
+
+        # --- Schritt 2: Tabelle 'chat_messages' erstellen ---
+        print("Überprüfe/Erstelle Tabelle 'chat_messages'...")
+        cursor.execute("""
+                       CREATE TABLE IF NOT EXISTS chat_messages
+                       (
+                           id
+                           INT
+                           AUTO_INCREMENT
+                           PRIMARY
+                           KEY,
+                           sender_id
+                           INT
+                           NOT
+                           NULL,
+                           recipient_id
+                           INT
+                           NOT
+                           NULL,
+                           message
+                           TEXT
+                           NOT
+                           NULL,
+                           timestamp
+                           DATETIME
+                           DEFAULT
+                           CURRENT_TIMESTAMP,
+                           is_read
+                           INT
+                           DEFAULT
+                           0,
+                           FOREIGN
+                           KEY
+                       (
+                           sender_id
+                       ) REFERENCES users
+                       (
+                           id
+                       ) ON DELETE CASCADE,
+                           FOREIGN KEY
+                       (
+                           recipient_id
+                       ) REFERENCES users
+                       (
+                           id
+                       )
+                         ON DELETE CASCADE
+                           );
+                       """)
+        conn.commit()
+        print("Tabelle 'chat_messages' erfolgreich überprüft/erstellt.")
+
+        return True, "Datenbank-Update für Chat-Funktion erfolgreich ausgeführt! Bitte starte die Anwendung neu."
+
+    except mysql.connector.Error as e:
+        return False, f"Ein Fehler ist aufgetreten: {e}"
+    finally:
+        if conn and conn.is_connected():
+            cursor.close()
+            conn.close()
