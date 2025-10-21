@@ -11,12 +11,12 @@ from database.db_core import (
     save_config_json,
     load_shift_frequency,
     save_shift_frequency,
-    reset_shift_frequency
+    reset_shift_frequency,
+    MIN_STAFFING_RULES_CONFIG_KEY,
+    run_db_update_v1
 )
-
-# NEU: Import der Logout-Funktion
+from database.db_chat import get_senders_with_unread_messages
 from database.db_users import log_user_logout
-
 from .tabs.shift_plan_tab import ShiftPlanTab
 from .tabs.user_management_tab import UserManagementTab
 from .tabs.dog_management_tab import DogManagementTab
@@ -28,8 +28,8 @@ from .tabs.vacation_requests_tab import VacationRequestsTab
 from .tabs.request_lock_tab import RequestLockTab
 from .tabs.user_tab_settings_tab import UserTabSettingsTab
 from .tabs.participation_tab import ParticipationTab
-# NEU: Import des neuen Protokoll-Reiters
 from .tabs.protokoll_tab import ProtokollTab
+from .tabs.chat_tab import ChatTab
 from .dialogs.user_order_window import UserOrderWindow
 from .dialogs.shift_order_window import ShiftOrderWindow
 from .dialogs.min_staffing_window import MinStaffingWindow
@@ -58,19 +58,7 @@ class MainAdminWindow(tk.Toplevel):
         self.title(f"Planer - Angemeldet als {full_name} (Admin)")
         self.attributes('-fullscreen', True)
 
-        self.style = ttk.Style(self)
-        try:
-            self.style.theme_use('clam')
-        except tk.TclError:
-            pass
-        self.style.configure('Bug.TButton', background='dodgerblue', foreground='white', font=('Segoe UI', 9, 'bold'))
-        self.style.map('Bug.TButton', background=[('active', '#0056b3')], foreground=[('active', 'white')])
-        self.style.configure('Logout.TButton', background='gold', foreground='black', font=('Segoe UI', 10, 'bold'),
-                             padding=6)
-        self.style.map('Logout.TButton', background=[('active', 'goldenrod')], foreground=[('active', 'black')])
-        self.style.configure('Notification.TButton', font=('Segoe UI', 10, 'bold'), padding=(10, 5))
-        self.style.map('Notification.TButton', background=[('active', '#e0e0e0')], relief=[('pressed', 'sunken')])
-        self.style.configure('Settings.TMenubutton', font=('Segoe UI', 10, 'bold'), padding=(10, 5))
+        self.setup_styles()
 
         self.shift_types_data = {}
         self.staffing_rules = {}
@@ -87,25 +75,41 @@ class MainAdminWindow(tk.Toplevel):
         self.header_frame = ttk.Frame(self, padding=(10, 5, 10, 0))
         self.header_frame.pack(fill='x')
         self.setup_header()
+
+        self.chat_notification_frame = tk.Frame(self, bg='tomato', cursor="hand2")
+
         self.notebook = ttk.Notebook(self)
         self.notebook.pack(expand=True, fill='both', padx=10, pady=10)
         self.tab_frames = {}
         self.setup_tabs()
         self.setup_footer()
+
         self.protocol("WM_DELETE_WINDOW", self.on_close)
         self.after(1000, self.check_for_updates)
+        self.after(2000, self.check_chat_notifications)
+
+    def setup_styles(self):
+        self.style = ttk.Style(self)
+        try:
+            self.style.theme_use('clam')
+        except tk.TclError:
+            pass
+        self.style.configure('Bug.TButton', background='dodgerblue', foreground='white', font=('Segoe UI', 9, 'bold'))
+        self.style.map('Bug.TButton', background=[('active', '#0056b3')], foreground=[('active', 'white')])
+        self.style.configure('Logout.TButton', background='gold', foreground='black', font=('Segoe UI', 10, 'bold'),
+                             padding=6)
+        self.style.map('Logout.TButton', background=[('active', 'goldenrod')], foreground=[('active', 'black')])
+        self.style.configure('Notification.TButton', font=('Segoe UI', 10, 'bold'), padding=(10, 5))
+        self.style.map('Notification.TButton', background=[('active', '#e0e0e0')], relief=[('pressed', 'sunken')])
+        self.style.configure('Settings.TMenubutton', font=('Segoe UI', 10, 'bold'), padding=(10, 5))
 
     def on_close(self):
-        """Wird aufgerufen, wenn das Fenster geschlossen wird. Speichert Schichthäufigkeit."""
         self.save_shift_frequency()
-        # Protokolliere Logout beim Schließen des Fensters
         log_user_logout(self.user_data['id'], self.user_data['vorname'], self.user_data['name'])
         self.app.on_app_close()
 
     def logout(self):
-        """Zerstört das Hauptfenster, um zum Login zurückzukehren. Speichert Schichthäufigkeit."""
         self.save_shift_frequency()
-        # Protokolliere Logout beim Abmelden
         log_user_logout(self.user_data['id'], self.user_data['vorname'], self.user_data['name'])
         self.app.on_logout(self)
 
@@ -130,9 +134,22 @@ class MainAdminWindow(tk.Toplevel):
         settings_menu.add_command(label="Antragssperre", command=self.open_request_lock_window)
         settings_menu.add_command(label="Benutzer-Reiter sperren", command=self.open_user_tab_settings)
         settings_menu.add_command(label="Planungs-Helfer", command=self.open_planning_assistant_settings)
+        settings_menu.add_separator()
+        settings_menu.add_command(label="DB-Update für Chat ausführen", command=self.apply_database_fix)
+
+    def apply_database_fix(self):
+        if messagebox.askyesno("Bestätigung",
+                               "Dies führt ein einmaliges Update der Datenbank für die Chat-Funktion durch. Fortfahren?",
+                               parent=self):
+            success, message = run_db_update_v1()
+            if success:
+                messagebox.showinfo("Erfolg", message, parent=self)
+            else:
+                messagebox.showerror("Fehler", message, parent=self)
 
     def setup_tabs(self):
         self.tab_frames = {"Schichtplan": ShiftPlanTab(self.notebook, self),
+                           "Chat": ChatTab(self.notebook, self),
                            "Teilnahmen": ParticipationTab(self.notebook, self),
                            "Mitarbeiter": UserManagementTab(self.notebook, self),
                            "Diensthunde": DogManagementTab(self.notebook, self),
@@ -140,7 +157,7 @@ class MainAdminWindow(tk.Toplevel):
                            "Urlaubsanträge": VacationRequestsTab(self.notebook, self),
                            "Bug-Reports": BugReportsTab(self.notebook, self),
                            "Logs": LogTab(self.notebook, self),
-                           "Protokoll": ProtokollTab(self.notebook, self) # NEU: Der Protokoll-Reiter wird hinzugefügt
+                           "Protokoll": ProtokollTab(self.notebook, self)
                            }
         for name, frame in self.tab_frames.items():
             self.notebook.add(frame, text=name)
@@ -153,6 +170,49 @@ class MainAdminWindow(tk.Toplevel):
                                                                                                     padx=10, pady=5)
         ttk.Button(footer_frame, text="Bug / Fehler melden", command=self.open_bug_report_dialog,
                    style='Bug.TButton').pack(side="right", padx=10, pady=5)
+
+    def check_chat_notifications(self):
+        for widget in self.chat_notification_frame.winfo_children():
+            widget.destroy()
+
+        senders = get_senders_with_unread_messages(self.user_data['id'])
+
+        if senders:
+            latest_sender_id = senders[0]['sender_id']
+            total_unread = sum(s['unread_count'] for s in senders)
+
+            action = lambda event=None: self.go_to_chat(latest_sender_id)
+
+            self.chat_notification_frame.pack(fill='x', side='top', ipady=5, before=self.notebook)
+            self.chat_notification_frame.bind("<Button-1>", action)
+
+            label_text = f"Sie haben {total_unread} neue Nachricht(en)! Hier klicken zum Anzeigen."
+            notification_label = tk.Label(self.chat_notification_frame, text=label_text, bg='tomato', fg='white',
+                                          font=('Segoe UI', 12, 'bold'), cursor="hand2")
+            notification_label.pack(side='left', padx=15, pady=5)
+            notification_label.bind("<Button-1>", action)
+
+            show_button = ttk.Button(self.chat_notification_frame, text="Anzeigen", command=action)
+            show_button.pack(side='right', padx=15)
+        else:
+            self.chat_notification_frame.pack_forget()
+
+        self.after(10000, self.check_chat_notifications)
+
+    def go_to_chat(self, user_id):
+        for i, tab in enumerate(self.notebook.tabs()):
+            if self.notebook.tab(tab, "text") == "Chat":
+                self.notebook.select(i)
+                if "Chat" in self.tab_frames:
+                    self.after(100, lambda: self.tab_frames["Chat"].select_user(user_id))
+                break
+
+    def check_for_updates(self):
+        self.update_tab_titles()
+        self.update_header_notifications()
+        if hasattr(self.tab_frames["Mitarbeiter"], 'update_password_reset_button'):
+            self.tab_frames["Mitarbeiter"].update_password_reset_button()
+        self.after(60000, self.check_for_updates)
 
     def open_shift_types_window(self):
         ShiftTypesTab(self, self.refresh_all_tabs)
@@ -183,26 +243,17 @@ class MainAdminWindow(tk.Toplevel):
             self.notebook.add(self.tab_frames[tab_name], text=tab_name)
         self.notebook.select(self.tab_frames[tab_name])
 
-    def check_for_updates(self):
-        self.update_tab_titles()
-        self.update_header_notifications()
-        if hasattr(self.tab_frames["Mitarbeiter"], 'update_password_reset_button'):
-            self.tab_frames["Mitarbeiter"].update_password_reset_button()
-        self.after(60000, self.check_for_updates)
-
     def update_tab_titles(self):
         pending_wunsch_count = len(get_pending_wunschfrei_requests())
         tab_text_wunsch = "Wunschanfragen"
         if pending_wunsch_count > 0: tab_text_wunsch += f" ({pending_wunsch_count})"
         if "Wunschanfragen" in self.tab_frames: self.notebook.tab(self.tab_frames["Wunschanfragen"],
                                                                   text=tab_text_wunsch)
-
         pending_urlaub_count = get_pending_vacation_requests_count()
         tab_text_urlaub = "Urlaubsanträge"
         if pending_urlaub_count > 0: tab_text_urlaub += f" ({pending_urlaub_count})"
         if "Urlaubsanträge" in self.tab_frames: self.notebook.tab(self.tab_frames["Urlaubsanträge"],
                                                                   text=tab_text_urlaub)
-
         open_bug_count = get_open_bug_reports_count()
         tab_text_bugs = "Bug-Reports"
         if open_bug_count > 0: tab_text_bugs += f" ({open_bug_count})"
@@ -211,35 +262,25 @@ class MainAdminWindow(tk.Toplevel):
     def update_header_notifications(self):
         for widget in self.notification_frame.winfo_children(): widget.destroy()
         notifications = []
-
         pending_password_resets = get_pending_password_resets_count()
-        if pending_password_resets > 0:
-            notifications.append(
-                {"text": f"{pending_password_resets} Passwort-Reset(s)", "bg": "mediumpurple", "fg": "white",
-                 "action": self.open_password_resets_window})
-
+        if pending_password_resets > 0: notifications.append(
+            {"text": f"{pending_password_resets} Passwort-Reset(s)", "bg": "mediumpurple", "fg": "white",
+             "action": self.open_password_resets_window})
         pending_wunsch_count = len(get_pending_wunschfrei_requests())
-        if pending_wunsch_count > 0:
-            notifications.append(
-                {"text": f"{pending_wunsch_count} Offene Wunschanfrage(n)", "bg": "orange", "fg": "black",
-                 "tab": "Wunschanfragen"})
-
+        if pending_wunsch_count > 0: notifications.append(
+            {"text": f"{pending_wunsch_count} Offene Wunschanfrage(n)", "bg": "orange", "fg": "black",
+             "tab": "Wunschanfragen"})
         pending_urlaub_count = get_pending_vacation_requests_count()
-        if pending_urlaub_count > 0:
-            notifications.append(
-                {"text": f"{pending_urlaub_count} Offene Urlaubsanträge", "bg": "lightblue", "fg": "black",
-                 "tab": "Urlaubsanträge"})
-
+        if pending_urlaub_count > 0: notifications.append(
+            {"text": f"{pending_urlaub_count} Offene Urlaubsanträge", "bg": "lightblue", "fg": "black",
+             "tab": "Urlaubsanträge"})
         user_feedback_count = get_reports_with_user_feedback_count()
-        if user_feedback_count > 0:
-            notifications.append({"text": f"{user_feedback_count} User-Feedback(s)", "bg": "springgreen", "fg": "black",
-                                  "tab": "Bug-Reports"})
-
+        if user_feedback_count > 0: notifications.append(
+            {"text": f"{user_feedback_count} User-Feedback(s)", "bg": "springgreen", "fg": "black",
+             "tab": "Bug-Reports"})
         open_bug_count = get_open_bug_reports_count()
-        if open_bug_count > 0:
-            notifications.append(
-                {"text": f"{open_bug_count} Offene Bug-Report(s)", "bg": "tomato", "fg": "white", "tab": "Bug-Reports"})
-
+        if open_bug_count > 0: notifications.append(
+            {"text": f"{open_bug_count} Offene Bug-Report(s)", "bg": "tomato", "fg": "white", "tab": "Bug-Reports"})
         if not notifications:
             ttk.Label(self.notification_frame, text="Keine neuen Benachrichtigungen",
                       font=('Segoe UI', 10, 'italic')).pack()
@@ -273,10 +314,12 @@ class MainAdminWindow(tk.Toplevel):
         self.shift_types_data = {st['abbreviation']: st for st in get_all_shift_types()}
 
     def load_staffing_rules(self):
-        """Läd die Besetzungsregeln aus der Datenbank."""
-        rules = load_config_json('MIN_STAFFING_RULES')
-        if rules is None:
-            self.staffing_rules = {"Daily": {}, "Sa-So": {}, "Fr": {}, "Mo-Do": {}, "Holiday": {}, "Colors": {}}
+        rules = load_config_json(MIN_STAFFING_RULES_CONFIG_KEY)
+        if not rules:
+            self.staffing_rules = {"Mo-Do": {}, "Fr": {}, "Sa-So": {}, "Holiday": {}, "Daily": {},
+                                   "Colors": {"alert_bg": "#FF5555", "overstaffed_bg": "#FFFF99",
+                                              "success_bg": "#90EE90", "weekend_bg": "#EAF4FF",
+                                              "holiday_bg": "#FFD700"}}
         else:
             self.staffing_rules = rules
 
@@ -302,24 +345,21 @@ class MainAdminWindow(tk.Toplevel):
             return 'black'
 
     def load_shift_frequency(self):
-        """Läd die Schichthäufigkeit aus der Datenbank."""
-        freq_data = load_shift_frequency()
+        freq_data = load_shift_frequency();
         return defaultdict(int, freq_data)
 
     def save_shift_frequency(self):
-        """Speichert die Schichthäufigkeit in der Datenbank."""
         success = save_shift_frequency(self.shift_frequency)
-        if not success:
-            messagebox.showwarning("Speicherfehler",
-                                   "Die Schichthäufigkeit konnte nicht in der Datenbank gespeichert werden.",
-                                   parent=self)
+        if not success: messagebox.showwarning("Speicherfehler",
+                                               "Die Schichthäufigkeit konnte nicht in der Datenbank gespeichert werden.",
+                                               parent=self)
 
     def reset_shift_frequency(self):
         if messagebox.askyesno("Bestätigen", "Möchten Sie den Zähler für die Schichthäufigkeit wirklich zurücksetzen?",
                                parent=self):
             success = reset_shift_frequency()
             if success:
-                self.shift_frequency.clear()
+                self.shift_frequency.clear();
                 messagebox.showinfo("Erfolg", "Der Zähler wurde zurückgesetzt.", parent=self)
             else:
                 messagebox.showerror("Fehler", "Fehler beim Zurücksetzen in der Datenbank.", parent=self)
@@ -338,12 +378,20 @@ class MainAdminWindow(tk.Toplevel):
 
     def open_staffing_rules_window(self):
         def save_and_refresh(new_rules):
-            if save_config_json('MIN_STAFFING_RULES', new_rules):
-                self.refresh_all_tabs()
+            if save_config_json(MIN_STAFFING_RULES_CONFIG_KEY, new_rules):
+                self.staffing_rules = new_rules;
+                self.refresh_shift_plan()
+                messagebox.showinfo("Gespeichert", "Die Besetzungsregeln wurden erfolgreich aktualisiert.", parent=self)
             else:
-                messagebox.showerror("Fehler", "Besetzungsregeln konnten nicht gespeichert werden.", parent=self)
+                messagebox.showerror("Fehler",
+                                     "Die Besetzungsregeln konnten nicht in der Datenbank gespeichert werden.",
+                                     parent=self)
 
-        MinStaffingWindow(self, callback=save_and_refresh)
+        staffing_window = MinStaffingWindow(self, current_rules=self.staffing_rules, callback=save_and_refresh)
+        staffing_window.focus_force()
+
+    def refresh_shift_plan(self):
+        if "Dienstplan" in self.tab_frames: self.tab_frames["Dienstplan"].refresh_plan()
 
     def open_holiday_settings_window(self):
         HolidaySettingsWindow(self, year=self.current_display_date.year, callback=self.refresh_all_tabs)

@@ -1,103 +1,121 @@
 # gui/dialogs/color_settings_window.py
 import tkinter as tk
 from tkinter import ttk, colorchooser, messagebox
-# NEUE IMPORTS FÜR DB-ZENTRALISIERUNG
-from database.db_core import load_config_json, save_config_json
-
+import json
+import os
 
 class ColorSettingsWindow(tk.Toplevel):
-    def __init__(self, parent, callback=None):
+    def __init__(self, parent, callback):
         super().__init__(parent)
-        self.transient(parent)
         self.title("Farbeinstellungen")
+        self.geometry("500x400")
+        self.transient(parent)
         self.grab_set()
+
         self.callback = callback
+        self.config_file = "staffing_rules.json"
+        self.colors = self.load_colors()
+        self.vars = {}
 
-        # 💥 DB PERSISTENCE: Läd Regeln aus der DB 💥
-        self.rules = self.load_rules()
-        self.color_vars = {}
+        self.create_widgets()
 
-        self.setup_ui()
+    def load_colors(self):
+        if os.path.exists(self.config_file):
+            with open(self.config_file, 'r') as f:
+                try:
+                    config = json.load(f)
+                    # Lade die Farben oder nutze Standardwerte, falls der Schlüssel fehlt
+                    return config.get("Colors", self.get_default_colors())
+                except json.JSONDecodeError:
+                    return self.get_default_colors()
+        return self.get_default_colors()
 
-    def setup_ui(self):
-        main_frame = ttk.Frame(self, padding=10)
-        main_frame.pack(fill="both", expand=True)
+    def get_default_colors(self):
+        # Standardfarben, falls die Konfigurationsdatei nicht existiert oder fehlerhaft ist
+        return {
+            "Ausstehend": "orange",
+            "Admin_Ausstehend": "#E0B0FF",
+            "alert_bg": "#FF5555",
+            "overstaffed_bg": "#FFFF99",
+            "success_bg": "#90EE90",
+            "weekend_bg": "#EAF4FF",
+            "holiday_bg": "#FFD700",
+            "quartals_ausbildung_bg": "#ADD8E6",
+            "schiessen_bg": "#FFB6C1"
+        }
 
-        notebook = ttk.Notebook(main_frame)
-        notebook.pack(fill="both", expand=True, pady=5)
+    def create_widgets(self):
+        main_frame = ttk.Frame(self, padding="10")
+        main_frame.pack(expand=True, fill="both")
 
-        general_tab = ttk.Frame(notebook, padding=10)
-        notebook.add(general_tab, text="Allgemein")
+        # Mapping der internen Schlüssel zu den angezeigten Namen
+        color_map = {
+            "Ausstehend": "Anfrage Ausstehend",
+            "Admin_Ausstehend": "Admin Anfrage Ausstehend",
+            "alert_bg": "Unterbesetzung",
+            "overstaffed_bg": "Überbesetzung",
+            "success_bg": "Korrekte Besetzung",
+            "weekend_bg": "Wochenende",
+            "holiday_bg": "Feiertag",
+            "quartals_ausbildung_bg": "Quartals Ausbildung",
+            "schiessen_bg": "Schießen"
+        }
 
-        # General colors
-        self.create_color_picker(general_tab, "Hintergrund Wochenende", "weekend_bg", "#EAF4FF", 0)
-        self.create_color_picker(general_tab, "Hintergrund Feiertag", "holiday_bg", "#FFD700", 1)
-        self.create_color_picker(general_tab, "Hintergrund Quartals Ausbildung", "quartals_ausbildung_bg", "#ADD8E6", 2)
-        self.create_color_picker(general_tab, "Hintergrund Schießen", "schiessen_bg", "#FFB6C1", 3)
-        self.create_color_picker(general_tab, "Unterbesetzung (Alarm)", "alert_bg", "#FF5555", 4)
-        self.create_color_picker(general_tab, "Überbesetzung", "overstaffed_bg", "#FFFF99", 5)
-        self.create_color_picker(general_tab, "Besetzung korrekt", "success_bg", "#90EE90", 6)
+        for key, text in color_map.items():
+            frame = ttk.Frame(main_frame)
+            frame.pack(fill='x', pady=5, padx=5)
 
-        request_tab = ttk.Frame(notebook, padding=10)
-        notebook.add(request_tab, text="Anfragen-Status")
+            ttk.Label(frame, text=text, width=25).pack(side='left')
 
-        self.create_color_picker(request_tab, "Ausstehend (Benutzer)", "Ausstehend", "orange", 0)
-        self.create_color_picker(request_tab, "Ausstehend (Admin)", "Admin_Ausstehend", "#E0B0FF", 1)
+            color_val = self.colors.get(key, "#FFFFFF")
+            var = tk.StringVar(value=color_val)
+            self.vars[key] = var
 
-        # Button Frame
-        button_frame = ttk.Frame(main_frame)
-        button_frame.pack(fill="x", pady=(10, 0))
-        ttk.Button(button_frame, text="Speichern & Schließen", command=self.save_settings).pack(side="right")
-        ttk.Button(button_frame, text="Abbrechen", command=self.destroy).pack(side="right", padx=5)
+            # --- ANFANG DER ÄNDERUNG ---
+            # Das Label für die Farbvorschau wird etwas breiter gemacht
+            color_label = ttk.Label(frame, text="       ", background=color_val, relief="solid", borderwidth=1)
+            color_label.pack(side='left', padx=10)
 
-    def load_rules(self):
-        """Läd die Besetzungsregeln (inklusive Farb-Key) aus der Datenbank."""
-        # Nutzt die zentrale DB-Funktion
-        rules = load_config_json('MIN_STAFFING_RULES')
-        # Stellt sicher, dass ein gültiges Dictionary zurückgegeben wird
-        return rules if rules is not None else {"Daily": {}, "Sa-So": {}, "Fr": {}, "Mo-Do": {}, "Holiday": {},
-                                                "Colors": {}}
+            # Das Eingabefeld für den Hex-Code wurde entfernt
+            # --- ENDE DER ÄNDERUNG ---
 
-    def create_color_picker(self, parent, label_text, key, default_color, row):
-        color = self.rules.get('Colors', {}).get(key, default_color)
-        self.color_vars[key] = tk.StringVar(value=color)
+            ttk.Button(frame, text="Farbe wählen",
+                       command=lambda v=var, l=color_label: self.choose_color(v, l)).pack(side='left')
 
-        ttk.Label(parent, text=label_text).grid(row=row, column=0, sticky="w", padx=5, pady=5)
+        button_frame = ttk.Frame(self)
+        button_frame.pack(fill="x", padx=10, pady=10)
+        ttk.Button(button_frame, text="Speichern", command=self.save).pack(side="right")
+        ttk.Button(button_frame, text="Abbrechen", command=self.destroy).pack(side="right", padx=10)
 
-        color_frame = ttk.Frame(parent)
-        color_frame.grid(row=row, column=1, sticky="ew", padx=5)
-        parent.grid_columnconfigure(1, weight=1)
-
-        color_entry = ttk.Entry(color_frame, textvariable=self.color_vars[key])
-        color_entry.pack(side="left", fill="x", expand=True)
-
-        color_btn = ttk.Button(color_frame, text="Farbe wählen",
-                               command=lambda var=self.color_vars[key]: self.choose_color(var))
-        color_btn.pack(side="left", padx=(5, 0))
-
-    def choose_color(self, color_var):
-        color_code = colorchooser.askcolor(title="Farbe auswählen", initialcolor=color_var.get())
+    def choose_color(self, var, label):
+        # Öffnet den Farbwähler-Dialog
+        color_code = colorchooser.askcolor(title="Farbe wählen", initialcolor=var.get())
         if color_code and color_code[1]:
-            color_var.set(color_code[1])
+            # Setzt den neuen Farbwert in der Variable und aktualisiert die Vorschau
+            var.set(color_code[1])
+            label.config(background=color_code[1])
 
-    def save_settings(self):
-        """Speichert die aktualisierten Farbregeln direkt in der Datenbank."""
-        if 'Colors' not in self.rules:
-            self.rules['Colors'] = {}
-        for key, var in self.color_vars.items():
-            self.rules['Colors'][key] = var.get()
+    def save(self):
+        # Sammelt die neuen Farbwerte aus den Variablen
+        new_colors = {key: var.get() for key, var in self.vars.items()}
 
-        # 💥 DB PERSISTENCE: Speichere die gesamte Rules-Struktur zurück in die DB 💥
-        success = save_config_json('MIN_STAFFING_RULES', self.rules)
+        try:
+            # Lädt die gesamte Konfigurationsdatei, um nur den "Colors"-Teil zu aktualisieren
+            if os.path.exists(self.config_file):
+                with open(self.config_file, 'r') as f:
+                    config = json.load(f)
+            else:
+                config = {}
 
-        if success:
-            messagebox.showinfo("Gespeichert", "Die Farbeinstellungen wurden erfolgreich gespeichert.", parent=self)
+            config["Colors"] = new_colors
 
+            with open(self.config_file, 'w') as f:
+                json.dump(config, f, indent=4)
+
+            # Ruft die Callback-Funktion auf, um das Hauptfenster zu aktualisieren
             if self.callback:
-                # Callback ruft refresh_all_tabs() im MainAdminWindow auf
                 self.callback()
 
             self.destroy()
-
-        else:
-            messagebox.showerror("Fehler", f"Fehler beim Speichern der Einstellungen.", parent=self)
+        except Exception as e:
+            messagebox.showerror("Fehler beim Speichern", f"Die Farben konnten nicht gespeichert werden:\n{e}", parent=self)

@@ -1,168 +1,161 @@
 # gui/dialogs/min_staffing_window.py
 import tkinter as tk
-from tkinter import ttk, messagebox, colorchooser
+from tkinter import ttk, colorchooser, messagebox
 import json
 import os
 
-STAFFING_RULES_FILE = 'min_staffing_rules.json'
-
-DEFAULT_RULES = {
-    "Colors": {"alert_bg": "#FF5555", "success_bg": "#90EE90", "overstaffed_bg": "#FFFF99"},
-    "Mo-Do": {"T.": 1}, "Fr": {"T.": 1, "6": 1}, "Sa-So": {"T.": 2},
-    "Holiday": {"T.": 2}, "Daily": {"N.": 2, "24": 2}
-}
-
-
-def load_staffing_rules():
-    if os.path.exists(STAFFING_RULES_FILE):
-        try:
-            with open(STAFFING_RULES_FILE, 'r') as f:
-                rules = json.load(f)
-                if 'Colors' not in rules:
-                    rules['Colors'] = DEFAULT_RULES['Colors']
-                return rules
-        except json.JSONDecodeError:
-            return DEFAULT_RULES
-    return DEFAULT_RULES
-
-
-def save_staffing_rules(rules):
-    try:
-        with open(STAFFING_RULES_FILE, 'w') as f:
-            json.dump(rules, f, indent=4)
-        return True
-    except Exception:
-        return False
+from database.db_shifts import get_all_shift_types
+from database.db_core import save_config_json  # Importieren der Speicherfunktion
 
 
 class MinStaffingWindow(tk.Toplevel):
-    def __init__(self, master, callback):
-        super().__init__(master)
-        self.master = master # Referenz auf MainAdminWindow
-        self.callback = callback
-        self.rules = load_staffing_rules()
-        self.title("Mindestbesetzungsregeln definieren (inkl. Farben)")
-        self.geometry("600x600")
-        self.transient(master)
+    def __init__(self, parent, current_rules, callback):
+        super().__init__(parent)
+        self.title("Besetzungsregeln")
+        self.geometry("800x600")
+        self.transient(parent)
         self.grab_set()
-        main_frame = ttk.Frame(self, padding="15")
-        main_frame.pack(fill="both", expand=True)
-        main_frame.columnconfigure(1, weight=1)
-        notebook = ttk.Notebook(main_frame)
-        notebook.pack(fill="both", expand=True)
-        regeln_frame = ttk.Frame(notebook, padding="10")
-        notebook.add(regeln_frame, text="Besetzungsanforderungen")
-        regeln_frame.columnconfigure(2, weight=1)
+
+        self.callback = callback
+        self.rules = current_rules  # Regeln vom Hauptfenster übernehmen
+        self.shifts = get_all_shift_types()
         self.vars = {}
-        self.entry_widgets = {}
-        row = 0
-        ttk.Label(regeln_frame,
-                  text="Definieren Sie die erforderliche Mindestanzahl an Mitarbeitern pro Schicht und Regelbereich.",
-                  wraplength=550, font=("Segoe UI", 10, "italic")).grid(row=row, columnspan=3, sticky="w", pady=(0, 10))
-        row += 1
-        abbrevs_set = set()
-        for rule_data in DEFAULT_RULES.values():
-            if isinstance(rule_data, dict) and 'Colors' not in rule_data:
-                abbrevs_set.update(rule_data.keys())
-        abbrevs = sorted(list(abbrevs_set | set(DEFAULT_RULES['Daily'].keys())))
-        ttk.Label(regeln_frame, text="Regelbereich", font=("Segoe UI", 10, "bold")).grid(row=row, column=0, sticky="w",
-                                                                                         padx=5)
-        ttk.Label(regeln_frame, text="Schichtkürzel", font=("Segoe UI", 10, "bold")).grid(row=row, column=1, sticky="w",
-                                                                                          padx=5)
-        ttk.Label(regeln_frame, text="Min. Besetzung", font=("Segoe UI", 10, "bold")).grid(row=row, column=2,
-                                                                                           sticky="w", padx=5)
-        row += 1
-        vcmd = (self.register(lambda P: P.isdigit() or P == ""), '%P')
-        for rule_key, rule_data in self.rules.items():
-            if rule_key == "Colors": continue
-            ttk.Separator(regeln_frame).grid(row=row, columnspan=3, sticky="ew", pady=5)
-            row += 1
-            ttk.Label(regeln_frame, text=rule_key, font=("Segoe UI", 10, "italic")).grid(row=row, column=0, sticky="nw",
-                                                                                         padx=5)
-            for abbrev in abbrevs:
-                if abbrev in rule_data or (rule_key == "Daily" and abbrev in DEFAULT_RULES["Daily"]):
-                    current_val = rule_data.get(abbrev, 0)
-                    var_key = f"{rule_key}_{abbrev}"
-                    self.vars[var_key] = tk.StringVar(value=str(current_val))
-                    ttk.Label(regeln_frame, text=abbrev).grid(row=row, column=1, sticky="w", padx=5)
-                    entry = tk.Entry(regeln_frame, textvariable=self.vars[var_key], width=5, validate='key', vcmd=vcmd,
-                                     font=("Segoe UI", 10))
-                    entry.grid(row=row, column=2, sticky="w", padx=5)
-                    self.entry_widgets[var_key] = entry
-                    row += 1
-            if rule_key != "Daily": row += 1
-        farben_frame = ttk.Frame(notebook, padding="10")
-        notebook.add(farben_frame, text="Farbeinstellungen")
-        farben_frame.columnconfigure(1, weight=1)
-        self.color_vars = {}
-        self.color_widgets = {}
-        color_row = 0
-        color_map = {"alert_bg": "Hintergrund bei Unterschreitung (ROT)",
-                     "success_bg": "Hintergrund bei Erfüllung (GRÜN)",
-                     "overstaffed_bg": "Hintergrund bei Überbesetzung (GELB)"}
-        for key, label_text in color_map.items():
-            current_hex = self.rules['Colors'].get(key, DEFAULT_RULES['Colors'][key])
-            self.color_vars[key] = tk.StringVar(value=current_hex)
-            ttk.Label(farben_frame, text=label_text, font=("Segoe UI", 10)).grid(row=color_row, column=0, sticky="w",
-                                                                                 pady=5, padx=5)
-            color_preview = tk.Label(farben_frame, textvariable=self.color_vars[key], bg=current_hex, relief="sunken",
-                                     borderwidth=1, cursor="hand2", width=20)
-            color_preview.grid(row=color_row, column=1, sticky="ew", pady=5, padx=5)
-            button = ttk.Button(farben_frame, text="Wählen",
-                                command=lambda k=key, p=color_preview: self.choose_color(k, p))
-            button.grid(row=color_row, column=2, sticky="w", pady=5, padx=5)
-            self.color_widgets[key] = color_preview
-            self.update_color_preview_text(key, color_preview, current_hex)
-            color_row += 1
-        button_bar = ttk.Frame(self)
-        button_bar.pack(fill="x", pady=10)
-        ttk.Button(button_bar, text="Speichern", command=self.save).pack(side="left", padx=15)
-        ttk.Button(button_bar, text="Abbrechen", command=self.destroy).pack(side="left", padx=5)
 
-    def update_color_preview_text(self, key, preview_widget, hex_code):
-        try:
-            # Greift auf die Methode im Hauptfenster zurück
-            text_color = self.master.get_contrast_color(hex_code)
-            preview_widget.config(bg=hex_code, fg=text_color)
-        except AttributeError:
-            preview_widget.config(bg=hex_code, fg='black')
+        self.create_widgets()
 
-    def choose_color(self, key, preview_widget):
-        initial_color = self.color_vars[key].get()
-        color_code = colorchooser.askcolor(parent=self, title=f"Wähle Farbe für {key}", initialcolor=initial_color)
+    def get_default_rules(self):
+        # Diese Funktion wird jetzt als Fallback genutzt, falls keine Regeln übergeben werden
+        return {
+            "Mo-Do": {}, "Fr": {}, "Sa-So": {}, "Holiday": {}, "Daily": {},
+            "Colors": {
+                "alert_bg": "#FF5555",
+                "overstaffed_bg": "#FFFF99",
+                "success_bg": "#90EE90",
+                "weekend_bg": "#EAF4FF",
+                "holiday_bg": "#FFD700"
+            }
+        }
+
+    def create_widgets(self):
+        self.notebook = ttk.Notebook(self)
+        self.notebook.pack(expand=True, fill="both", padx=10, pady=10)
+
+        days_map = {
+            "Mo-Do": "Montag - Donnerstag",
+            "Fr": "Freitag",
+            "Sa-So": "Samstag - Sonntag",
+            "Holiday": "Feiertag",
+            "Daily": "Täglich"
+        }
+
+        for key, text in days_map.items():
+            frame = ttk.Frame(self.notebook, padding="10")
+            self.notebook.add(frame, text=text)
+            self.populate_shift_rules(frame, key)
+
+        colors_frame = ttk.Frame(self.notebook, padding="10")
+        self.notebook.add(colors_frame, text="Farben")
+        self.populate_color_settings(colors_frame)
+
+        button_frame = ttk.Frame(self)
+        button_frame.pack(fill="x", padx=10, pady=10)
+        ttk.Button(button_frame, text="Speichern", command=self.save).pack(side="right")
+        ttk.Button(button_frame, text="Abbrechen", command=self.destroy).pack(side="right", padx=10)
+
+    def populate_shift_rules(self, parent_frame, day_key):
+        self.vars[day_key] = {}
+        header_frame = ttk.Frame(parent_frame)
+        header_frame.pack(fill='x', pady=(0, 5))
+        ttk.Label(header_frame, text="Schichtkürzel", font=("Segoe UI", 10, "bold")).pack(side='left', expand=True,
+                                                                                          fill='x')
+        ttk.Label(header_frame, text="Mindestanzahl", font=("Segoe UI", 10, "bold")).pack(side='left', expand=True,
+                                                                                          fill='x')
+
+        canvas = tk.Canvas(parent_frame)
+        scrollbar = ttk.Scrollbar(parent_frame, orient="vertical", command=canvas.yview)
+        scrollable_frame = ttk.Frame(canvas)
+
+        scrollable_frame.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
+        canvas.configure(yscrollcommand=scrollbar.set)
+
+        canvas.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+
+        for shift in self.shifts:
+            abbrev = shift['abbreviation']
+            row_frame = ttk.Frame(scrollable_frame)
+            row_frame.pack(fill='x', pady=2)
+
+            ttk.Label(row_frame, text=f"{abbrev} ({shift['name']})").pack(side='left', expand=True, fill='x', padx=5)
+
+            # Stelle sicher, dass der Schlüssel existiert, bevor darauf zugegriffen wird
+            if day_key not in self.rules:
+                self.rules[day_key] = {}
+
+            var = tk.StringVar(value=self.rules.get(day_key, {}).get(abbrev, ""))
+            self.vars[day_key][abbrev] = var
+            ttk.Entry(row_frame, textvariable=var, width=10).pack(side='left', expand=True, fill='x', padx=5)
+
+    def populate_color_settings(self, parent_frame):
+        self.vars['Colors'] = {}
+
+        color_map = {
+            "alert_bg": "Unterbesetzung",
+            "overstaffed_bg": "Überbesetzung",
+            "success_bg": "Korrekte Besetzung",
+            "weekend_bg": "Wochenende",
+            "holiday_bg": "Feiertag"
+        }
+
+        # Stelle sicher, dass der "Colors"-Schlüssel existiert
+        if "Colors" not in self.rules:
+            self.rules["Colors"] = self.get_default_rules()["Colors"]
+
+        for key, text in color_map.items():
+            frame = ttk.Frame(parent_frame)
+            frame.pack(fill='x', pady=5, padx=5)
+
+            ttk.Label(frame, text=text, width=25).pack(side='left')
+
+            color_val = self.rules.get("Colors", {}).get(key, "#FFFFFF")
+            var = tk.StringVar(value=color_val)
+            self.vars['Colors'][key] = var
+
+            color_label = ttk.Label(frame, text="     ", background=color_val, relief="solid", borderwidth=1)
+            color_label.pack(side='left', padx=10)
+
+            ttk.Button(frame, text="Farbe wählen",
+                       command=lambda v=var, l=color_label: self.choose_color(v, l)).pack(side='left')
+
+    def choose_color(self, var, label):
+        color_code = colorchooser.askcolor(title="Farbe wählen", initialcolor=var.get())
         if color_code and color_code[1]:
-            hex_code = color_code[1].upper()
-            self.color_vars[key].set(hex_code)
-            self.update_color_preview_text(key, preview_widget, hex_code)
+            var.set(color_code[1])
+            label.config(background=color_code[1])
 
     def save(self):
-        new_rules = load_staffing_rules()
-        success = True
-        temp_rules_data = {k: {} for k in DEFAULT_RULES.keys() if k != 'Colors'}
-        for var_key, var in self.vars.items():
-            value_str = var.get().strip()
-            if not value_str: continue
-            try:
-                value = int(value_str)
-                if value < 0: raise ValueError("Negativer Wert")
-            except ValueError:
-                messagebox.showerror("Fehler",
-                                     f"Ungültiger Wert '{value_str}' für ein Feld (nur positive ganze Zahlen erlaubt).",
-                                     parent=self)
-                self.entry_widgets[var_key].focus_set()
-                success = False;
-                break
-            if value > 0:
-                rule_key, abbrev = var_key.split('_', 1)
-                temp_rules_data[rule_key][abbrev] = value
-        if not success: return
-        new_rules['Colors'] = {key: var.get().upper() for key, var in self.color_vars.items()}
-        for key in temp_rules_data.keys():
-            new_rules[key] = temp_rules_data[key]
-        if save_staffing_rules(new_rules):
-            messagebox.showinfo("Erfolg", "Mindestbesetzungsregeln gespeichert. Der Schichtplan wird aktualisiert.",
-                                parent=self)
-            self.callback()
-            self.destroy()
-        else:
-            messagebox.showerror("Fehler", "Fehler beim Speichern der Regeldatei.", parent=self)
+        new_rules = {}
+        for day_key, shift_vars in self.vars.items():
+            if day_key == "Colors":
+                new_rules["Colors"] = {k: v.get() for k, v in shift_vars.items()}
+            else:
+                new_rules[day_key] = {}
+                for abbrev, var in shift_vars.items():
+                    val = var.get()
+                    if val.isdigit():
+                        new_rules[day_key][abbrev] = int(val)
+                    elif not val:
+                        continue
+                    else:
+                        messagebox.showerror("Fehler",
+                                             f"Ungültige Eingabe für {abbrev} am {day_key}. Bitte geben Sie eine Zahl ein.",
+                                             parent=self)
+                        return
+
+        # Die neuen Regeln werden jetzt an die Callback-Funktion übergeben,
+        # die sich um das Speichern und Aktualisieren kümmert.
+        if self.callback:
+            self.callback(new_rules)
+
+        self.destroy()

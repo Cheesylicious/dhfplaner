@@ -7,8 +7,10 @@ import webbrowser
 import os
 import tempfile
 
-from database.db_shifts import get_shifts_for_month, get_daily_shift_counts_for_month, get_ordered_shift_abbrevs, save_shift_entry
-from database.db_requests import get_wunschfrei_requests_for_month, get_wunschfrei_request_by_user_and_date, get_all_vacation_requests_for_month, admin_submit_request, update_wunschfrei_status
+from database.db_shifts import get_shifts_for_month, get_daily_shift_counts_for_month, get_ordered_shift_abbrevs, \
+    save_shift_entry
+from database.db_requests import get_wunschfrei_requests_for_month, get_wunschfrei_request_by_user_and_date, \
+    get_all_vacation_requests_for_month, admin_submit_request, update_wunschfrei_status
 from database.db_users import get_ordered_users_for_schedule
 from gui.admin_menu_config_manager import AdminMenuConfigManager
 from ..request_lock_manager import RequestLockManager
@@ -429,16 +431,24 @@ class ShiftPlanTab(ttk.Frame):
                 current_date = date(year, month, day)
                 is_friday = current_date.weekday() == 4
                 is_holiday = self.app.is_holiday(current_date)
-                if abbrev == "6" and (not is_friday or is_holiday):
-                    label.config(bg=summary_bg, bd=0)
-                    continue
+
+                # --- ANFANG DER ÄNDERUNG ---
                 bg = summary_bg
-                if self.app.is_holiday(current_date):
-                    bg = holiday_bg
-                elif current_date.weekday() >= 5:
-                    bg = weekend_bg
+                # Für die Schicht "6" werden Wochenenden/Feiertage ignoriert
+                if abbrev != "6":
+                    if is_holiday:
+                        bg = holiday_bg
+                    elif current_date.weekday() >= 5:
+                        bg = weekend_bg
+
+                if abbrev == "6" and (not is_friday or is_holiday):
+                    label.config(bg=bg, bd=0)
+                    continue
+                # --- ENDE DER ÄNDERUNG ---
+
                 count = daily_counts.get(current_date.strftime('%Y-%m-%d'), {}).get(abbrev, 0)
                 min_req = self.get_min_staffing_for_date(current_date).get(abbrev)
+
                 if min_req is not None:
                     if count < min_req:
                         bg = rules.get('alert_bg', "#FF5555")
@@ -446,6 +456,7 @@ class ShiftPlanTab(ttk.Frame):
                         bg = rules.get('overstaffed_bg', "#FFFF99")
                     else:
                         bg = rules.get('success_bg', "#90EE90")
+
                 label.config(bg=bg, fg=self.app.get_contrast_color(bg), bd=1)
 
     def show_previous_month(self):
@@ -484,11 +495,9 @@ class ShiftPlanTab(ttk.Frame):
         anfragen_menu = tk.Menu(context_menu, tearoff=0)
         context_menu.add_cascade(label="Anfragen", menu=anfragen_menu)
 
-        # --- ANFANG DER ÄNDERUNG ---
         anfragen_menu.add_command(label="Anfrage für 'T. oder N.'",
                                   command=lambda s="T/N": self._admin_request_shift(user_id, shift_date_str, s))
         anfragen_menu.add_separator()
-        # --- ENDE DER ÄNDERUNG ---
 
         all_abbrevs = list(self.app.shift_types_data.keys())
         menu_config = AdminMenuConfigManager.load_config(all_abbrevs)
@@ -554,7 +563,6 @@ class ShiftPlanTab(ttk.Frame):
             save_shift_entry(user_id, date_str, action, keep_request_record=True)
             update_wunschfrei_status(request_id, "Genehmigt")
             self.build_shift_plan_grid(self.app.current_display_date.year, self.app.current_display_date.month)
-
 
     def _save_shift_and_update_ui(self, user_id, date_str, old_shift, new_shift):
         success, message = save_shift_entry(user_id, date_str, new_shift)
@@ -763,4 +771,3 @@ class ShiftPlanTab(ttk.Frame):
 
     def refresh_plan(self):
         self.build_shift_plan_grid(self.app.current_display_date.year, self.app.current_display_date.month)
-

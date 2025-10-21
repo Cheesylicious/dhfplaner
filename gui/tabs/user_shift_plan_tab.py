@@ -90,8 +90,10 @@ class UserShiftPlanTab(ttk.Frame):
             widget.destroy()
         self.tooltips.clear()
         self.grid_widgets = {'cells': {}, 'user_totals': {}, 'daily_counts': {}}
-        if year != self.app.current_display_date.year:
-            self.app._load_holidays_for_year(year)
+
+        # Kleiner Fix: `_load_holidays_for_year` erwartet ein Jahr als int
+        self.app._load_holidays_for_year(year)
+        self.app._load_events_for_year(year)
 
         self.processed_vacations = self._process_vacations(year, month)
         users = get_ordered_users_for_schedule(include_hidden=False)
@@ -399,8 +401,7 @@ class UserShiftPlanTab(ttk.Frame):
 
         label_tn = f"Wunsch: 'T. oder N.' eintragen" if not existing_request else f"Wunsch auf 'T. oder N.' ändern"
         context_menu.add_command(label=label_tn,
-                                  command=lambda: self._handle_user_request(year, month, day, "T/N"))
-
+                                 command=lambda: self._handle_user_request(year, month, day, "T/N"))
 
         other_shifts_available = any(request_config.get(s, False) for s in ["6", "24"])
         if other_shifts_available:
@@ -425,9 +426,11 @@ class UserShiftPlanTab(ttk.Frame):
         context_menu = tk.Menu(self, tearoff=0)
         if request_info.get('requested_shift') == 'T/N':
             context_menu.add_command(label="Als Tagschicht annehmen",
-                                     command=lambda: self.respond_to_admin_request(request_info['id'], 'Genehmigt', 'T.'))
+                                     command=lambda: self.respond_to_admin_request(request_info['id'], 'Genehmigt',
+                                                                                   'T.'))
             context_menu.add_command(label="Als Nachtschicht annehmen",
-                                     command=lambda: self.respond_to_admin_request(request_info['id'], 'Genehmigt', 'N.'))
+                                     command=lambda: self.respond_to_admin_request(request_info['id'], 'Genehmigt',
+                                                                                   'N.'))
             context_menu.add_separator()
             context_menu.add_command(label="Ablehnen",
                                      command=lambda: self.respond_to_admin_request(request_info['id'], 'Abgelehnt'))
@@ -531,7 +534,8 @@ class UserShiftPlanTab(ttk.Frame):
             self.wunschfrei_data[user_id_str] = {}
         if request_info:
             self.wunschfrei_data[user_id_str][date_str] = (
-                request_info['status'], request_info['requested_shift'], request_info.get('requested_by', 'user'), None) # No timestamp
+                request_info['status'], request_info['requested_shift'], request_info.get('requested_by', 'user'),
+                None)  # No timestamp
         elif date_str in self.wunschfrei_data.get(user_id_str, {}):
             del self.wunschfrei_data[user_id_str][date_str]
 
@@ -605,18 +609,19 @@ class UserShiftPlanTab(ttk.Frame):
             messagebox.showerror("Fehler", message, parent=self)
 
     def show_previous_month(self):
+        current_date = self.app.current_display_date
         self.app.current_display_date = (self.app.current_display_date.replace(day=1) - timedelta(days=1)).replace(
             day=1)
-        if self.app.current_display_date.year != self.app.current_display_date.year:
+        if current_date.year != self.app.current_display_date.year:
             self.app._load_holidays_for_year(self.app.current_display_date.year)
             self.app._load_events_for_year(self.app.current_display_date.year)
         self.build_shift_plan_grid(self.app.current_display_date.year, self.app.current_display_date.month)
 
     def show_next_month(self):
+        current_date = self.app.current_display_date
         days_in_month = calendar.monthrange(self.app.current_display_date.year, self.app.current_display_date.month)[1]
         self.app.current_display_date = self.app.current_display_date.replace(day=1) + timedelta(days=days_in_month)
-        if self.app.current_display_date.year != self.app.current_display_date.year:
+        if current_date.year != self.app.current_display_date.year:
             self.app._load_holidays_for_year(self.app.current_display_date.year)
             self.app._load_events_for_year(self.app.current_display_date.year)
         self.build_shift_plan_grid(self.app.current_display_date.year, self.app.current_display_date.month)
-
