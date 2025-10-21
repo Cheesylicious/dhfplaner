@@ -14,6 +14,9 @@ from database.db_core import (
     reset_shift_frequency
 )
 
+# NEU: Import der Logout-Funktion
+from database.db_users import log_user_logout
+
 from .tabs.shift_plan_tab import ShiftPlanTab
 from .tabs.user_management_tab import UserManagementTab
 from .tabs.dog_management_tab import DogManagementTab
@@ -25,6 +28,8 @@ from .tabs.vacation_requests_tab import VacationRequestsTab
 from .tabs.request_lock_tab import RequestLockTab
 from .tabs.user_tab_settings_tab import UserTabSettingsTab
 from .tabs.participation_tab import ParticipationTab
+# NEU: Import des neuen Protokoll-Reiters
+from .tabs.protokoll_tab import ProtokollTab
 from .dialogs.user_order_window import UserOrderWindow
 from .dialogs.shift_order_window import ShiftOrderWindow
 from .dialogs.min_staffing_window import MinStaffingWindow
@@ -93,11 +98,15 @@ class MainAdminWindow(tk.Toplevel):
     def on_close(self):
         """Wird aufgerufen, wenn das Fenster geschlossen wird. Speichert Schichthäufigkeit."""
         self.save_shift_frequency()
+        # Protokolliere Logout beim Schließen des Fensters
+        log_user_logout(self.user_data['id'], self.user_data['vorname'], self.user_data['name'])
         self.app.on_app_close()
 
     def logout(self):
         """Zerstört das Hauptfenster, um zum Login zurückzukehren. Speichert Schichthäufigkeit."""
         self.save_shift_frequency()
+        # Protokolliere Logout beim Abmelden
+        log_user_logout(self.user_data['id'], self.user_data['vorname'], self.user_data['name'])
         self.app.on_logout(self)
 
     def setup_header(self):
@@ -129,7 +138,10 @@ class MainAdminWindow(tk.Toplevel):
                            "Diensthunde": DogManagementTab(self.notebook, self),
                            "Wunschanfragen": RequestsTab(self.notebook, self),
                            "Urlaubsanträge": VacationRequestsTab(self.notebook, self),
-                           "Bug-Reports": BugReportsTab(self.notebook, self), "Logs": LogTab(self.notebook, self)}
+                           "Bug-Reports": BugReportsTab(self.notebook, self),
+                           "Logs": LogTab(self.notebook, self),
+                           "Protokoll": ProtokollTab(self.notebook, self) # NEU: Der Protokoll-Reiter wird hinzugefügt
+                           }
         for name, frame in self.tab_frames.items():
             self.notebook.add(frame, text=name)
         self.update_tab_titles()

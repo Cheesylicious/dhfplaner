@@ -305,7 +305,7 @@ class EventSettingsWindow(tk.Toplevel):
             self.date_entries[event_type].set_date(None)
 
     def _save_current_year_changes(self):
-        all_events_data = EventManager.load_events()
+        all_events_data = EventManager.get_all_events()
         all_events_data[str(self.year.get())] = self.events
         EventManager.save_events(all_events_data)
 

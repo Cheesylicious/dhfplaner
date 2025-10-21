@@ -6,6 +6,9 @@ import os
 from datetime import date, datetime, timedelta
 import calendar
 
+# NEU: Import der Logout-Funktion
+from database.db_users import mark_tutorial_seen, log_user_logout
+
 from .tabs.user_shift_plan_tab import UserShiftPlanTab
 from .tabs.vacation_tab import VacationTab
 from .tabs.my_requests_tab import MyRequestsTab
@@ -163,9 +166,13 @@ class MainUserWindow(tk.Toplevel):
         style.map('Logout.TButton', background=[('active', 'goldenrod')], foreground=[('active', 'black')])
 
     def on_close(self):
+        # Protokolliere Logout beim Schließen des Fensters
+        log_user_logout(self.user_data['id'], self.user_data['vorname'], self.user_data['name'])
         self.app.on_app_close()
 
     def logout(self):
+        # Protokolliere Logout beim Abmelden
+        log_user_logout(self.user_data['id'], self.user_data['vorname'], self.user_data['name'])
         self.app.on_logout(self)
 
     def setup_ui(self):

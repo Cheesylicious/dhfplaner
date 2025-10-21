@@ -14,20 +14,14 @@ class EventManager:
         """
         success = True
 
-        # HACK: Da diese Funktion nur zum Speichern verwendet wird,
-        # löschen wir zuerst alle alten Termine (vereinfachte Logik).
-        # In einer Produktions-App würde man hier gezielter mit Update/Insert arbeiten.
-
-        # 1. Alle vorhandenen Termine aus der DB holen
-        all_existing_appointments = get_special_appointments()
-
-        # 2. Bestehende Termine löschen, die nicht mehr in events_by_year enthalten sind (komplex, daher vereinfacht):
-        # Wir setzen alle Termine des aktuellen Jahres als neu zu speichernde Daten.
-
-        # Einfachere Logik: Alle des Jahres löschen und neu speichern:
-
-        # Wir iterieren durch das gesamte Set und speichern neu, da die DB die Duplikatprüfung übernimmt.
+        # Wir löschen für jedes Jahr im übergebenen Dictionary zuerst die alten Einträge
+        # und speichern dann die neuen. Das stellt sicher, dass auch Löschungen
+        # korrekt in der Datenbank abgebildet werden.
         for year, year_events in events_by_year.items():
+            # Zuerst alle alten Termine für das Jahr löschen
+            EventManager.delete_events_for_year(year)
+
+            # Dann die neuen Termine speichern
             for date_str, appointment_type in year_events.items():
                 if not save_special_appointment(date_str, appointment_type, description=""):
                     success = False
@@ -57,6 +51,25 @@ class EventManager:
                 events_of_year[appt_date_str] = appt['appointment_type']
 
         return events_of_year
+
+    @staticmethod
+    def get_all_events():
+        """
+        Holt alle Sondertermine aus der Datenbank und gibt sie nach Jahren gruppiert zurück.
+        Gibt die Daten im Format {jahr: {datum: typ, ...}} zurück.
+        """
+        all_appointments = get_special_appointments()
+        events_by_year = {}
+
+        for appt in all_appointments:
+            appt_date_str = appt['appointment_date']
+            if appt_date_str:
+                year = appt_date_str.split('-')[0]
+                if year not in events_by_year:
+                    events_by_year[year] = {}
+                events_by_year[year][appt_date_str] = appt['appointment_type']
+
+        return events_by_year
 
     @staticmethod
     def get_event_type(current_date, events_of_year):
