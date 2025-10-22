@@ -14,7 +14,9 @@ DB_CONFIG = {
     "user": "planer_user",
     "password": "PlanerNeu-2025#",
     "database": "planer_db",
-    "raise_on_warnings": True
+    "raise_on_warnings": True,
+    # HIER IST DIE LÖSUNG: Erzwinge die alte Authentifizierungsmethode
+    "auth_plugin": "mysql_native_password"
 }
 # ==============================================================================
 
