@@ -102,6 +102,7 @@ class MainAdminWindow(tk.Toplevel):
             "Bug-Reports": BugReportsTab,
             "Logs": LogTab,
             "Protokoll": ProtokollTab
+            "Dummy": None
         }
         self.tab_frames = {}
         self.loaded_tabs = set()
@@ -748,4 +749,5 @@ class MainAdminWindow(tk.Toplevel):
 
     def open_planning_assistant_settings(self):
         # ... (unverändert) ...
+
         PlanningAssistantSettingsWindow(self)
