@@ -1,7 +1,15 @@
-# database/db_users.py
 from database.db_core import create_connection, hash_password, _log_activity, _create_admin_notification
 from datetime import datetime
 import mysql.connector
+
+# --- NEUE GLOBALE CACHE-VARIABLEN ---
+_USER_ORDER_CACHE = None
+
+
+def clear_user_order_cache():
+    """Leert den Cache für die sortierte Liste der Benutzer."""
+    global _USER_ORDER_CACHE
+    _USER_ORDER_CACHE = None
 
 
 def get_user_count():
@@ -85,10 +93,14 @@ def log_user_logout(user_id, vorname, name):
                 duration_str = ""
                 if hours > 0: duration_str += f"{hours}h "
                 if minutes > 0: duration_str += f"{minutes}m "
-                duration_str += f"{seconds}s"
+                if seconds > 0: duration_str += f"{seconds}s"  # Sekunden nur anzeigen, wenn > 0
 
-                # Die Dauer wird explizit in das Detailfeld geschrieben, um später extrahiert zu werden.
-                log_details = f'Benutzer {user_fullname} hat sich abgemeldet. Sitzungsdauer: {duration_str.strip()}.'
+                # Wenn Dauer 0s, dann keine Dauer anzeigen
+                if total_seconds > 0:
+                    log_details = f'Benutzer {user_fullname} hat sich abgemeldet. Sitzungsdauer: {duration_str.strip()}.'
+                else:
+                    log_details = f'Benutzer {user_fullname} hat sich abgemeldet.'
+
             except ValueError:
                 log_details = f'Benutzer {user_fullname} hat sich abgemeldet. Sitzungsdauer konnte nicht berechnet werden (Login-Zeitpunkt Fehler).'
         else:
@@ -121,6 +133,9 @@ def register_user(vorname, name, password, role="Benutzer"):
         )
         _log_activity(cursor, None, 'USER_REGISTRATION', f'Benutzer {vorname} {name} hat sich registriert.')
         conn.commit()
+
+        clear_user_order_cache()
+
         return True, "Benutzer erfolgreich registriert."
     except Exception as e:
         conn.rollback()
@@ -212,26 +227,44 @@ def get_all_users_with_details():
 
 
 def get_ordered_users_for_schedule(include_hidden=False):
-    """Holt die Benutzer in der festgelegten Reihenfolge."""
+    """Holt die Benutzer in der festgelegten Reihenfolge und nutzt einen Cache."""
+    global _USER_ORDER_CACHE
+
+    # 1. Cache-Prüfung
+    if _USER_ORDER_CACHE is not None:
+        # Filterung basierend auf dem 'include_hidden'-Flag
+        if include_hidden:
+            return _USER_ORDER_CACHE
+        else:
+            return [user for user in _USER_ORDER_CACHE if user.get('is_visible', 1) == 1]
+
+    # 2. Cache Miss: DB-Abruf
     conn = create_connection()
     if conn is None:
         return []
     try:
         cursor = conn.cursor(dictionary=True)
 
+        # Holen aller Benutzer, inkl. Sichtbarkeit und Sortierung
         query = """
-                SELECT u.*, COALESCE(uo.is_visible, 1) as is_visible
+                SELECT u.*, uo.sort_order, COALESCE(uo.is_visible, 1) as is_visible
                 FROM users u
                          LEFT JOIN user_order uo ON u.id = uo.user_id \
+                ORDER BY uo.sort_order ASC, u.name ASC
                 """
-        if not include_hidden:
-            query += " WHERE COALESCE(uo.is_visible, 1) = 1"
-
-        query += " ORDER BY uo.sort_order ASC, u.id ASC"
 
         cursor.execute(query)
-        users = cursor.fetchall()
-        return users
+        all_users = cursor.fetchall()
+
+        # 3. Cache füllen (mit allen Benutzern, unabhängig von is_visible)
+        _USER_ORDER_CACHE = all_users
+
+        # 4. Rückgabe basierend auf dem Flag
+        if include_hidden:
+            return all_users
+        else:
+            return [user for user in all_users if user.get('is_visible', 1) == 1]
+
     except mysql.connector.Error as e:
         print(f"Fehler beim Abrufen der sortierten Benutzer: {e}")
         return []
@@ -242,7 +275,7 @@ def get_ordered_users_for_schedule(include_hidden=False):
 
 
 def save_user_order(user_order_list):
-    """Speichert die neue Reihenfolge und Sichtbarkeit der Benutzer."""
+    """Speichert die neue Reihenfolge und Sichtbarkeit der Benutzer und leert den Cache."""
     conn = create_connection()
     if conn is None:
         return False, "Keine Datenbankverbindung."
@@ -259,7 +292,12 @@ def save_user_order(user_order_list):
                     VALUES (is_visible) \
                     """
             cursor.execute(query, (user_id, index, is_visible))
+
         conn.commit()
+
+        # WICHTIG: Cache nach erfolgreichem Schreiben leeren
+        clear_user_order_cache()
+
         return True, "Reihenfolge erfolgreich gespeichert."
     except Exception as e:
         conn.rollback()
@@ -304,7 +342,9 @@ def update_user_details(user_id, details, current_user_id):
         cursor.execute(query, tuple(values))
 
         _log_activity(cursor, current_user_id, 'USER_UPDATE', f'Daten für Benutzer-ID {user_id} aktualisiert.')
+
         conn.commit()
+        clear_user_order_cache()  # Details könnten Diensthund oder Name ändern, was die Sortierung beeinflusst
         return True, "Benutzerdaten erfolgreich aktualisiert."
     except Exception as e:
         conn.rollback()
@@ -329,7 +369,9 @@ def delete_user(user_id, current_user_id):
         cursor.execute("DELETE FROM users WHERE id = %s", (user_id,))
         _log_activity(cursor, current_user_id, 'USER_DELETION', f'Benutzer {user_fullname} (ID: {user_id}) gelöscht.')
         _create_admin_notification(cursor, f'Benutzer {user_fullname} wurde gelöscht.')
+
         conn.commit()
+        clear_user_order_cache()
         return True, "Benutzer erfolgreich gelöscht."
     except Exception as e:
         conn.rollback()

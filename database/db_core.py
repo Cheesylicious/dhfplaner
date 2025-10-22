@@ -66,6 +66,18 @@ def _add_column_if_not_exists(cursor, table_name, column_name, column_type):
         cursor.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_type}")
 
 
+def _add_index_if_not_exists(cursor, table_name, index_name, columns):
+    """Fügt einen Index hinzu, falls er noch nicht existiert."""
+    # Verwenden Sie DATABASE() anstelle von TABLE_SCHEMA = 'db_name' für Flexibilität
+    cursor.execute(f"""
+        SELECT COUNT(*) FROM INFORMATION_SCHEMA.STATISTICS
+        WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = '{table_name}' AND INDEX_NAME = '{index_name}'
+    """)
+    if cursor.fetchone()[0] == 0:
+        print(f"Füge Index '{index_name}' zur Tabelle '{table_name}' hinzu...")
+        cursor.execute(f"CREATE INDEX {index_name} ON {table_name} ({columns})")
+
+
 def initialize_db():
     config_init = DB_CONFIG.copy()
     db_name = config_init.pop('database')
@@ -124,7 +136,11 @@ def initialize_db():
         cursor.execute(
             "CREATE TABLE IF NOT EXISTS chat_messages (id INT AUTO_INCREMENT PRIMARY KEY, sender_id INT NOT NULL, recipient_id INT NOT NULL, message TEXT NOT NULL, timestamp DATETIME DEFAULT CURRENT_TIMESTAMP, is_read INT DEFAULT 0, FOREIGN KEY (sender_id) REFERENCES users(id) ON DELETE CASCADE, FOREIGN KEY (recipient_id) REFERENCES users(id) ON DELETE CASCADE);")
 
-        # --- Spalten hinzufügen ---
+        # --- Index hinzufügen (NEU FÜR PERFORMANCE) ---
+        # Dieser Index beschleunigt die Abfragen nach Schichten für einen Monatsbereich.
+        _add_index_if_not_exists(cursor, "shift_schedule", "idx_shift_date_user", "shift_date(255), user_id")
+
+        # --- Spalten hinzufügen (Migrationslogik) ---
         _add_column_if_not_exists(cursor, "users", "entry_date", "TEXT")
         _add_column_if_not_exists(cursor, "shift_types", "color", "TEXT DEFAULT '#FFFFFF'")
         _add_column_if_not_exists(cursor, "user_order", "is_visible", "INT DEFAULT 1")
@@ -163,7 +179,7 @@ def save_config_json(key, data_dict):
     try:
         cursor = conn.cursor()
         data_json = json.dumps(data_dict)
-        query = "INSERT INTO config_storage (config_key, config_json) VALUES (%s, %s) ON DUPLICATE KEY UPDATE config_json = VALUES(config_json)"
+        query = "INSERT INTO config_storage (config_key, config_json) VALUES (%s, %s) AS new_value ON DUPLICATE KEY UPDATE config_json = new_value.config_json"
         cursor.execute(query, (key, data_json))
         conn.commit()
         return True

@@ -1,46 +1,23 @@
 # -*- mode: python ; coding: utf-8 -*-
 
-
 block_cipher = None
 
-# Da die Datenbank-Zugangsdaten hartkodiert sind und Tkinter jetzt korrekt funktioniert,
-# ist diese Liste für Deine Assets vorgesehen (z.B. Icons).
+# Alle Daten-Dateien und ihre Zielordner im fertigen Programm
+# ('quelldatei', 'zielordner_im_bundle')
 added_files = [
-    # Kopiere das gesamte 'gui'-Verzeichnis in den 'gui'-Unterordner des Bundles.
     ('gui', 'gui'),
-    # Kopiere das gesamte 'database'-Verzeichnis in den 'database'-Unterordner des Bundles.
     ('database', 'database'),
-
-    # WICHTIG: main.py MUSS wieder extern sein.
     ('main.py', '.'),
-
-    # Die Datenbank-Datei planer.db in den 'database' Ordner kopieren.
     ('planer.db', 'database'),
-
+    ('update_manager.py', '.'),
+    ('version.txt', '.'),
 ]
 
-# --- ENDE DER DATEN-DEFINITION ---
-
-# ERSTELLEN DER BINARIES-LISTE MIT PFADEN (KOMPLETT AUTOMATISIERT)
-# ------------------------------------------------------------------
-# Die Liste ist LEER. PyInstaller findet die DLLs aus der Conda-Umgebung selbst.
-binaries_to_add = []
-
-# ------------------------------------------------------------------
-
-
 a = Analysis(
-    # KORREKTUR: Der Bootloader ist der einzige Code, der in die EXE kommt.
     ['boot_loader.py'],
-
-    # Pathex ist der Pfad zum Projektordner
-    pathex=['C:\\Python313\\Projekte\\DHF Planer'],
-    # Leere Binärliste
-    binaries=binaries_to_add,
-
+    pathex=['C:\\Python313\\Projekte\\DHF Planer'], # Passe dies bei Bedarf an
+    binaries=[],
     datas=added_files,
-
-    # Versteckte Imports (alle Fixes beibehalten)
     hiddenimports=[
         'tkinter',
         'tkinter.ttk',
@@ -60,19 +37,16 @@ a = Analysis(
         'mysql.connector.abstracts',
         'mysql.connector.plugins.mysql_native_password',
     ],
-
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    # WICHTIG: Die Pakete 'database' und 'gui' MÜSSEN EXCLUDED werden!
     excludes=['database', 'gui'],
     win_no_prefer_redirects=False,
     win_private_assemblies=False,
     cipher=block_cipher,
     noarchive=False,
 )
-pyz = PYZ(a.pure, a.zipped_data,
-             cipher=block_cipher)
+pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
 
 exe = EXE(
     pyz,
@@ -86,16 +60,8 @@ exe = EXE(
     bootloader_ignore_signals=False,
     strip=False,
     upx=True,
-    upx_exclude=[],
     runtime_tmpdir=None,
-
-    # WICHTIG: Konsole ANLASSEN, um den Fehler beim Laden der externen main.py zu sehen.
-    console=True,
-    disable_windowed_traceback=False,
-    argv_emulation=False,
-    target_arch=None,
-    codesign_identity=None,
-    entitlements_file=None,
+    console=True, # Konsole anlassen für die Fehlersuche
 )
 
 coll = COLLECT(
