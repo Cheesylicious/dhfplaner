@@ -171,7 +171,7 @@ class ShiftPlanTab(ttk.Frame):
         self.update_lock_status()
 
         # Thread starten
-        threading.Thread(target=self._load_data_in_thread, args=(year, month)).start()
+        threading.Thread(target=self._load_data_in_thread, args=(year, month), daemon=True).start()
 
     def _update_progress(self, step_value, step_text):
         """Sichere Methode zur Aktualisierung des Ladebalkens aus dem Worker-Thread."""
@@ -189,15 +189,18 @@ class ShiftPlanTab(ttk.Frame):
         except Exception as e:
             print(f"Fehler beim Laden der Daten im Thread: {e}")
             self.after(1, lambda: messagebox.showerror("Fehler", f"Fehler beim Laden der Daten: {e}", parent=self))
-            self.after(1, lambda: self.status_label.config(text="Laden fehlgeschlagen. Siehe Konsole für Details."))
+            self.after(1_0, lambda: self.status_label.config(text="Laden fehlgeschlagen. Siehe Konsole für Details."))
 
     def _render_grid(self, year, month):
         """
         Rendert das Grid im Haupt-Thread.
         """
         # 1. Sofortiges Update auf 100% und Statuswechsel im Haupt-Thread, um Feedback zu geben.
-        self.progress_bar.config(value=100)
-        self.status_label.config(text="Zeichne Gitter: Letzter Schritt (1-2s Verzögerung möglich)...")
+        #    Wir prüfen, ob die Widgets noch existieren, falls der User schon weitergeklickt hat.
+        if self.progress_bar and self.progress_bar.winfo_exists():
+            self.progress_bar.config(value=100)
+        if self.status_label and self.status_label.winfo_exists():
+            self.status_label.config(text="Zeichne Gitter: Letzter Schritt (1-2s Verzögerung möglich)...")
 
         # 2. Starte den blockierenden Render-Vorgang (Chunking-Start)
         self.after(1, lambda: self.renderer.build_shift_plan_grid(year, month, data_ready=True))
@@ -207,7 +210,14 @@ class ShiftPlanTab(ttk.Frame):
         Wird vom Renderer aufgerufen, wenn der Zeichenprozess beendet ist.
         Führt das finale UI-Cleanup durch.
         """
-        self.progress_frame.grid_forget()
+
+        # --- KORREKTUR (Bugfix für Race Condition) ---
+        # Prüfen, ob das progress_frame noch existiert, bevor wir
+        # versuchen, es zu entfernen. Es könnte durch einen
+        # schnellen Klick (z.B. refresh) bereits zerstört worden sein.
+        if self.progress_frame and self.progress_frame.winfo_exists():
+            self.progress_frame.grid_forget()
+        # --- ENDE KORREKTUR ---
 
         self.inner_frame.update_idletasks()
         self.canvas.config(scrollregion=self.canvas.bbox("all"))
@@ -225,12 +235,20 @@ class ShiftPlanTab(ttk.Frame):
             widget.destroy()
 
         # Erstelle das Fortschritts-Frame NEU (wird gleich wieder zerstört, aber ist sicherer)
-        self._create_progress_widgets()
+        # self._create_progress_widgets() # Nehmen wir raus, da es beim schnellen Refresh flackert
 
         self.renderer.build_shift_plan_grid(year, month, data_ready=True)
 
         # Finalisierung für den synchronen Aufruf (da Renderer hier nicht _finalize_ui_after_render aufruft)
-        self._finalize_ui_after_render()
+        self._finalize_ui_after_render_sync()
+
+    def _finalize_ui_after_render_sync(self):
+        """
+        Eine spezielle Version von _finalize für den synchronen Refresh,
+        die *nicht* versucht, den (nicht existierenden) Ladebalken zu entfernen.
+        """
+        self.inner_frame.update_idletasks()
+        self.canvas.config(scrollregion=self.canvas.bbox("all"))
 
     def show_previous_month(self):
         self.clear_understaffing_results()
@@ -263,8 +281,16 @@ class ShiftPlanTab(ttk.Frame):
         self.data_manager.load_and_process_data(year, month)
         daily_counts = self.data_manager.daily_counts
 
-        shifts_to_check = [s['abbreviation'] for s in self.app.get_ordered_shift_abbrevs(include_hidden=True) if
-                           s.get('check_for_understaffing')]
+        # --- KORREKTUR: Verwende self.app.shift_types_data statt self.app.get_ordered_shift_abbrevs ---
+        # get_ordered_shift_abbrevs gibt eine LISTE von Dictionaries zurück,
+        # aber wir müssen auf die DATEN zugreifen, die im shift_types_data Dictionary gespeichert sind.
+
+        shifts_to_check = []
+        for abbrev, shift_data in self.app.shift_types_data.items():
+            if shift_data.get('check_for_understaffing'):
+                shifts_to_check.append(abbrev)
+        # --- ENDE KORREKTUR ---
+
         understaffing_found = False
 
         for day in range(1, days_in_month + 1):
