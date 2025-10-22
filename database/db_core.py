@@ -49,6 +49,11 @@ def close_pool():
 # --- Wichtige Konstanten ---
 ROLE_HIERARCHY = {"Gast": 1, "Benutzer": 2, "Admin": 3, "SuperAdmin": 4}
 MIN_STAFFING_RULES_CONFIG_KEY = "MIN_STAFFING_RULES"
+# --- KONSTANTEN FÜR DATEI-MIGRATION ---
+REQUEST_LOCKS_CONFIG_KEY = "REQUEST_LOCKS"
+ADMIN_MENU_CONFIG_KEY = "ADMIN_MENU_CONFIG"
+USER_TAB_ORDER_CONFIG_KEY = "USER_TAB_ORDER"
+ADMIN_TAB_ORDER_CONFIG_KEY = "ADMIN_TAB_ORDER"
 
 
 def hash_password(password):
@@ -137,7 +142,6 @@ def initialize_db():
             "CREATE TABLE IF NOT EXISTS chat_messages (id INT AUTO_INCREMENT PRIMARY KEY, sender_id INT NOT NULL, recipient_id INT NOT NULL, message TEXT NOT NULL, timestamp DATETIME DEFAULT CURRENT_TIMESTAMP, is_read INT DEFAULT 0, FOREIGN KEY (sender_id) REFERENCES users(id) ON DELETE CASCADE, FOREIGN KEY (recipient_id) REFERENCES users(id) ON DELETE CASCADE);")
 
         # --- Index hinzufügen (NEU FÜR PERFORMANCE) ---
-        # Dieser Index beschleunigt die Abfragen nach Schichten für einen Monatsbereich.
         _add_index_if_not_exists(cursor, "shift_schedule", "idx_shift_date_user", "shift_date(255), user_id")
 
         # --- Spalten hinzufügen (Migrationslogik) ---
@@ -162,6 +166,9 @@ def initialize_db():
         _add_column_if_not_exists(cursor, "users", "last_ausbildung", "TEXT")
         _add_column_if_not_exists(cursor, "users", "last_schiessen", "TEXT")
         _add_column_if_not_exists(cursor, "users", "last_seen", "DATETIME")
+
+        # --- NEU FÜR FREISCHALTUNG (HIER WIRD DIE SPALTE HINZUGEFÜGT) ---
+        _add_column_if_not_exists(cursor, "users", "is_approved", "INT DEFAULT 0")
 
         conn.commit()
         print("Datenbank und Tabellen erfolgreich initialisiert/überprüft.")
@@ -336,10 +343,65 @@ def _create_admin_notification(cursor, message):
     )
 
 
+# --- NEUE FUNKTION FÜR UNIVERSELLE FREISCHALTUNG ---
+def run_db_fix_approve_all_users():
+    """
+    Setzt den is_approved Status für ALLE bestehenden Benutzer auf 1.
+    Wird nach der Spaltenmigration benötigt, da der Standardwert 0 ist und bestehende Benutzer den Login verlieren.
+    """
+    conn = create_connection()
+    if not conn:
+        return False, "Keine Datenbankverbindung."
+
+    try:
+        cursor = conn.cursor()
+
+        # Setze is_approved = 1 für alle Benutzer, wo die Spalte existiert und der Wert 0 ist.
+        # Dies korrigiert die Datenbank für alle bestehenden User.
+        cursor.execute("UPDATE users SET is_approved = 1 WHERE is_approved = 0")
+
+        updated_rows = cursor.rowcount
+        conn.commit()
+        return True, f"{updated_rows} bestehende Benutzer wurden erfolgreich freigeschaltet. Bitte loggen Sie sich nun mit Ihren normalen Zugangsdaten neu ein."
+
+    except mysql.connector.Error as e:
+        return False, f"Ein Datenbankfehler ist aufgetreten: {e}"
+    except Exception as e:
+        return False, f"Ein unerwarteter Fehler ist aufgetreten: {e}"
+    finally:
+        if conn and conn.is_connected():
+            cursor.close()
+            conn.close()
+
+
+def run_db_update_is_approved():
+    """
+    Führt ein einmaliges Datenbank-Update durch, um die 'is_approved'-Spalte hinzuzufügen.
+    """
+    conn = create_connection()
+    if not conn:
+        return False, "Keine Datenbankverbindung."
+
+    try:
+        cursor = conn.cursor()
+
+        # --- Schritt 1: Spalte 'is_approved' hinzufügen ---
+        _add_column_if_not_exists(cursor, "users", "is_approved", "INT DEFAULT 0")
+
+        conn.commit()
+        return True, "Datenbank-Update (is_approved Spalte) erfolgreich ausgeführt! Registrierungen sollten jetzt funktionieren."
+
+    except mysql.connector.Error as e:
+        return False, f"Ein Fehler ist aufgetreten: {e}"
+    finally:
+        if conn and conn.is_connected():
+            cursor.close()
+            conn.close()
+
+
 def run_db_update_v1():
     """
-    Führt ein einmaliges Datenbank-Update durch, um die 'last_seen'-Spalte und die 'chat_messages'-Tabelle hinzuzufügen.
-    Gibt (True, "Meldung") bei Erfolg oder (False, "Fehlermeldung") bei einem Fehler zurück.
+    Führt ein einmaliges Datenbank-Update für die Chat-Funktion durch. (Bestehende Funktion)
     """
     conn = create_connection()
     if not conn:
