@@ -1,8 +1,8 @@
 # gui/main_user_window.py
 import tkinter as tk
 from tkinter import ttk, messagebox
-import json
-import os
+# import json # ENTFERNT
+# import os # ENTFERNT
 from datetime import date, datetime, timedelta
 import calendar
 
@@ -33,38 +33,18 @@ from database.db_users import mark_tutorial_seen, log_user_logout
 from .tab_lock_manager import TabLockManager
 from database.db_core import load_config_json, load_shift_frequency, save_shift_frequency  # Angepasste Imports
 from database.db_chat import get_senders_with_unread_messages
+# --- NEUER IMPORT FÜR DB-GESTEUERTE REIHENFOLGE ---
+from .user_tab_order_manager import UserTabOrderManager as TabOrderManager
 
-USER_TAB_ORDER_FILE = 'user_tab_order_config.json'
+# USER_TAB_ORDER_FILE = 'user_tab_order_config.json' # ENTFERNT
 DEFAULT_RULES = {"Daily": {}, "Sa-So": {}, "Fr": {}, "Mo-Do": {}, "Holiday": {}, "Colors": {}}
 
 
-class TabOrderManager:
-    # ... (Klasse unverändert) ...
-    DEFAULT_ORDER = ["Schichtplan", "Chat", "Meine Anfragen", "Mein Urlaub", "Bug-Reports"]
-
-    @staticmethod
-    def load_order():
-        if not os.path.exists(USER_TAB_ORDER_FILE):
-            TabOrderManager.save_order(TabOrderManager.DEFAULT_ORDER)
-            return TabOrderManager.DEFAULT_ORDER
-        try:
-            with open(USER_TAB_ORDER_FILE, 'r', encoding='utf-8') as f:
-                return json.load(f)
-        except (json.JSONDecodeError, IOError):
-            return TabOrderManager.DEFAULT_ORDER
-
-    @staticmethod
-    def save_order(order_list):
-        try:
-            with open(USER_TAB_ORDER_FILE, 'w', encoding='utf-8') as f:
-                json.dump(order_list, f, indent=4)
-            return True
-        except IOError:
-            return False
-
+# Die ursprüngliche Klasse TabOrderManager wurde entfernt.
 
 class TabOrderWindow(tk.Toplevel):
-    # ... (Klasse unverändert) ...
+    """Fenster zum Anpassen der Reiter-Reihenfolge (Nutzt jetzt DB-Manager)."""
+
     def __init__(self, master, callback, all_tab_names):
         super().__init__(master)
         self.callback = callback
@@ -129,6 +109,7 @@ class TabOrderWindow(tk.Toplevel):
 
     def save(self):
         new_order = list(self.listbox.get(0, tk.END))
+        # Nutzt TabOrderManager (jetzt DB-Manager)
         if TabOrderManager.save_order(new_order):
             self.callback(new_order)
             self.destroy()
@@ -363,6 +344,7 @@ class MainUserWindow(tk.Toplevel):
     def setup_lazy_tabs(self):
         # ... (unverändert) ...
         print("[DEBUG] setup_lazy_tabs: Erstelle Platzhalter...")
+        # Lade die Reihenfolge über den DB-Manager
         saved_order = TabOrderManager.load_order()
         all_defined_tabs = self.tab_definitions.keys()
         final_order = [tab for tab in saved_order if tab in all_defined_tabs]
@@ -467,7 +449,7 @@ class MainUserWindow(tk.Toplevel):
         self.user_data['has_seen_tutorial'] = 1
 
     def open_tab_order_window(self):
-        # ... (unverändert) ...
+        # Ruft TabOrderWindow auf, das nun den DB-Manager verwendet.
         all_tab_names = list(self.tab_definitions.keys());
         TabOrderWindow(self, self.reorder_tabs, all_tab_names)
 

@@ -1,19 +1,9 @@
 # gui/request_lock_manager.py
-import json
-import os
-import sys
 from datetime import datetime
+# Importiere db_core und nutze die bereits vorhandenen DB-Funktionen
+from database import db_core
 
-# Stellt sicher, dass der Pfad zur Sperrdatei immer korrekt ist,
-# egal ob das Skript direkt oder als kompilierte Anwendung ausgeführt wird.
-if getattr(sys, 'frozen', False):
-    # Anwendung wird als .exe ausgeführt
-    BASE_DIR = os.path.dirname(sys.executable)
-else:
-    # Anwendung wird als Python-Skript ausgeführt
-    BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
-
-LOCK_FILE = os.path.join(BASE_DIR, 'request_locks.json')
+# Die Konstanten BASE_DIR und LOCK_FILE wurden entfernt.
 
 
 class RequestLockManager:
@@ -21,7 +11,7 @@ class RequestLockManager:
     def is_month_locked(year, month):
         """Überprüft, ob ein bestimmter Monat für Anfragen gesperrt ist."""
         # --- ZUSÄTZLICHES DEBUGGING START ---
-        print(f"\n--- PRÜFE SPERRSTATUS ---")
+        print(f"\n--- PRÜFE SPERRSTATUS (DB) ---")
         print(f"Angefragtes Jahr: {year}, Monat: {month}")
         # --- ZUSÄTZLICHES DEBUGGING END ---
 
@@ -40,29 +30,14 @@ class RequestLockManager:
 
     @staticmethod
     def load_locks():
-        """Lädt die Sperrkonfiguration aus der JSON-Datei."""
-        # print(f"DEBUG: Lade Sperrdatei von: {os.path.abspath(LOCK_FILE)}") # Kann bei Bedarf wieder aktiviert werden
-
-        if not os.path.exists(LOCK_FILE):
-            return {}
-        try:
-            with open(LOCK_FILE, 'r', encoding='utf-8') as f:
-                content = f.read()
-                if not content:
-                    return {}
-
-                locks_data = json.loads(content)
-                # print(f"DEBUG: Inhalt der Datei: {locks_data}") # Kann bei Bedarf wieder aktiviert werden
-                return locks_data
-        except (json.JSONDecodeError, IOError):
-            return {}
+        """Lädt die Sperrkonfiguration aus der Datenbank."""
+        # Lade die Konfiguration aus der Datenbank
+        locks_data = db_core.load_config_json(db_core.REQUEST_LOCKS_CONFIG_KEY)
+        # Stelle sicher, dass immer ein Wörterbuch zurückgegeben wird
+        return locks_data if isinstance(locks_data, dict) else {}
 
     @staticmethod
     def save_locks(locks):
-        """Speichert die Sperrkonfiguration in der JSON-Datei."""
-        try:
-            with open(LOCK_FILE, 'w', encoding='utf-8') as f:
-                json.dump(locks, f, indent=4)
-            return True
-        except IOError:
-            return False
+        """Speichert die Sperrkonfiguration in der Datenbank."""
+        # Speichere die Konfiguration in der Datenbank
+        return db_core.save_config_json(db_core.REQUEST_LOCKS_CONFIG_KEY, locks)

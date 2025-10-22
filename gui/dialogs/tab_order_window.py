@@ -1,38 +1,15 @@
 # gui/dialogs/tab_order_window.py
 import tkinter as tk
 from tkinter import ttk, messagebox
-import json
-import os
+# import json # ENTFERNT
+# import os # ENTFERNT
+# --- NEUER IMPORT FÜR DB-GESTEUERTE REIHENFOLGE ---
+from ..admin_tab_order_manager import AdminTabOrderManager as TabOrderManager
 
-TAB_ORDER_FILE = 'tab_order_config.json'
+# TAB_ORDER_FILE = 'tab_order_config.json' # ENTFERNT
 
 
-class TabOrderManager:
-    """Verwaltet die Reihenfolge der Reiter im Admin-Fenster."""
-    DEFAULT_ORDER = [
-        "Schichtplan", "Offene Anfragen", "Urlaubsanträge",
-        "Benutzerverwaltung", "Diensthunde", "Schichtarten", "Protokoll"
-    ]
-
-    @staticmethod
-    def load_order():
-        if not os.path.exists(TAB_ORDER_FILE):
-            TabOrderManager.save_order(TabOrderManager.DEFAULT_ORDER)
-            return TabOrderManager.DEFAULT_ORDER
-        try:
-            with open(TAB_ORDER_FILE, 'r', encoding='utf-8') as f:
-                return json.load(f)
-        except (json.JSONDecodeError, IOError):
-            return TabOrderManager.DEFAULT_ORDER
-
-    @staticmethod
-    def save_order(order_list):
-        try:
-            with open(TAB_ORDER_FILE, 'w', encoding='utf-8') as f:
-                json.dump(order_list, f, indent=4)
-            return True
-        except IOError:
-            return False
+# Die ursprüngliche Klasse TabOrderManager wurde entfernt und durch den Import ersetzt.
 
 
 class TabOrderWindow(tk.Toplevel):
@@ -66,7 +43,7 @@ class TabOrderWindow(tk.Toplevel):
         ttk.Button(button_subframe, text="↑ Hoch", command=lambda: self.move_item(-1)).pack(pady=2, fill="x")
         ttk.Button(button_subframe, text="↓ Runter", command=lambda: self.move_item(1)).pack(pady=2, fill="x")
 
-        # Initialbefüllung der Liste
+        # Initialbefüllung der Liste (Nutzt jetzt DB-Manager)
         current_order = TabOrderManager.load_order()
         for tab_name in current_order:
             self.tab_listbox.insert(tk.END, tab_name)
@@ -94,6 +71,7 @@ class TabOrderWindow(tk.Toplevel):
 
     def save_and_close(self):
         new_order = list(self.tab_listbox.get(0, tk.END))
+        # Nutzt TabOrderManager (jetzt DB-Manager)
         if TabOrderManager.save_order(new_order):
             messagebox.showinfo("Gespeichert", "Die Reiter-Reihenfolge wurde aktualisiert.", parent=self)
             self.callback(new_order)

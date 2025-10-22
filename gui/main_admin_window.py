@@ -11,8 +11,6 @@ from queue import Queue, Empty
 # ---------------------------------
 
 # --- WICHTIGE IMPORTE ---
-# Alle Tabs müssen hier importiert werden, damit wir sie
-# den Definitionen zuordnen können.
 from .tabs.shift_plan_tab import ShiftPlanTab
 from .tabs.user_management_tab import UserManagementTab
 from .tabs.dog_management_tab import DogManagementTab
@@ -27,6 +25,7 @@ from .tabs.participation_tab import ParticipationTab
 from .tabs.protokoll_tab import ProtokollTab
 from .tabs.chat_tab import ChatTab
 from .tabs.password_reset_requests_window import PasswordResetRequestsWindow
+from .tabs.settings_tab import SettingsTab
 
 from database.db_core import (
     ROLE_HIERARCHY,
@@ -36,7 +35,9 @@ from database.db_core import (
     save_shift_frequency,
     reset_shift_frequency,
     MIN_STAFFING_RULES_CONFIG_KEY,
-    run_db_update_v1
+    run_db_update_v1,
+    run_db_update_is_approved,
+    run_db_fix_approve_all_users  # <-- NEUER IMPORT
 )
 from database.db_chat import get_senders_with_unread_messages
 from database.db_users import log_user_logout
@@ -72,7 +73,6 @@ class MainAdminWindow(tk.Toplevel):
         self.setup_styles()
 
         # Diese Daten werden *sofort* geladen (noch im Lade-Thread).
-        # Sie werden von vielen Tabs (besonders Dienstplan) benötigt.
         self.shift_types_data = {}
         self.staffing_rules = {}
         self.events = {}
@@ -82,8 +82,6 @@ class MainAdminWindow(tk.Toplevel):
         self.current_year_holidays = {}
         self.shift_frequency = self.load_shift_frequency()
 
-        # HINWEIS: Das ist der einzige blockierende Aufruf in __init__
-        # Er läuft aber im boot_loader-Thread, ist also OK.
         self.load_all_data()
         print("[DEBUG] MainAdminWindow.__init__: Basisdaten geladen.")
 
@@ -108,15 +106,16 @@ class MainAdminWindow(tk.Toplevel):
             "Urlaubsanträge": VacationRequestsTab,
             "Bug-Reports": BugReportsTab,
             "Logs": LogTab,
-            "Protokoll": ProtokollTab
+            "Protokoll": ProtokollTab,
+            "Einstellungen": SettingsTab
         }
         self.tab_frames = {}
         self.loaded_tabs = set()
 
         # --- NEU: Threading für Tabs ---
-        self.loading_tabs = set()  # Verhindert doppeltes Laden
-        self.tab_load_queue = Queue()  # Ergebnisse aus Threads
-        self.tab_load_checker_running = False  # Flag für den Checker
+        self.loading_tabs = set()
+        self.tab_load_queue = Queue()
+        self.tab_load_checker_running = False
         # -------------------------------
 
         self.setup_lazy_tabs()
@@ -127,15 +126,15 @@ class MainAdminWindow(tk.Toplevel):
         self.protocol("WM_DELETE_WINDOW", self.on_close)
 
         # --- Periodische Updates starten ---
-        self.after(1000, self.check_for_updates)  # Startet Benachrichtigungs-Updates
-        self.after(2000, self.check_chat_notifications)  # Startet Chat-Updates
+        self.after(1000, self.check_for_updates)
+        self.after(2000, self.check_chat_notifications)
 
         # --- LAZY LOADING TRIGGER ---
         self.notebook.bind("<<NotebookTabChanged>>", self.on_tab_changed)
 
         if self.notebook.tabs():
             self.notebook.select(0)
-            self.on_tab_changed(None)  # Lädt den ersten Tab (jetzt asynchron)
+            self.on_tab_changed(None)
 
         print("[DEBUG] MainAdminWindow.__init__: Initialisierung abgeschlossen.")
 
@@ -148,8 +147,13 @@ class MainAdminWindow(tk.Toplevel):
         """
         try:
             print(f"[Thread] Lade Tab: {tab_name}...")
-            # HIER PASSIERT DIE LANGSAME ARBEIT (die __init__ des Tabs)
-            real_tab = TabClass(self.notebook, self)
+            # Wenn der Tab UserTabSettingsTab ist, benötigt er die Liste der User-Tabs als Argument
+            if TabClass.__name__ == "UserTabSettingsTab":
+                all_user_tab_names = ["Schichtplan", "Meine Anfragen", "Mein Urlaub", "Bug-Reports", "Teilnahmen",
+                                      "Chat"]
+                real_tab = TabClass(self.notebook, all_user_tab_names)
+            else:
+                real_tab = TabClass(self.notebook, self)
 
             # Ergebnis in die Queue legen
             self.tab_load_queue.put((tab_name, real_tab, tab_index))
@@ -208,8 +212,6 @@ class MainAdminWindow(tk.Toplevel):
             # Queue ist leer, nichts zu tun
             pass
 
-        # Solange noch Tabs laden oder Ergebnisse in der Queue sind,
-        # läuft der Checker weiter.
         if not self.tab_load_queue.empty() or self.loading_tabs:
             self.after(100, self._check_tab_load_queue)
         else:
@@ -261,7 +263,6 @@ class MainAdminWindow(tk.Toplevel):
             self.after(100, self._check_tab_load_queue)
 
     # ----------------------------------------
-    # (Restliche Funktionen bleiben weitgehend gleich)
 
     def setup_styles(self):
         # ... (unverändert) ...
@@ -345,7 +346,15 @@ class MainAdminWindow(tk.Toplevel):
             try:
                 print(f"[Thread] Lade dynamischen Tab: {tab_name}...")
                 # Erstelle den Tab mit den *args (z.B. all_user_tab_names)
-                real_tab = TabClass(self.notebook, *args)
+                if TabClass.__name__ == "UserTabSettingsTab":
+                    # Spezialfall für UserTabSettingsTab, der all_user_tab_names als Argument erwartet
+                    all_user_tab_names = ["Schichtplan", "Meine Anfragen", "Mein Urlaub", "Bug-Reports", "Teilnahmen",
+                                          "Chat"]
+                    real_tab = TabClass(self.notebook, all_user_tab_names)
+                else:
+                    # Annahme für die meisten dynamischen Tabs: Sie erwarten master und self (AdminWindow)
+                    real_tab = TabClass(self.notebook, self)
+
                 self.tab_load_queue.put((tab_name, real_tab, tab_index))
                 print(f"[Thread] Dynamischer Tab '{tab_name}' fertig geladen.")
             except Exception as e:
@@ -365,7 +374,8 @@ class MainAdminWindow(tk.Toplevel):
         self._load_dynamic_tab("Antragssperre", RequestLockTab, self)  # Übergibt 'self'
 
     def open_user_tab_settings(self):
-        all_user_tab_names = ["Schichtplan", "Meine Anfragen", "Mein Urlaub", "Bug-Reports"]
+        # ANNAHME: UserTabSettingsTab benötigt die Liste der User-Tabs
+        all_user_tab_names = ["Schichtplan", "Meine Anfragen", "Mein Urlaub", "Bug-Reports", "Teilnahmen", "Chat"]
         self._load_dynamic_tab("Benutzer-Reiter", UserTabSettingsTab, all_user_tab_names)  # Übergibt Liste
 
     def open_password_resets_window(self):
@@ -420,7 +430,36 @@ class MainAdminWindow(tk.Toplevel):
         settings_menu.add_command(label="Benutzer-Reiter sperren", command=self.open_user_tab_settings)
         settings_menu.add_command(label="Planungs-Helfer", command=self.open_planning_assistant_settings)
         settings_menu.add_separator()
+
+        # --- FIX BUTTONS ---
+        settings_menu.add_command(label="⚠️ FIX: ALLE ALTEN USER FREISCHALTEN",
+                                  command=self.apply_all_users_approval_fix)
+        settings_menu.add_command(label="DB-Update: Freischaltung Spalte", command=self.apply_is_approved_fix)
         settings_menu.add_command(label="DB-Update für Chat ausführen", command=self.apply_database_fix)
+
+    def apply_all_users_approval_fix(self):
+        """Löst das manuelle Update aus, um alle bestehenden User freizuschalten (is_approved=1)."""
+        if messagebox.askyesno("ACHTUNG: FIX BESTÄTIGEN",
+                               "Sind Sie sicher, dass Sie ALLE bestehenden Benutzer freischalten möchten (is_approved=1)? Dies behebt das aktuelle Login-Problem.",
+                               parent=self):
+            success, message = run_db_fix_approve_all_users()
+            if success:
+                messagebox.showinfo("Erfolg: Login-Problem behoben",
+                                    f"{message}\n\nBitte melden Sie sich nun ab und mit Ihren normalen Daten wieder an.",
+                                    parent=self)
+            else:
+                messagebox.showerror("Fehler", message, parent=self)
+
+    def apply_is_approved_fix(self):
+        """Löst das manuelle Update für die is_approved Spalte aus."""
+        if messagebox.askyesno("Bestätigung",
+                               "Dies führt ein einmaliges Update durch, um die fehlende 'is_approved' Spalte hinzuzufügen. Dies behebt den Fehler bei der Benutzerregistrierung.",
+                               parent=self):
+            success, message = run_db_update_is_approved()
+            if success:
+                messagebox.showinfo("Erfolg", message, parent=self)
+            else:
+                messagebox.showerror("Fehler", message, parent=self)
 
     def apply_database_fix(self):
         # ... (unverändert) ...

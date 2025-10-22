@@ -1,8 +1,9 @@
 # gui/admin_menu_config_manager.py
-import json
-import os
+# Entferne unnötige lokale Datei-Importe
+from database import db_core  # Importiere db_core
 
-CONFIG_FILE = 'admin_menu_config.json'
+
+# Die Konstanten json, os und CONFIG_FILE wurden entfernt.
 
 
 class AdminMenuConfigManager:
@@ -11,18 +12,15 @@ class AdminMenuConfigManager:
     @staticmethod
     def load_config(all_shift_abbrevs):
         """
-        Lädt die Konfiguration. Stellt sicher, dass alle existierenden Schichtarten
+        Lädt die Konfiguration aus der Datenbank. Stellt sicher, dass alle existierenden Schichtarten
         berücksichtigt werden (standardmäßig sichtbar).
         """
-        config = {}
-        if os.path.exists(CONFIG_FILE):
-            try:
-                with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
-                    config = json.load(f)
-            except (json.JSONDecodeError, IOError):
-                config = {}
+        # 1. Lade die Konfiguration aus der Datenbank
+        config = db_core.load_config_json(db_core.ADMIN_MENU_CONFIG_KEY)
+        if not isinstance(config, dict):
+            config = {}
 
-        # Stelle sicher, dass jede bekannte Schichtart in der Konfiguration ist.
+        # 2. Stelle sicher, dass jede bekannte Schichtart in der Konfiguration ist.
         # Neue Schichten werden standardmäßig als sichtbar (True) hinzugefügt.
         config_updated = False
         for abbrev in all_shift_abbrevs:
@@ -30,18 +28,21 @@ class AdminMenuConfigManager:
                 config[abbrev] = True
                 config_updated = True
 
-        # Speichere die Konfiguration zurück, wenn neue Schichten hinzugefügt wurden.
+        # 3. Speichere die Konfiguration zurück, wenn neue Schichten hinzugefügt wurden (Datenmigration).
         if config_updated:
-            AdminMenuConfigManager.save_config(config)
+            success = db_core.save_config_json(db_core.ADMIN_MENU_CONFIG_KEY, config)
+            if not success:
+                print("WARNUNG: Konnte die aktualisierte Admin-Menü-Konfiguration nicht in der Datenbank speichern.")
 
         return config
 
     @staticmethod
     def save_config(config_data):
-        """Speichert die Konfiguration in der JSON-Datei."""
-        try:
-            with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
-                json.dump(config_data, f, indent=4)
+        """Speichert die Konfiguration in der Datenbank."""
+        # Speichere die Konfiguration in der Datenbank
+        success = db_core.save_config_json(db_core.ADMIN_MENU_CONFIG_KEY, config_data)
+
+        if success:
             return True, "Einstellungen erfolgreich gespeichert."
-        except IOError as e:
-            return False, f"Fehler beim Speichern der Einstellungen: {e}"
+        else:
+            return False, "Fehler beim Speichern der Einstellungen in der Datenbank."
