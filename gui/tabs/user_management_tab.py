@@ -4,7 +4,8 @@ from tkinter import ttk, messagebox
 from gui.user_edit_window import UserEditWindow
 from gui.dialogs.user_order_window import UserOrderWindow
 from database.db_users import (get_all_users_with_details, delete_user, save_user_order, get_ordered_users_for_schedule,
-                               get_pending_approval_users, approve_user)
+                               get_pending_approval_users, approve_user,
+                               archive_user, unarchive_user)  # NEUE IMPORTE
 from database.db_core import ROLE_HIERARCHY
 
 
@@ -12,8 +13,6 @@ class UserManagementTab(ttk.Frame):
     def __init__(self, master, current_user_data):
         super().__init__(master)
         # HINWEIS: master ist das Notebook. Wir brauchen den MainAdminWindow
-        # Wir gehen davon aus, dass current_user_data hier das AdminWindow-Objekt ist,
-        # da der Tab-Lader es so übergibt. Wir extrahieren die ID.
         if isinstance(current_user_data, dict):
             # Normaler Fall im Lade-Thread, wenn direkt user_data übergeben wird
             self.current_user_id = current_user_data['id']
@@ -43,13 +42,17 @@ class UserManagementTab(ttk.Frame):
     def setup_ui(self):
         # Top Frame (Buttons)
         ttk.Button(self.top_frame, text="Benutzer bearbeiten", command=self.open_edit_window).pack(side='left', padx=5)
-        ttk.Button(self.top_frame, text="Benutzer löschen", command=self.delete_selected_user).pack(side='left', padx=5)
+        # NEUER BUTTON
+        ttk.Button(self.top_frame, text="Archivieren / Reaktivieren", command=self.toggle_archive_status).pack(
+            side='left', padx=5)
         ttk.Button(self.top_frame, text="Reihenfolge/Sichtbarkeit", command=self.open_order_window).pack(side='left',
                                                                                                          padx=5)
+        ttk.Button(self.top_frame, text="Benutzer löschen", command=self.delete_selected_user).pack(side='left', padx=5)
 
         # Treeview (Benutzerliste)
+        # KORREKTUR: Spalte "Freigeschaltet" in "Status" geändert
         columns = ("ID", "Vorname", "Name", "Rolle", "Geburtstag", "Telefon", "Diensthund", "Urlaub Gesamt",
-                   "Urlaub Rest", "Freigeschaltet")
+                   "Urlaub Rest", "Status")
         self.tree = ttk.Treeview(self.main_frame, columns=columns, show="headings")
 
         # Scrollbar hinzufügen
@@ -66,7 +69,7 @@ class UserManagementTab(ttk.Frame):
         self.tree.column("Vorname", width=120, anchor=tk.W)
         self.tree.column("Name", width=120, anchor=tk.W)
         self.tree.column("ID", width=50)
-        self.tree.column("Freigeschaltet", width=100)
+        self.tree.column("Status", width=100)  # Geänderte Spalte
 
         self.tree.bind("<<TreeviewSelect>>", self.on_select)
         self.tree.bind('<Double-1>', self.open_edit_window)
@@ -80,6 +83,7 @@ class UserManagementTab(ttk.Frame):
         for widget in self.pending_frame.winfo_children():
             widget.destroy()
 
+        # Diese Funktion holt dank DB-Update nur noch (is_approved=0 AND is_archived=0)
         pending_users = get_pending_approval_users()
         count = len(pending_users)
 
@@ -123,11 +127,13 @@ class UserManagementTab(ttk.Frame):
 
         if success:
             messagebox.showinfo("Erfolg", message, parent=self)
-            self.load_data()  # Hauptliste aktualisieren
+            self.load_data()  # Hauptliste aktualisieren (Status ändert sich)
             self.check_pending_approvals()  # Pending-Liste aktualisieren
             # Informiere das Hauptfenster, dass eine Aktualisierung der Benachrichtigungen nötig ist
             if hasattr(self.master_window, 'check_for_updates'):
                 self.master_window.check_for_updates()
+            if hasattr(self.master_window, 'refresh_shift_plan'):
+                self.master_window.refresh_shift_plan()  # Wichtig
         else:
             messagebox.showerror("Fehler", message, parent=self)
 
@@ -143,11 +149,59 @@ class UserManagementTab(ttk.Frame):
                 messagebox.showinfo("Erfolg", message, parent=self)
                 self.load_data()
                 self.check_pending_approvals()
+                if hasattr(self.master_window, 'refresh_shift_plan'):
+                    self.master_window.refresh_shift_plan()  # Wichtig
             else:
                 messagebox.showerror("Fehler", message, parent=self)
 
     # =====================================================================================
-    # --- BESTEHENDE METHODEN ---
+    # --- NEUE METHODE FÜR ARCHIVIERUNG ---
+    # =====================================================================================
+
+    def toggle_archive_status(self):
+        """Archiviert oder reaktiviert den ausgewählten Benutzer."""
+        user = self.get_selected_user()
+        if not user:
+            messagebox.showinfo("Auswahl erforderlich", "Bitte wählen Sie einen Benutzer aus.", parent=self)
+            return
+
+        user_id = user['id']
+        user_name = f"{user['vorname']} {user['name']}"
+        is_archived = user.get('is_archived', 0)
+        is_approved = user.get('is_approved', 0)
+
+        if is_approved == 0:
+            messagebox.showwarning("Aktion nicht möglich",
+                                   f"Der Benutzer '{user_name}' muss zuerst freigeschaltet werden, bevor er archiviert werden kann.",
+                                   parent=self)
+            return
+
+        if is_archived:
+            # --- Reaktivieren ---
+            if not messagebox.askyesno("Benutzer reaktivieren",
+                                       f"Möchten Sie den Benutzer '{user_name}' wirklich reaktivieren?\nEr/Sie kann sich danach wieder anmelden und wird in zukünftigen Plänen berücksichtigt.",
+                                       parent=self):
+                return
+            success, message = unarchive_user(user_id, self.current_user_id)
+        else:
+            # --- Archivieren ---
+            if not messagebox.askyesno("Benutzer archivieren",
+                                       f"Möchten Sie den Benutzer '{user_name}' wirklich archivieren?\nEr/Sie kann sich danach nicht mehr anmelden und erscheint nicht mehr in zukünftigen Plänen.\n\nBestehende Einträge in alten Plänen bleiben erhalten.",
+                                       parent=self):
+                return
+            success, message = archive_user(user_id, self.current_user_id)
+
+        if success:
+            messagebox.showinfo("Erfolg", message, parent=self)
+            self.load_data()  # Liste neu laden, um Status anzuzeigen
+            # Schichtplan und andere Tabs müssen aktualisiert werden
+            if hasattr(self.master_window, 'refresh_all_tabs'):
+                self.master_window.refresh_all_tabs()
+        else:
+            messagebox.showerror("Fehler", message, parent=self)
+
+    # =====================================================================================
+    # --- BESTEHENDE METHODEN (ANGEPASST) ---
     # =====================================================================================
 
     def load_data(self):
@@ -156,16 +210,24 @@ class UserManagementTab(ttk.Frame):
         for item in self.tree.get_children():
             self.tree.delete(item)
 
-        # Verwende get_all_users_with_details, da dieser Query alle Spalten inkl. is_approved abruft
+        # Holt alle User, inkl. archivierter (SELECT * from users)
         self.user_data = get_all_users_with_details()
 
         for user in self.user_data:
-            # Defensive Abfrage der is_approved Spalte
-            is_approved_value = user.get('is_approved', 1)
-            is_approved = "Ja" if is_approved_value == 1 else "Nein ❌"
+            # NEUE STATUSLOGIK
+            is_approved = user.get('is_approved', 0)
+            is_archived = user.get('is_archived', 0)
 
-            # Bestimme den Tag-Stil
-            tag = 'approved' if is_approved_value == 1 else 'pending'
+            if is_approved == 0:
+                status_text = "Ausstehend ⚠️"
+                tag = 'pending'
+            elif is_archived == 1:
+                status_text = "Archiviert 📦"
+                tag = 'archived'
+            else:
+                status_text = "Aktiv ✅"
+                tag = 'approved'
+            # ENDE NEUE LOGIK
 
             self.tree.insert('', tk.END, iid=user['id'], tags=(tag,), values=(
                 user['id'],
@@ -177,12 +239,13 @@ class UserManagementTab(ttk.Frame):
                 user.get('diensthund', ''),
                 user.get('urlaub_gesamt', ''),
                 user.get('urlaub_rest', ''),
-                is_approved
+                status_text  # Status statt 'is_approved'
             ))
 
         # Konfiguriere Tags für Farben
         self.tree.tag_configure('pending', background='#ffe0e0', foreground='red')  # Rot für ausstehende Freischaltung
-        self.tree.tag_configure('approved', background='white', foreground='black')  # Normal
+        self.tree.tag_configure('approved', background='white', foreground='black')  # Normal (Aktiv)
+        self.tree.tag_configure('archived', background='#f0f0f0', foreground='#555555')  # NEU: Grau für Archiviert
 
         # Nach dem Laden der Daten, Status der ausstehenden Freischaltungen prüfen
         self.check_pending_approvals()
@@ -205,9 +268,24 @@ class UserManagementTab(ttk.Frame):
     def open_edit_window(self, event=None):
         user = self.get_selected_user()
         if user:
-            # Stelle sicher, dass das Passwort-Hash nicht mitgegeben wird
-            UserEditWindow(self.master, user, self.current_user_id, self.load_data)
-        elif event is None:  # Nur eine Warnung anzeigen, wenn der Button geklickt wird
+            # (Unverändert, Aufruf ist korrekt seit letztem Fix)
+            allowed_roles = []
+            if hasattr(self.master_window, 'get_allowed_roles'):
+                allowed_roles = self.master_window.get_allowed_roles()
+            else:
+                print("[WARN] UserManagementTab: MainAdminWindow 'get_allowed_roles' not found.")
+                allowed_roles = list(ROLE_HIERARCHY.keys())
+
+            UserEditWindow(
+                self.master_window,
+                user['id'],
+                user,
+                self.load_data,
+                False,
+                allowed_roles,
+                self.current_user_id
+            )
+        elif event is None:
             messagebox.showinfo("Auswahl erforderlich", "Bitte wählen Sie einen Benutzer zum Bearbeiten aus.")
 
     def delete_selected_user(self):
@@ -217,24 +295,53 @@ class UserManagementTab(ttk.Frame):
             return
 
         user_name = f"{user['vorname']} {user['name']}"
+
+        # Zusatzwarnung, wenn Benutzer nicht archiviert ist
+        is_archived = user.get('is_archived', 0)
+        warning = ""
+        if not is_archived:
+            warning = "\n\nWARNUNG: Dieser Benutzer ist noch aktiv.\nBevorzugen Sie die 'Archivieren'-Funktion, wenn der Benutzer nur deaktiviert werden soll."
+
         if messagebox.askyesno("Löschen bestätigen",
-                               f"Sind Sie sicher, dass Sie den Benutzer '{user_name}' dauerhaft löschen möchten?",
+                               f"Sind Sie sicher, dass Sie den Benutzer '{user_name}' DAUERHAFT löschen möchten?\nAlle seine Daten (auch alte Schichten) werden unwiderruflich entfernt.{warning}",
                                parent=self):
             success, message = delete_user(user['id'], self.current_user_id)
             if success:
                 messagebox.showinfo("Erfolg", message, parent=self)
                 self.load_data()
+                if hasattr(self.master_window, 'refresh_all_tabs'):
+                    self.master_window.refresh_all_tabs()
             else:
                 messagebox.showerror("Fehler", message, parent=self)
 
     def open_order_window(self):
-        # Der UserOrderWindow benötigt die aktuelle ungefilterte Liste aller Benutzer
-        # Wir können hier get_all_users_with_details verwenden, da die Sortierfunktion
-        # die Freischaltung nicht interessiert, aber die Sortierliste sollte nur
-        # freigeschaltete und sichtbare Benutzer anzeigen.
+        # HINWEIS: Diese Funktion ist unverändert.
+        # UserOrderWindow ruft get_ordered_users_for_schedule(include_hidden=True) auf.
+        # Da diese DB-Funktion jetzt (is_archived = 0) filtert,
+        # werden archivierte Benutzer hier korrekterweise nicht mehr angezeigt.
+
+        # (Code von letztem Mal, aber 'all_users' wird jetzt korrekt gefiltert sein)
         all_users = get_all_users_with_details()
-        # Wir müssen den MainAdminWindow übergeben, um die refresh_all_tabs Methode aufzurufen
-        UserOrderWindow(self.master_window, all_users, self.current_user_id, self.master_window.refresh_all_tabs)
+
+        # KORREKTUR: Wir sollten UserOrderWindow nicht 'all_users' geben,
+        # sondern die Liste, die es selbst laden würde, damit es konsistent ist.
+        # UserOrderWindow(self.master_window, all_users, self.current_user_id, self.master_window.refresh_all_tabs)
+
+        # BESSER: UserOrderWindow(self, callback)
+        # Wir schauen in die Definition von UserOrderWindow (letzter Upload)
+        # def __init__(self, parent, callback=None):
+        #   self.users_data = get_ordered_users_for_schedule(include_hidden=True)
+        # Ah, der Aufruf in main_admin_window war UserOrderWindow(self, callback=...)
+        # Der Aufruf hier in user_management_tab war:
+        # UserOrderWindow(self.master_window, all_users, self.current_user_id, self.master_window.refresh_all_tabs)
+        # ... was nicht zur Definition von user_order_window.py passt.
+
+        # Nehmen wir den Aufruf aus main_admin_window als Referenz:
+        # self.master_window.open_user_order_window()
+        # -> UserOrderWindow(self, callback=self.refresh_all_tabs)
+
+        # Der Aufruf hier sollte also auch so aussehen (self.master_window ist 'parent'):
+        UserOrderWindow(self.master_window, callback=self.master_window.refresh_all_tabs)
 
     def sort_treeview(self, tree, col, reverse):
         # Sortierlogik bleibt unverändert
@@ -242,7 +349,6 @@ class UserManagementTab(ttk.Frame):
 
         # Spezielle Sortierung für Zahlen (ID, Urlaub etc.)
         if col in ["ID", "Urlaub Gesamt", "Urlaub Rest"]:
-            # Versuch, als Integer zu sortieren, falls möglich
             try:
                 l.sort(key=lambda x: int(x[0]) if x[0] else float('-inf'), reverse=reverse)
             except ValueError:

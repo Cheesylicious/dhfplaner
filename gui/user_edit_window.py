@@ -9,14 +9,16 @@ from database.db_admin import create_user_by_admin, admin_reset_password
 
 
 class UserEditWindow(tk.Toplevel):
-    def __init__(self, master, user_id, user_data, callback, is_new, allowed_roles):
+    # KORREKTUR: 'admin_user_id' als 7. Argument hinzugefügt
+    def __init__(self, master, user_id, user_data, callback, is_new, allowed_roles, admin_user_id):
         super().__init__(master)
-        self.user_id = user_id
+        self.user_id = user_id # ID des Users, der bearbeitet wird
         # Stelle sicher, dass user_data ein Dictionary ist, auch wenn None übergeben wird
         self.user_data = user_data if user_data is not None else {}
         self.callback = callback
         self.is_new = is_new
         self.allowed_roles = allowed_roles
+        self.admin_user_id = admin_user_id # ID des Admins, der die Bearbeitung vornimmt
 
         title = "Neuen Benutzer anlegen" if self.is_new else f"Benutzer bearbeiten: {self.user_data.get('vorname', '')} {self.user_data.get('name', '')}"
         self.title(title)
@@ -120,7 +122,8 @@ class UserEditWindow(tk.Toplevel):
         if new_password:
             # Annahme: user_id des angemeldeten Admins wird hier nicht benötigt,
             # da die Aktion von einem Admin-Fenster aus gestartet wird.
-            success, message = admin_reset_password(self.user_id, new_password)
+            # KORREKTUR: Wir verwenden self.admin_user_id für den Log-Eintrag
+            success, message = admin_reset_password(self.user_id, new_password, self.admin_user_id)
             if success:
                 messagebox.showinfo("Erfolg", message, parent=self)
             else:
@@ -155,11 +158,14 @@ class UserEditWindow(tk.Toplevel):
         message = ""
         if self.is_new:
             # Annahme: create_user_by_admin erwartet ein Dictionary mit den Benutzerdaten
-            success, message = create_user_by_admin(updated_data)
+            # und die ID des Admins, der den Benutzer erstellt
+            success, message = create_user_by_admin(updated_data, self.admin_user_id)
         else:
             # HIER WIRD der Funktionsaufruf angepasst
-            # Wir übergeben die ID, die Daten und die ID des aktuellen Benutzers (hier: self.user_id des Bearbeiters)
-            success, message = update_user_details(self.user_id, updated_data, self.user_id)
+            # Wir übergeben die ID des Users (self.user_id), die Daten
+            # und die ID des aktuellen Admins (self.admin_user_id)
+            # KORREKTUR: self.admin_user_id statt self.user_id als 3. Argument
+            success, message = update_user_details(self.user_id, updated_data, self.admin_user_id)
 
         if success:
             messagebox.showinfo("Erfolg", message, parent=self)
