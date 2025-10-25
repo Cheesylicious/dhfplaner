@@ -1,11 +1,16 @@
 # gui/main_admin_window.py
 import tkinter as tk
 from tkinter import ttk, messagebox
-from datetime import date, timedelta, datetime  # NEU: datetime importieren
+from datetime import date, timedelta, datetime
 import calendar
 from collections import defaultdict
 
-# --- KEIN THREADING ---
+# --- NEUE IMPORTE FÜR THREADING ---
+import threading
+from queue import Queue, Empty
+# ---------------------------------
+
+# --- KEIN THREADING --- (Alter Kommentar entfernt)
 
 # --- WICHTIGE IMPORTE ---
 from .tabs.shift_plan_tab import ShiftPlanTab
@@ -36,7 +41,7 @@ from database.db_core import (
     run_db_update_is_approved,
     run_db_fix_approve_all_users,
     run_db_update_add_is_archived,
-    run_db_update_add_archived_date  # NEUER IMPORT
+    run_db_update_add_archived_date
 )
 from database.db_chat import get_senders_with_unread_messages
 from database.db_users import log_user_logout
@@ -105,16 +110,19 @@ class MainAdminWindow(tk.Toplevel):
             "Logs": LogTab,
             "Protokoll": ProtokollTab,
             "Dummy": None
-
         }
 
         self.tab_frames = {}
         self.loaded_tabs = set()
-        self.loading_tabs = set()  # Für Re-Entrancy-Schutz
+
+        # --- NEU: Threading für Tabs ---
+        self.loading_tabs = set()
+        self.tab_load_queue = Queue()
+        self.tab_load_checker_running = False
+        # -------------------------------
 
         self.setup_lazy_tabs()
         print("[DEBUG] MainAdminWindow.__init__: Lazy Tabs (Platzhalter) erstellt.")
-
 
         self.setup_footer()
 
@@ -123,24 +131,127 @@ class MainAdminWindow(tk.Toplevel):
         self.after(1000, self.check_for_updates)
         self.after(2000, self.check_chat_notifications)
 
-        if self.notebook.tabs():
-            first_tab_name = list(self.tab_definitions.keys())[0]
-            self._load_tab_directly(first_tab_name, 0)
-
+        # --- ANPASSUNG: Threaded-Start für ersten Tab ---
         self.notebook.bind("<<NotebookTabChanged>>", self.on_tab_changed)
+        if self.notebook.tabs():
+            self.notebook.select(0)
+            self.on_tab_changed(None)  # Löst den Thread-Loader für den ersten Tab aus
 
         print("[DEBUG] MainAdminWindow.__init__: Initialisierung abgeschlossen.")
 
+    # --- NEUE FUNKTIONEN FÜR TAB-THREADING (aus MainUserWindow) ---
 
-    # --- Restliche Methoden (__init__ bis _load_dynamic_tab) bleiben unverändert ---
+    def _load_tab_threaded(self, tab_name, TabClass, tab_index):
+        """
+        Läuft im Hintergrund-Thread.
+        Erstellt die Tab-Instanz (der langsame Teil).
+        """
+        try:
+            print(f"[Thread-Admin] Lade Tab: {tab_name}...")
+
+            # Die Logik zur Unterscheidung der Konstruktoren (aus der alten on_tab_changed)
+            # wird hierher verschoben.
+            real_tab = None
+            if TabClass.__name__ == "UserTabSettingsTab":
+                all_user_tab_names = ["Schichtplan", "Meine Anfragen", "Mein Urlaub", "Bug-Reports", "Teilnahmen",
+                                      "Chat"]
+                real_tab = TabClass(self.notebook, all_user_tab_names)
+            else:
+                try:
+                    # Die meisten Admin-Tabs erwarten (master, self)
+                    real_tab = TabClass(self.notebook, self)
+                except Exception as e1:
+                    print(
+                        f"[Thread-Admin] Warnung: {tab_name} mit (master, admin_window) fehlgeschlagen: {e1}. Versuche (master)...")
+                    try:
+                        # Fallback für Tabs, die nur (master) erwarten
+                        real_tab = TabClass(self.notebook)
+                    except Exception as e2:
+                        print(f"[Thread-Admin] FEHLER: {tab_name} auch mit (master) fehlgeschlagen: {e2}")
+                        raise Exception(f"Fehler bei (master, self): {e1}\nFehler bei (master): {e2}")
+
+            # Ergebnis in die Queue legen
+            self.tab_load_queue.put((tab_name, real_tab, tab_index))
+            print(f"[Thread-Admin] Tab '{tab_name}' fertig geladen.")
+        except Exception as e:
+            print(f"[Thread-Admin] FEHLER beim Laden von Tab '{tab_name}': {e}")
+            self.tab_load_queue.put((tab_name, e, tab_index))
+
+    def _check_tab_load_queue(self):
+        """
+        Läuft im GUI-Thread (via 'after').
+        Prüft die Queue und setzt die fertigen Tabs ein.
+        """
+        try:
+            result = self.tab_load_queue.get_nowait()
+            tab_name, real_tab_or_exception, tab_index = result
+
+            print(f"[GUI-Checker-Admin] Empfange Ergebnis für: {tab_name}")
+
+            placeholder_frame = self.tab_frames.get(tab_name)
+            if not placeholder_frame or not placeholder_frame.winfo_exists():
+                print(f"[GUI-Checker-Admin] FEHLER: Platzhalter für {tab_name} existiert nicht mehr.")
+                if tab_name in self.loading_tabs: self.loading_tabs.remove(tab_name)
+                return  # Mit nächstem Check fortfahren
+
+            # Alte Lade-Labels entfernen
+            for widget in placeholder_frame.winfo_children():
+                if isinstance(widget, ttk.Label) and "Lade" in widget.cget("text"):
+                    widget.destroy()
+
+            if isinstance(real_tab_or_exception, Exception):
+                # Fehler beim Laden anzeigen
+                e = real_tab_or_exception
+                ttk.Label(placeholder_frame, text=f"Fehler beim Laden:\n{e}", font=("Segoe UI", 12),
+                          foreground="red").pack(expand=True, anchor="center")
+
+            else:
+                # Erfolgreich geladen, Tab einsetzen
+                real_tab = real_tab_or_exception
+                try:
+                    self.notebook.unbind("<<NotebookTabChanged>>")
+                    tab_options = self.notebook.tab(placeholder_frame)
+                    self.notebook.forget(placeholder_frame)
+                    self.notebook.insert(tab_index, real_tab, **tab_options)
+                    self.notebook.select(real_tab)
+
+                    self.loaded_tabs.add(tab_name)
+                    self.tab_frames[tab_name] = real_tab  # Referenz auf echten Tab aktualisieren
+                    print(f"[GUI-Checker-Admin] Tab '{tab_name}' erfolgreich eingesetzt.")
+                except tk.TclError as e:
+                    print(f"[GUI-Checker-Admin] TclError beim Einsetzen von {tab_name}: {e}")
+                finally:
+                    self.notebook.bind("<<NotebookTabChanged>>", self.on_tab_changed)
+
+        except Empty:
+            pass  # Queue ist leer
+
+        except Exception as e:
+            print(f"[GUI-Checker-Admin] Unerwarteter Fehler in _check_tab_load_queue: {e}")
+
+        finally:
+            # Entferne den Tab-Namen aus loading_tabs, egal ob Erfolg oder Fehler
+            if 'tab_name' in locals() and tab_name in self.loading_tabs:
+                self.loading_tabs.remove(tab_name)
+
+            # Den Checker am Laufen halten, solange noch Tabs laden
+            if not self.tab_load_queue.empty() or self.loading_tabs:
+                self.after(100, self._check_tab_load_queue)
+            else:
+                self.tab_load_checker_running = False
+                print("[GUI-Checker-Admin] Alle Lade-Threads beendet. Checker pausiert.")
+
     def _load_tab_directly(self, tab_name, tab_index):
-        # ... (unverändert) ...
+        # Diese Funktion wird durch die neue Thread-Logik in on_tab_changed() ersetzt.
+        # Wir lassen sie hier, falls _load_dynamic_tab sie noch benötigt, aber
+        # der normale Tab-Wechsel sollte sie nicht mehr verwenden.
+        # --- ALTER CODE (SYNCHRON) ---
         if tab_name in self.loaded_tabs or tab_name in self.loading_tabs: return
         if tab_name not in self.tab_definitions:
             print(f"[GUI - direct load] FEHLER: Tab '{tab_name}' nicht definiert.")
             return
         self.loading_tabs.add(tab_name)
-        print(f"[GUI - direct load] Lade initialen Tab: {tab_name}")
+        print(f"[GUI - direct load] Lade initialen Tab (SYNCHRON): {tab_name}")
         TabClass = self.tab_definitions[tab_name]
         placeholder_frame = self.tab_frames[tab_name]
         loading_label = ttk.Label(placeholder_frame, text=f"Lade {tab_name}...", font=("Segoe UI", 16),
@@ -185,7 +296,10 @@ class MainAdminWindow(tk.Toplevel):
             if tab_name in self.loading_tabs: self.loading_tabs.remove(tab_name)
 
     def on_tab_changed(self, event):
-        # ... (unverändert) ...
+        """
+        Wird jedes Mal aufgerufen, wenn der Benutzer einen Tab anklickt.
+        Startet jetzt nur noch den Lade-Thread.
+        """
         try:
             tab_id = self.notebook.select()
             if not tab_id: return
@@ -193,73 +307,48 @@ class MainAdminWindow(tk.Toplevel):
             tab_name_with_count = self.notebook.tab(tab_index, "text")
             tab_name = tab_name_with_count.split(" (")[0]
         except (tk.TclError, IndexError):
-            print("[GUI] Fehler beim Ermitteln des Tabs in on_tab_changed.")
+            print("[GUI-Admin] Fehler beim Ermitteln des Tabs in on_tab_changed.")
             return
-        if tab_name in self.loaded_tabs: return
-        if tab_name in self.loading_tabs:
-            print(f"[GUI] WARNUNG: {tab_name} lädt bereits. Breche (doppelten) Ladevorgang ab.")
+
+        if tab_name in self.loaded_tabs or tab_name in self.loading_tabs:
             return
-        if tab_name not in self.tab_definitions: return
-        self.loading_tabs.add(tab_name)
-        print(f"[GUI] on_tab_changed: Starte Ladevorgang für {tab_name} (im GUI-Thread)")
+
+        if tab_name not in self.tab_definitions or self.tab_definitions[tab_name] is None:
+            return  # Nicht definiert oder Dummy-Tab
+
+        print(f"[GUI-Admin] on_tab_changed: Starte Ladevorgang für {tab_name}")
+
         TabClass = self.tab_definitions[tab_name]
         placeholder_frame = self.tab_frames.get(tab_name)
+
         if not placeholder_frame or not placeholder_frame.winfo_exists():
-            print(f"[GUI] FEHLER: Platzhalter-Frame für '{tab_name}' nicht gefunden oder bereits zerstört.")
-            if tab_name in self.loading_tabs: self.loading_tabs.remove(tab_name)
+            print(f"[GUI-Admin] FEHLER: Platzhalter-Frame für '{tab_name}' nicht gefunden oder bereits zerstört.")
             return
-        for widget in placeholder_frame.winfo_children(): widget.destroy()
-        loading_label = ttk.Label(placeholder_frame, text=f"Lade {tab_name}...", font=("Segoe UI", 16),
-                                  name="loading_label")
-        loading_label.pack(expand=True, anchor="center")
-        self.update_idletasks()
-        real_tab, tab_options = None, None
-        try:
-            if TabClass.__name__ == "UserTabSettingsTab":
-                all_user_tab_names = ["Schichtplan", "Meine Anfragen", "Mein Urlaub", "Bug-Reports", "Teilnahmen",
-                                      "Chat"]
-                real_tab = TabClass(self.notebook, all_user_tab_names)
-            else:
-                try:
-                    real_tab = TabClass(self.notebook, self)
-                    print(f"[GUI] {tab_name} erfolgreich mit (master, admin_window) geladen.")
-                except Exception as e1:
-                    print(
-                        f"[GUI] Warnung: Konstruktor für {tab_name} mit (master, admin_window) fehlgeschlagen: {e1}. Versuche (master)...")
-                    try:
-                        real_tab = TabClass(self.notebook)
-                        print(f"[GUI] {tab_name} erfolgreich mit (master) geladen.")
-                    except Exception as e2:
-                        print(f"[GUI] FEHLER: Konstruktor für {tab_name} auch mit (master) fehlgeschlagen: {e2}")
-                        raise Exception(f"Fehler bei (master, self): {e1}\nFehler bei (master): {e2}")
-            if placeholder_frame.winfo_exists():
-                tab_options = self.notebook.tab(placeholder_frame)
-            else:
-                raise tk.TclError(f"Platzhalter für {tab_name} existierte nicht mehr vor dem Holen der Optionen.")
-            if real_tab and tab_options:
-                try:
-                    self.notebook.unbind("<<NotebookTabChanged>>")
-                    self.notebook.forget(placeholder_frame)
-                    self.notebook.insert(tab_index, real_tab, **tab_options)
-                    self.notebook.select(real_tab)
-                    placeholder_frame.destroy()
-                finally:
-                    self.notebook.bind("<<NotebookTabChanged>>", self.on_tab_changed)
-                self.loaded_tabs.add(tab_name)
-                self.tab_frames[tab_name] = real_tab
-                print(f"[GUI] Tab '{tab_name}' erfolgreich eingesetzt.")
-            else:
-                raise Exception("Tab-Objekt oder Tab-Optionen konnten nicht ermittelt werden.")
-        except Exception as e:
-            print(f"[GUI] FEHLER beim Laden von Tab '{tab_name}': {e}")
-            if placeholder_frame.winfo_exists():
-                for widget in placeholder_frame.winfo_children(): widget.destroy()
-                ttk.Label(placeholder_frame, text=f"Fehler beim Laden:\n{e}", font=("Segoe UI", 12),
-                          foreground="red").pack(expand=True, anchor="center")
-            else:
-                print(f"[GUI] FEHLER: Platzhalter für {tab_name} existierte nicht mehr bei Fehlerbehandlung.")
-        finally:
-            if tab_name in self.loading_tabs: self.loading_tabs.remove(tab_name)
+
+        # 1. "Wird geladen..."-Nachricht anzeigen
+        # (Alte Labels zuerst entfernen, falls vorhanden)
+        for widget in placeholder_frame.winfo_children():
+            widget.destroy()
+        ttk.Label(placeholder_frame, text=f"Lade {tab_name}...",
+                  font=("Segoe UI", 16)).pack(expand=True, anchor="center")
+
+        # 2. Status auf "lädt" setzen
+        self.loading_tabs.add(tab_name)
+
+        # 3. Hintergrund-Thread starten
+        threading.Thread(
+            target=self._load_tab_threaded,
+            args=(tab_name, TabClass, tab_index),
+            daemon=True
+        ).start()
+
+        # 4. Den Queue-Checker starten (falls er nicht schon läuft)
+        if not self.tab_load_checker_running:
+            print("[GUI-Checker-Admin] Starte Checker-Loop.")
+            self.tab_load_checker_running = True
+            self.after(100, self._check_tab_load_queue)
+
+    # -----------------------------------------------------------------
 
     def setup_styles(self):
         # ... (unverändert) ...
@@ -339,6 +428,9 @@ class MainAdminWindow(tk.Toplevel):
             print(f"[DEBUG] switch_to_tab: Tab/Frame '{tab_name}' nicht gefunden oder zerstört.")
 
     def _load_dynamic_tab(self, tab_name, TabClass, *args):
+        # --- HINWEIS: Diese Funktion ist weiterhin SYNCHRON ---
+        # --- Eine Umstellung auf Threads ist möglich, aber komplexer ---
+        # --- da sie neue Tabs zur Laufzeit *hinzufügt* ---
         # ... (unverändert) ...
         if tab_name in self.loaded_tabs:
             frame = self.tab_frames.get(tab_name)
@@ -433,6 +525,7 @@ class MainAdminWindow(tk.Toplevel):
         self.app.on_logout(self)
 
     def setup_header(self):
+        # ... (unverändert) ...
         self.notification_frame = ttk.Frame(self.header_frame)
         self.notification_frame.pack(side="left", fill="x", expand=True)
         settings_menubutton = ttk.Menubutton(self.header_frame, text="⚙️ Einstellungen", style='Settings.TMenubutton')
@@ -472,6 +565,7 @@ class MainAdminWindow(tk.Toplevel):
 
     # NEUE FUNKTION
     def apply_archived_date_fix(self):
+        # ... (unverändert) ...
         """Fügt die 'archived_date' Spalte zur Users-Tabelle hinzu."""
         if messagebox.askyesno("Bestätigung",
                                "Dies fügt die Spalte 'archived_date' zur Benutzer-Tabelle hinzu, um das Archivierungsdatum zu speichern. Fortfahren?",
@@ -644,9 +738,11 @@ class MainAdminWindow(tk.Toplevel):
             frame = self.tab_frames.get(tab_name)
             if frame and frame.winfo_exists():
                 if hasattr(frame, 'refresh_data'):
-                    print(f"[DEBUG] rufe refresh_data() für {tab_name} auf"); frame.refresh_data()
+                    print(f"[DEBUG] rufe refresh_data() für {tab_name} auf");
+                    frame.refresh_data()
                 elif hasattr(frame, 'refresh_plan'):
-                    print(f"[DEBUG] rufe refresh_plan() für {tab_name} auf"); frame.refresh_plan()
+                    print(f"[DEBUG] rufe refresh_plan() für {tab_name} auf");
+                    frame.refresh_plan()
         self.check_for_updates()
 
     def load_shift_types(self):
@@ -697,8 +793,9 @@ class MainAdminWindow(tk.Toplevel):
         if messagebox.askyesno("Bestätigen", "Möchten Sie den Zähler für die Schichthäufigkeit wirklich zurücksetzen?",
                                parent=self):
             if reset_shift_frequency():
-                self.shift_frequency.clear(); messagebox.showinfo("Erfolg", "Der Zähler wurde zurückgesetzt.",
-                                                                  parent=self)
+                self.shift_frequency.clear();
+                messagebox.showinfo("Erfolg", "Der Zähler wurde zurückgesetzt.",
+                                    parent=self)
             else:
                 messagebox.showerror("Fehler", "Fehler beim Zurücksetzen in der Datenbank.", parent=self)
 
