@@ -1,6 +1,6 @@
 # database/db_users.py
 from database.db_core import create_connection, hash_password, _log_activity, _create_admin_notification
-from datetime import datetime # Importiere datetime direkt
+from datetime import datetime  # Importiere datetime direkt
 import mysql.connector
 
 # --- NEUE GLOBALE CACHE-VARIABLEN ---
@@ -33,6 +33,7 @@ def get_user_count():
             cursor.close()
             conn.close()
 
+
 def log_user_login(user_id, vorname, name):
     # ... (unverändert) ...
     conn = create_connection()
@@ -53,6 +54,7 @@ def log_user_login(user_id, vorname, name):
         if conn and conn.is_connected():
             cursor.close()
             conn.close()
+
 
 def log_user_logout(user_id, vorname, name):
     # ... (unverändert) ...
@@ -102,6 +104,7 @@ def log_user_logout(user_id, vorname, name):
             cursor.close()
             conn.close()
 
+
 def register_user(vorname, name, password, role="Benutzer"):
     # ... (unverändert) ...
     conn = create_connection()
@@ -133,6 +136,7 @@ def register_user(vorname, name, password, role="Benutzer"):
         if conn and conn.is_connected():
             cursor.close()
             conn.close()
+
 
 def authenticate_user(vorname, name, password):
     # ... (unverändert, prüft bereits is_approved=1 und is_archived=0) ...
@@ -169,7 +173,11 @@ def authenticate_user(vorname, name, password):
             if user.get('is_approved') == 0:
                 return None
             if user.get('is_archived', 0) == 1:
-                return None
+                # Prüfe, ob das Archivierungsdatum in der Zukunft liegt
+                archived_date = user.get('archived_date')
+                if archived_date and archived_date > datetime.now():
+                    return user  # Zukünftige Archivierung, Login noch erlaubt
+                return None  # Bereits archiviert
             return user
         return None
     except Exception as e:
@@ -179,6 +187,7 @@ def authenticate_user(vorname, name, password):
         if conn and conn.is_connected():
             cursor.close()
             conn.close()
+
 
 def get_user_by_id(user_id):
     # ... (unverändert) ...
@@ -198,6 +207,7 @@ def get_user_by_id(user_id):
             cursor.close()
             conn.close()
 
+
 def get_all_users():
     # ... (unverändert, holt alle Status-Spalten) ...
     conn = create_connection()
@@ -215,6 +225,7 @@ def get_all_users():
         if conn and conn.is_connected():
             cursor.close()
             conn.close()
+
 
 def get_all_users_with_details():
     # ... (unverändert) ...
@@ -239,7 +250,8 @@ def get_ordered_users_for_schedule(include_hidden=False, for_date=None):
     """
     Holt die Benutzer in der festgelegten Reihenfolge.
     Gibt standardmäßig nur freigeschaltete (is_approved = 1) UND aktive (is_archived = 0) Benutzer zurück.
-    Wenn for_date angegeben ist, werden auch Benutzer zurückgegeben, die NACH diesem Datum archiviert wurden.
+    Wenn for_date angegeben ist (Stichtag ist der *Beginn des Monats*),
+    werden auch Benutzer zurückgegeben, die NACH diesem Stichtag archiviert wurden (oder noch nicht archiviert sind).
     """
     global _USER_ORDER_CACHE
 
@@ -259,16 +271,27 @@ def get_ordered_users_for_schedule(include_hidden=False, for_date=None):
 
         # Bedingung für Archivierung hinzufügen
         if for_date:
-            # Wenn ein Datum angegeben ist (für vergangene Pläne):
-            # Zeige Benutzer an, die *entweder* nicht archiviert sind
-            # *oder* deren Archivierungsdatum *nach* dem betrachteten Datum liegt.
+            # 'for_date' ist der *Start des aktuellen Monats* (z.B. 2025-10-01 00:00:00)
+
             # Konvertiere for_date in einen DATETIME-String für den Vergleich
             date_str = for_date.strftime('%Y-%m-%d %H:%M:%S')
+
+            # LOGIK: Zeige Benutzer an, die (nicht archiviert sind)
+            # ODER (deren Archivierungsdatum *NACH* dem Start des Monats liegt)
+            # Beispiel:
+            # Plan für OKTOBER. for_date = '2025-10-01 00:00:00'
+            # Archiviert am 15. OKT.
+            # Check: ('2025-10-15' > '2025-10-01') ist WAHR. -> Wird angezeigt (Korrekt)
+            #
+            # Plan für NOVEMBER. for_date = '2025-11-01 00:00:00'
+            # Archiviert am 15. OKT.
+            # Check: ('2025-10-15' > '2025-11-01') ist FALSCH. -> Wird NICHT angezeigt (Korrekt)
             query += f" AND (u.is_archived = 0 OR (u.is_archived = 1 AND u.archived_date > '{date_str}'))"
         else:
-            # Wenn kein Datum angegeben ist (für aktuelle/zukünftige Pläne oder allgemeine Listen):
-            # Zeige nur aktive Benutzer an.
-            query += " AND u.is_archived = 0"
+            # Wenn kein Datum angegeben ist (für allgemeine Listen wie UserOrderWindow):
+            # Zeige nur aktive Benutzer an (die nicht archiviert sind ODER deren Archivierung in der Zukunft liegt)
+            now_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            query += f" AND (u.is_archived = 0 OR (u.is_archived = 1 AND u.archived_date > '{now_str}'))"
 
         # Sortierung anhängen
         query += " ORDER BY uo.sort_order ASC, u.name ASC"
@@ -278,13 +301,11 @@ def get_ordered_users_for_schedule(include_hidden=False, for_date=None):
 
         # Cache aktualisieren *nur* wenn die Standardabfrage (aktive User) läuft
         if not for_date:
-             _USER_ORDER_CACHE = relevant_users # Cache enthält jetzt nur aktive
+            _USER_ORDER_CACHE = relevant_users  # Cache enthält jetzt nur aktive
 
         # Rückgabe basierend auf dem include_hidden Flag
         if include_hidden:
-            # Gibt alle relevanten Benutzer zurück (für das UserOrderWindow - zeigt nur aktive!)
-            # HINWEIS: UserOrderWindow sollte NUR aktive User anzeigen. Diese Logik passt.
-             return relevant_users
+            return relevant_users
         else:
             # Gibt nur die sichtbaren relevanten Benutzer zurück (für den Schichtplan)
             return [user for user in relevant_users if user.get('is_visible', 1) == 1]
@@ -310,10 +331,10 @@ def save_user_order(user_order_list):
             is_visible = user_info.get('is_visible', 1)
             query = """
                     INSERT INTO user_order (user_id, sort_order, is_visible)
-                    VALUES (%s, %s, %s)
-                    AS new
-                    ON DUPLICATE KEY UPDATE
-                        sort_order = new.sort_order,
+                    VALUES (%s, %s, %s) AS new
+                    ON DUPLICATE KEY \
+                    UPDATE \
+                        sort_order = new.sort_order, \
                         is_visible = new.is_visible
                     """
             cursor.execute(query, (user_id, index, is_visible))
@@ -329,17 +350,21 @@ def save_user_order(user_order_list):
             cursor.close()
             conn.close()
 
+
 def get_all_user_participation():
-    # ... (unverändert, filtert bereits nach is_approved=1 und is_archived=0) ...
+    # ... (unverändert) ...
+    # KORREKTUR: Muss auch zukünftig archivierte Benutzer anzeigen
     conn = create_connection()
     if conn is None:
         return []
     try:
         cursor = conn.cursor(dictionary=True)
-        cursor.execute("""
+        now_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        cursor.execute(f"""
             SELECT id, vorname, name, last_ausbildung, last_schiessen
             FROM users
-            WHERE is_approved = 1 AND is_archived = 0
+            WHERE is_approved = 1 
+            AND (is_archived = 0 OR (is_archived = 1 AND archived_date > '{now_str}'))
         """)
         return cursor.fetchall()
     except Exception as e:
@@ -349,6 +374,7 @@ def get_all_user_participation():
         if conn and conn.is_connected():
             cursor.close()
             conn.close()
+
 
 def update_user_details(user_id, details, current_user_id):
     # ... (unverändert) ...
@@ -374,6 +400,7 @@ def update_user_details(user_id, details, current_user_id):
             cursor.close()
             conn.close()
 
+
 def delete_user(user_id, current_user_id):
     # ... (unverändert) ...
     conn = create_connection()
@@ -398,6 +425,7 @@ def delete_user(user_id, current_user_id):
             cursor.close()
             conn.close()
 
+
 # --- Restliche Funktionen (get_user_role bis update_last_event_date) bleiben unverändert ---
 
 def get_user_role(user_id):
@@ -414,6 +442,7 @@ def get_user_role(user_id):
         return None
     finally:
         if conn and conn.is_connected(): cursor.close(); conn.close()
+
 
 def update_user_password(user_id, new_password):
     # ... (unverändert) ...
@@ -435,6 +464,7 @@ def update_user_password(user_id, new_password):
     finally:
         if conn and conn.is_connected(): cursor.close(); conn.close()
 
+
 def mark_tutorial_seen(user_id):
     # ... (unverändert) ...
     conn = create_connection()
@@ -445,6 +475,7 @@ def mark_tutorial_seen(user_id):
         conn.commit()
     finally:
         if conn and conn.is_connected(): cursor.close(); conn.close()
+
 
 def check_tutorial_seen(user_id):
     # ... (unverändert) ...
@@ -458,6 +489,7 @@ def check_tutorial_seen(user_id):
     finally:
         if conn and conn.is_connected(): cursor.close(); conn.close()
 
+
 def set_password_changed_status(user_id, status):
     # ... (unverändert) ...
     conn = create_connection()
@@ -468,6 +500,7 @@ def set_password_changed_status(user_id, status):
         conn.commit()
     finally:
         if conn and conn.is_connected(): cursor.close(); conn.close()
+
 
 def get_password_changed_status(user_id):
     # ... (unverändert) ...
@@ -480,6 +513,7 @@ def get_password_changed_status(user_id):
         return result[0] == 1 if result else False
     finally:
         if conn and conn.is_connected(): cursor.close(); conn.close()
+
 
 def update_last_event_date(user_id, event_type, date_str):
     # ... (unverändert) ...
@@ -513,11 +547,12 @@ def get_pending_approval_users():
     try:
         cursor = conn.cursor(dictionary=True)
         cursor.execute("""
-            SELECT id, vorname, name, entry_date
-            FROM users
-            WHERE is_approved = 0 AND is_archived = 0
-            ORDER BY entry_date ASC
-        """)
+                       SELECT id, vorname, name, entry_date
+                       FROM users
+                       WHERE is_approved = 0
+                         AND is_archived = 0
+                       ORDER BY entry_date ASC
+                       """)
         users = cursor.fetchall()
         return users
     except Exception as e:
@@ -550,8 +585,12 @@ def approve_user(user_id, current_user_id):
         if conn and conn.is_connected(): cursor.close(); conn.close()
 
 
-def archive_user(user_id, current_user_id):
-    """Archiviert einen Benutzer (setzt is_archived = 1 und archived_date)."""
+def archive_user(user_id, current_user_id, archive_date=None):
+    """
+    Archiviert einen Benutzer (setzt is_archived = 1).
+    Wenn archive_date None ist, wird sofort archiviert.
+    Wenn archive_date angegeben ist, wird dieses Datum gesetzt.
+    """
     conn = create_connection()
     if conn is None:
         return False, "Keine Datenbankverbindung."
@@ -561,16 +600,25 @@ def archive_user(user_id, current_user_id):
         user_data = cursor.fetchone()
         user_fullname = f"{user_data[0]} {user_data[1]}" if user_data else f"ID {user_id}"
 
-        # NEU: Setze archived_date auf den aktuellen Zeitstempel
-        now_timestamp = datetime.now()
-        cursor.execute("UPDATE users SET is_archived = 1, archived_date = %s WHERE id = %s", (now_timestamp, user_id))
+        # Bestimme den Zeitstempel für die Archivierung
+        if archive_date:
+            archive_timestamp = archive_date
+            log_msg = f'Benutzer {user_fullname} wird zum {archive_date.strftime("%Y-%m-%d")} archiviert.'
+            notification_msg = f'Benutzer {user_fullname} wird zum {archive_date.strftime("%Y-%m-%d")} archiviert.'
+        else:
+            archive_timestamp = datetime.now()
+            log_msg = f'Benutzer {user_fullname} wurde sofort archiviert.'
+            notification_msg = f'Benutzer {user_fullname} wurde archiviert.'
 
-        _log_activity(cursor, current_user_id, 'USER_ARCHIVE', f'Benutzer {user_fullname} wurde archiviert.')
-        _create_admin_notification(cursor, f'Benutzer {user_fullname} wurde archiviert.')
+        cursor.execute("UPDATE users SET is_archived = 1, archived_date = %s WHERE id = %s",
+                       (archive_timestamp, user_id))
+
+        _log_activity(cursor, current_user_id, 'USER_ARCHIVE', log_msg)
+        _create_admin_notification(cursor, notification_msg)
 
         conn.commit()
         clear_user_order_cache()
-        return True, f"Benutzer {user_fullname} erfolgreich archiviert."
+        return True, notification_msg
     except Exception as e:
         conn.rollback()
         return False, f"Fehler beim Archivieren: {e}"
@@ -578,6 +626,7 @@ def archive_user(user_id, current_user_id):
         if conn and conn.is_connected():
             cursor.close()
             conn.close()
+
 
 def unarchive_user(user_id, current_user_id):
     """Reaktiviert einen Benutzer (setzt is_archived = 0 und archived_date = NULL)."""
