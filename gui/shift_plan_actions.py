@@ -129,7 +129,10 @@ class ShiftPlanActionHandler:
                 if cell_widgets and cell_widgets.get('label'):
                      current_text = cell_widgets['label'].cget("text")
                      # Normalisiere den alten Wert FÜR DIE BERECHNUNGEN (Konflikte, Zählung)
-                     old_shift_normalized = current_text.replace("?", "").replace(" (A)", "").replace("T./N.", "T/N").replace("WF", "X").replace("T.", "T").replace("N.", "N")
+                     # --- KORREKTUR 1 (von 4) ---
+                     # .replace("T.", "T").replace("N.", "N") entfernt.
+                     old_shift_normalized = current_text.replace("?", "").replace(" (A)", "").replace("T./N.", "T/N").replace("WF", "X")
+                     # --- KORREKTUR ENDE ---
                      if old_shift_normalized in ['U', 'X', 'EU', 'WF', 'U?', 'T./N.?','&nbsp;']:
                          old_shift_abbrev = "" # Zählt nicht als Schicht
                      else:
@@ -401,7 +404,10 @@ class ShiftPlanActionHandler:
                 if cell_widgets and cell_widgets.get('label'):
                     current_text = cell_widgets['label'].cget("text")
                     # Normalisiere für Berechnungen
-                    normalized = current_text.replace("?", "").replace(" (A)", "").replace("T./N.", "T/N").replace("WF", "X").replace("T.", "T").replace("N.", "N")
+                    # --- KORREKTUR 2 (von 4) ---
+                    # .replace("T.", "T").replace("N.", "N") entfernt.
+                    normalized = current_text.replace("?", "").replace(" (A)", "").replace("T./N.", "T/N").replace("WF", "X")
+                    # --- KORREKTUR ENDE ---
                     if normalized not in ['U', 'X', 'EU', 'WF', 'U?', 'T./N.?','&nbsp;', '']:
                         old_shift_abbrev = normalized
         except Exception as e:

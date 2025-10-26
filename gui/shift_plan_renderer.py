@@ -387,7 +387,11 @@ class ShiftPlanRenderer:
         date_str = date_obj.strftime('%Y-%m-%d')
 
         # Normalisiere den *finalen* Text für Schicht-Lookup und Farbfindung
-        shift_abbrev = final_display_text.replace("?", "").replace(" (A)", "").replace("T./N.", "T/N").replace("WF", "X").replace("T.", "T").replace("N.", "N")
+        # --- KORREKTUR 3 (von 4) ---
+        # .replace("T.", "T").replace("N.", "N") entfernt.
+        shift_abbrev = final_display_text.replace("?", "").replace(" (A)", "").replace("T./N.", "T/N").replace("WF", "X")
+        # --- KORREKTUR ENDE ---
+
 
         shift_data = self.app.shift_types_data.get(shift_abbrev)
         # Statusinformationen aus DM holen (für Rahmen etc.)
@@ -546,7 +550,10 @@ class ShiftPlanRenderer:
                      elif ("Akzeptiert" in status or "Genehmigt" in status) and requested_shift == 'WF' and display_text_from_schedule == "&nbsp;":
                           final_display_text = 'X'
 
-                shift_abbrev_for_style = final_display_text.replace("&nbsp;", "").replace("?", "").replace("(A)", "").replace("T./N.", "T/N").replace("WF","X").replace("T.","T").replace("N.","N")
+                # --- KORREKTUR 4 (von 4) ---
+                # .replace("T.", "T").replace("N.", "N") entfernt.
+                shift_abbrev_for_style = final_display_text.replace("&nbsp;", "").replace("?", "").replace("(A)", "").replace("T./N.", "T/N").replace("WF","X")
+                # --- KORREKTUR ENDE ---
                 td_class = "day-col"; is_weekend = current_date.weekday() >= 5; is_holiday = self.app.is_holiday(current_date)
                 is_violation = (user['id'], day) in self.dm.violation_cells
 
