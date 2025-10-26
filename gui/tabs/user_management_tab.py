@@ -1,12 +1,13 @@
 # gui/tabs/user_management_tab.py
 import tkinter as tk
-from tkinter import ttk, messagebox
+from tkinter import ttk, messagebox, simpledialog  # simpledialog importiert
 from gui.user_edit_window import UserEditWindow
 from gui.dialogs.user_order_window import UserOrderWindow
 from database.db_users import (get_all_users_with_details, delete_user, save_user_order, get_ordered_users_for_schedule,
                                get_pending_approval_users, approve_user,
                                archive_user, unarchive_user)  # NEUE IMPORTE
 from database.db_core import ROLE_HIERARCHY
+from datetime import datetime, timedelta # datetime importiert
 
 
 class UserManagementTab(ttk.Frame):
@@ -155,7 +156,7 @@ class UserManagementTab(ttk.Frame):
                 messagebox.showerror("Fehler", message, parent=self)
 
     # =====================================================================================
-    # --- NEUE METHODE FÜR ARCHIVIERUNG ---
+    # --- NEUE METHODE FÜR ARCHIVIERUNG (ÜBERARBEITET) ---
     # =====================================================================================
 
     def toggle_archive_status(self):
@@ -169,6 +170,7 @@ class UserManagementTab(ttk.Frame):
         user_name = f"{user['vorname']} {user['name']}"
         is_archived = user.get('is_archived', 0)
         is_approved = user.get('is_approved', 0)
+        archived_date = user.get('archived_date')  # Hinzugefügt
 
         if is_approved == 0:
             messagebox.showwarning("Aktion nicht möglich",
@@ -176,28 +178,70 @@ class UserManagementTab(ttk.Frame):
                                    parent=self)
             return
 
+        # Prüfen, ob eine zukünftige Archivierung vorliegt
+        is_future_archive = False
+        if is_archived and archived_date and archived_date > datetime.now():
+            is_future_archive = True
+
+        success = False
+        message = ""
+
         if is_archived:
-            # --- Reaktivieren ---
-            if not messagebox.askyesno("Benutzer reaktivieren",
-                                       f"Möchten Sie den Benutzer '{user_name}' wirklich reaktivieren?\nEr/Sie kann sich danach wieder anmelden und wird in zukünftigen Plänen berücksichtigt.",
-                                       parent=self):
+            # --- Reaktivieren (gilt für sofort und zukünftig Archivierte) ---
+            prompt_msg = f"Möchten Sie den Benutzer '{user_name}' wirklich reaktivieren?\n"
+            if is_future_archive:
+                prompt_msg += f"Die geplante Archivierung zum {archived_date.strftime('%d.%m.%Y')} wird damit aufgehoben."
+            else:
+                prompt_msg += "Er/Sie kann sich danach wieder anmelden und wird in zukünftigen Plänen berücksichtigt."
+
+            if not messagebox.askyesno("Benutzer reaktivieren", prompt_msg, parent=self):
                 return
             success, message = unarchive_user(user_id, self.current_user_id)
+
         else:
             # --- Archivieren ---
-            if not messagebox.askyesno("Benutzer archivieren",
-                                       f"Möchten Sie den Benutzer '{user_name}' wirklich archivieren?\nEr/Sie kann sich danach nicht mehr anmelden und erscheint nicht mehr in zukünftigen Plänen.\n\nBestehende Einträge in alten Plänen bleiben erhalten.",
-                                       parent=self):
-                return
-            success, message = archive_user(user_id, self.current_user_id)
+            msg = f"Möchten Sie den Benutzer '{user_name}' archivieren?\n\n[Ja] = Sofort archivieren\n[Nein] = Zukünftiges Datum festlegen\n[Abbrechen] = Nichts tun"
+            response = messagebox.askyesnocancel("Archivieren", msg, parent=self)
 
+            archive_dt = None
+
+            if response is True:  # JA - Sofort
+                if messagebox.askyesno("Sofort archivieren",
+                                       f"Sind Sie sicher, dass Sie '{user_name}' sofort archivieren möchten?",
+                                       parent=self):
+                    archive_dt = datetime.now()
+                    success, message = archive_user(user_id, self.current_user_id, archive_dt)
+
+            elif response is False:  # NEIN - Zukünftiges Datum
+                today_str = (datetime.now() + timedelta(days=1)).strftime('%Y-%m-%d')
+                date_str = simpledialog.askstring("Zukünftiges Datum",
+                                                  f"Geben Sie das Datum ein, an dem '{user_name}' archiviert werden soll.\nDer Benutzer ist bis zu diesem Datum (exklusive) aktiv.\n(Format: YYYY-MM-DD, z.B. {today_str})",
+                                                  parent=self)
+                if date_str:
+                    try:
+                        # Wir setzen die Uhrzeit auf Mitternacht (Anfang des Tages)
+                        archive_dt = datetime.strptime(date_str, '%Y-%m-%d')
+                        # Prüfen, ob das Datum heute oder in der Vergangenheit liegt
+                        if archive_dt < datetime.now().replace(hour=0, minute=0, second=0, microsecond=0):
+                            messagebox.showerror("Fehler", "Das Datum darf nicht in der Vergangenheit liegen.",
+                                                 parent=self)
+                        else:
+                            success, message = archive_user(user_id, self.current_user_id, archive_dt)
+                    except ValueError:
+                        messagebox.showerror("Ungültiges Format", "Das Datum muss im Format YYYY-MM-DD sein.",
+                                             parent=self)
+
+            else:  # Cancel (response is None)
+                return
+
+        # --- Ergebnisverarbeitung ---
         if success:
             messagebox.showinfo("Erfolg", message, parent=self)
             self.load_data()  # Liste neu laden, um Status anzuzeigen
             # Schichtplan und andere Tabs müssen aktualisiert werden
             if hasattr(self.master_window, 'refresh_all_tabs'):
                 self.master_window.refresh_all_tabs()
-        else:
+        elif message:  # Nur Fehler anzeigen, wenn 'message' gesetzt, aber 'success' false ist
             messagebox.showerror("Fehler", message, parent=self)
 
     # =====================================================================================
@@ -217,13 +261,21 @@ class UserManagementTab(ttk.Frame):
             # NEUE STATUSLOGIK
             is_approved = user.get('is_approved', 0)
             is_archived = user.get('is_archived', 0)
+            archived_date = user.get('archived_date')  # Hinzugefügt
+
+            status_text = ""
+            tag = ""
 
             if is_approved == 0:
                 status_text = "Ausstehend ⚠️"
                 tag = 'pending'
             elif is_archived == 1:
-                status_text = "Archiviert 📦"
-                tag = 'archived'
+                if archived_date and archived_date > datetime.now():
+                    status_text = f"Archiviert ab {archived_date.strftime('%d.%m.%Y')} 🗓️"
+                    tag = 'future_archive'
+                else:
+                    status_text = "Archiviert 📦"
+                    tag = 'archived'
             else:
                 status_text = "Aktiv ✅"
                 tag = 'approved'
@@ -245,7 +297,9 @@ class UserManagementTab(ttk.Frame):
         # Konfiguriere Tags für Farben
         self.tree.tag_configure('pending', background='#ffe0e0', foreground='red')  # Rot für ausstehende Freischaltung
         self.tree.tag_configure('approved', background='white', foreground='black')  # Normal (Aktiv)
-        self.tree.tag_configure('archived', background='#f0f0f0', foreground='#555555')  # NEU: Grau für Archiviert
+        self.tree.tag_configure('archived', background='#f0f0f0', foreground='#555555')  # Grau für Archiviert
+        self.tree.tag_configure('future_archive', background='#fffbe0',
+                                foreground='#a18c00')  # Gelb für zukünftige Archivierung
 
         # Nach dem Laden der Daten, Status der ausstehenden Freischaltungen prüfen
         self.check_pending_approvals()
@@ -298,8 +352,15 @@ class UserManagementTab(ttk.Frame):
 
         # Zusatzwarnung, wenn Benutzer nicht archiviert ist
         is_archived = user.get('is_archived', 0)
+        archived_date = user.get('archived_date')
+
         warning = ""
-        if not is_archived:
+        is_active = True
+        if is_archived == 1:
+            if not archived_date or archived_date <= datetime.now():
+                is_active = False  # Bereits archiviert
+
+        if is_active:
             warning = "\n\nWARNUNG: Dieser Benutzer ist noch aktiv.\nBevorzugen Sie die 'Archivieren'-Funktion, wenn der Benutzer nur deaktiviert werden soll."
 
         if messagebox.askyesno("Löschen bestätigen",
@@ -317,30 +378,9 @@ class UserManagementTab(ttk.Frame):
     def open_order_window(self):
         # HINWEIS: Diese Funktion ist unverändert.
         # UserOrderWindow ruft get_ordered_users_for_schedule(include_hidden=True) auf.
-        # Da diese DB-Funktion jetzt (is_archived = 0) filtert,
-        # werden archivierte Benutzer hier korrekterweise nicht mehr angezeigt.
-
-        # (Code von letztem Mal, aber 'all_users' wird jetzt korrekt gefiltert sein)
-        all_users = get_all_users_with_details()
-
-        # KORREKTUR: Wir sollten UserOrderWindow nicht 'all_users' geben,
-        # sondern die Liste, die es selbst laden würde, damit es konsistent ist.
-        # UserOrderWindow(self.master_window, all_users, self.current_user_id, self.master_window.refresh_all_tabs)
-
-        # BESSER: UserOrderWindow(self, callback)
-        # Wir schauen in die Definition von UserOrderWindow (letzter Upload)
-        # def __init__(self, parent, callback=None):
-        #   self.users_data = get_ordered_users_for_schedule(include_hidden=True)
-        # Ah, der Aufruf in main_admin_window war UserOrderWindow(self, callback=...)
-        # Der Aufruf hier in user_management_tab war:
-        # UserOrderWindow(self.master_window, all_users, self.current_user_id, self.master_window.refresh_all_tabs)
-        # ... was nicht zur Definition von user_order_window.py passt.
-
-        # Nehmen wir den Aufruf aus main_admin_window als Referenz:
-        # self.master_window.open_user_order_window()
-        # -> UserOrderWindow(self, callback=self.refresh_all_tabs)
-
-        # Der Aufruf hier sollte also auch so aussehen (self.master_window ist 'parent'):
+        # Da diese DB-Funktion jetzt (is_archived = 0 ODER zukünftiges Datum) filtert,
+        # werden archivierte Benutzer hier korrekterweise nicht mehr angezeigt,
+        # aber zukünftig zu archivierende Benutzer schon.
         UserOrderWindow(self.master_window, callback=self.master_window.refresh_all_tabs)
 
     def sort_treeview(self, tree, col, reverse):

@@ -3,32 +3,43 @@ import tkinter as tk
 from tkinter import ttk, colorchooser, messagebox
 import json
 import os
+# Importiere die DB-Funktionen
+from database.db_core import load_config_json, save_config_json, MIN_STAFFING_RULES_CONFIG_KEY
+
 
 class ColorSettingsWindow(tk.Toplevel):
     def __init__(self, parent, callback):
         super().__init__(parent)
         self.title("Farbeinstellungen")
-        self.geometry("500x400")
+        self.geometry("400x500")
         self.transient(parent)
         self.grab_set()
 
         self.callback = callback
-        self.config_file = "staffing_rules.json"
-        self.colors = self.load_colors()
+
+        # --- ANPASSUNG: Wir verwenden jetzt den DB-Config-Key ---
+        # Die Farben werden zusammen mit den Staffing-Regeln gespeichert.
+        self.config_key = MIN_STAFFING_RULES_CONFIG_KEY
+
+        self.colors = self.load_colors_from_db()
         self.vars = {}
 
         self.create_widgets()
 
-    def load_colors(self):
-        if os.path.exists(self.config_file):
-            with open(self.config_file, 'r') as f:
-                try:
-                    config = json.load(f)
-                    # Lade die Farben oder nutze Standardwerte, falls der Schlüssel fehlt
-                    return config.get("Colors", self.get_default_colors())
-                except json.JSONDecodeError:
-                    return self.get_default_colors()
-        return self.get_default_colors()
+    def load_colors_from_db(self):
+        """Lädt die Konfiguration aus der Datenbank."""
+        config = load_config_json(self.config_key)
+
+        if config and "Colors" in config:
+            # Lade Farben aus der DB
+            loaded_colors = config.get("Colors", {})
+            # Stelle sicher, dass alle Standardfarben vorhanden sind, falls neue hinzugefügt wurden
+            defaults = self.get_default_colors()
+            defaults.update(loaded_colors)  # Überschreibe Defaults mit geladenen Werten
+            return defaults
+        else:
+            # Wenn keine Config oder kein "Colors"-Schlüssel gefunden wurde, nutze Defaults
+            return self.get_default_colors()
 
     def get_default_colors(self):
         # Standardfarben, falls die Konfigurationsdatei nicht existiert oder fehlerhaft ist
@@ -71,20 +82,15 @@ class ColorSettingsWindow(tk.Toplevel):
             var = tk.StringVar(value=color_val)
             self.vars[key] = var
 
-            # --- ANFANG DER ÄNDERUNG ---
-            # Das Label für die Farbvorschau wird etwas breiter gemacht
             color_label = ttk.Label(frame, text="       ", background=color_val, relief="solid", borderwidth=1)
             color_label.pack(side='left', padx=10)
-
-            # Das Eingabefeld für den Hex-Code wurde entfernt
-            # --- ENDE DER ÄNDERUNG ---
 
             ttk.Button(frame, text="Farbe wählen",
                        command=lambda v=var, l=color_label: self.choose_color(v, l)).pack(side='left')
 
         button_frame = ttk.Frame(self)
         button_frame.pack(fill="x", padx=10, pady=10)
-        ttk.Button(button_frame, text="Speichern", command=self.save).pack(side="right")
+        ttk.Button(button_frame, text="Speichern", command=self.save_to_db).pack(side="right")
         ttk.Button(button_frame, text="Abbrechen", command=self.destroy).pack(side="right", padx=10)
 
     def choose_color(self, var, label):
@@ -95,27 +101,32 @@ class ColorSettingsWindow(tk.Toplevel):
             var.set(color_code[1])
             label.config(background=color_code[1])
 
-    def save(self):
+    def save_to_db(self):
+        """Speichert die Farben in der Datenbank."""
         # Sammelt die neuen Farbwerte aus den Variablen
         new_colors = {key: var.get() for key, var in self.vars.items()}
 
         try:
-            # Lädt die gesamte Konfigurationsdatei, um nur den "Colors"-Teil zu aktualisieren
-            if os.path.exists(self.config_file):
-                with open(self.config_file, 'r') as f:
-                    config = json.load(f)
-            else:
+            # Lädt die gesamte Konfigurationsdatei (z.B. Staffing Rules)
+            config = load_config_json(self.config_key)
+            if config is None:
                 config = {}
 
+            # Aktualisiert nur den "Colors"-Teil
             config["Colors"] = new_colors
 
-            with open(self.config_file, 'w') as f:
-                json.dump(config, f, indent=4)
+            # Speichert die gesamte Konfiguration zurück
+            if save_config_json(self.config_key, config):
+                messagebox.showinfo("Gespeichert", "Farbeinstellungen erfolgreich in der Datenbank gespeichert.",
+                                    parent=self)
+                # Ruft die Callback-Funktion auf, um das Hauptfenster zu aktualisieren
+                if self.callback:
+                    self.callback()
+                self.destroy()
+            else:
+                messagebox.showerror("Fehler", "Die Farben konnten nicht in der Datenbank gespeichert werden.",
+                                     parent=self)
 
-            # Ruft die Callback-Funktion auf, um das Hauptfenster zu aktualisieren
-            if self.callback:
-                self.callback()
-
-            self.destroy()
         except Exception as e:
-            messagebox.showerror("Fehler beim Speichern", f"Die Farben konnten nicht gespeichert werden:\n{e}", parent=self)
+            messagebox.showerror("Fehler beim Speichern", f"Die Farben konnten nicht gespeichert werden:\n{e}",
+                                 parent=self)

@@ -1,5 +1,5 @@
 # gui/shift_plan_data_manager.py
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, time  # Importiere 'time'
 import calendar
 from collections import defaultdict
 import traceback  # Import für detailliertere Fehlermeldungen
@@ -63,10 +63,21 @@ class ShiftPlanDataManager:
             if progress_callback: progress_callback(value, text)
 
         update_progress(5, "Lade Benutzerreihenfolge...")
-        current_date_for_archive_check = date(year, month, 1)
+
+        # --- KORREKTUR: Stichtag muss der Monatsanfang sein ---
+        # Wir übergeben den *Anfang des aktuellen Monats* (z.B. 1. Okt. 00:00:00)
+        # Die DB-Logik (archived_date > Stichtag) prüft dann:
+        # 1. Plan Okt: Archiviert 15. Okt. -> '15. Okt' > '1. Okt' -> TRUE (wird angezeigt)
+        # 2. Plan Nov: Archiviert 15. Okt. -> '15. Okt' > '1. Nov' -> FALSE (wird nicht angezeigt)
+
+        first_day_current_month = date(year, month, 1)
+        # Wichtig: datetime-Objekt verwenden, kein reines date-Objekt
+        current_date_for_archive_check = datetime.combine(first_day_current_month, time(0, 0, 0))
+
         self.cached_users_for_month = get_ordered_users_for_schedule(include_hidden=True,
                                                                      for_date=current_date_for_archive_check)
-        print(f"[DM Load] {len(self.cached_users_for_month)} Benutzer für {year}-{month} geladen (inkl. versteckter).")
+        print(
+            f"[DM Load] {len(self.cached_users_for_month)} Benutzer für {year}-{month} geladen (Stichtag: {current_date_for_archive_check}).")
 
         update_progress(10, "Lade alle Monatsdaten in einem Durchgang (DB-Optimierung)...")
         consolidated_data = get_consolidated_month_data(year, month)
@@ -302,6 +313,9 @@ class ShiftPlanDataManager:
             min_staffing.update(rules.get('Mo-Do', {}))
         if hasattr(self.app, 'is_holiday') and self.app.is_holiday(current_date):
             min_staffing.update(rules.get('Holiday', {}))
+
+        # --- HIER WAR DER FEHLER ---
+        # Es stand 'isinstancev,' statt 'isinstance(v,'
         return {k: int(v) for k, v in min_staffing.items() if
                 isinstance(v, (int, str)) and str(v).isdigit() and int(v) >= 0}
 
@@ -316,7 +330,8 @@ class ShiftPlanDataManager:
             if shift_info and shift_info.get('end_time'):
                 try:
                     end_time = datetime.strptime(shift_info['end_time'],
-                                                 '%H:%M').time(); total_hours += end_time.hour + end_time.minute / 60.0
+                                                 '%H:%M').time();
+                    total_hours += end_time.hour + end_time.minute / 60.0
                 except ValueError:
                     total_hours += 6.0
             else:
@@ -341,8 +356,9 @@ class ShiftPlanDataManager:
                     shift_info = self.app.shift_types_data.get('N.')
                     if shift_info and shift_info.get('start_time'):
                         try:
-                            start_time = datetime.strptime(shift_info['start_time'], '%H:%M').time(); hours = 24.0 - (
-                                        start_time.hour + start_time.minute / 60.0)
+                            start_time = datetime.strptime(shift_info['start_time'], '%H:%M').time();
+                            hours = 24.0 - (
+                                    start_time.hour + start_time.minute / 60.0)
                         except ValueError:
                             hours = 6.0
                     else:

@@ -151,10 +151,10 @@ class MainAdminWindow(tk.Toplevel):
                 all_user_tab_names = ["Schichtplan", "Meine Anfragen", "Mein Urlaub", "Bug-Reports", "Teilnahmen",
                                       "Chat"]
                 real_tab = TabClass(self.notebook, all_user_tab_names)
-            # --- Korrektur: ShiftTypesTab braucht nur app ---
+            # --- KORREKTUR: ShiftTypesTab braucht die AdminWindow (self), nicht die App ---
             elif TabClass.__name__ == "ShiftTypesTab":
-                real_tab = TabClass(self.notebook, self.app)  # Callback entfernt
-            # ----------------------------------------------------
+                real_tab = TabClass(self.notebook, self)  # self ist die MainAdminWindow
+            # -------------------------------------------------------------------------
             else:
                 try:
                     # Die meisten Admin-Tabs erwarten (master, self = MainAdminWindow)
@@ -271,10 +271,10 @@ class MainAdminWindow(tk.Toplevel):
                 all_user_tab_names = ["Schichtplan", "Meine Anfragen", "Mein Urlaub", "Bug-Reports", "Teilnahmen",
                                       "Chat"]
                 real_tab = TabClass(self.notebook, all_user_tab_names)
-            # --- Korrektur: ShiftTypesTab braucht nur app ---
+            # --- KORREKTUR: ShiftTypesTab braucht die AdminWindow (self), nicht die App ---
             elif TabClass.__name__ == "ShiftTypesTab":
-                real_tab = TabClass(self.notebook, self.app)  # Callback entfernt
-            # ----------------------------------------------------
+                real_tab = TabClass(self.notebook, self)  # self ist die MainAdminWindow
+            # -------------------------------------------------------------------------
             else:
                 try:  # Versuche (master, self = MainAdminWindow)
                     real_tab = TabClass(self.notebook, self)
@@ -466,10 +466,10 @@ class MainAdminWindow(tk.Toplevel):
 
         real_tab = None
         try:
-            # --- Korrektur: app Instanz für ShiftTypesTab (falls dynamisch geladen) ---
+            # --- KORREKTUR: ShiftTypesTab braucht die AdminWindow (self), nicht die App ---
             if TabClass.__name__ == "ShiftTypesTab":
-                real_tab = TabClass(self.notebook, self.app)  # Callback entfernt
-            # -----------------------------------------------------------------------
+                real_tab = TabClass(self.notebook, self)  # self ist die MainAdminWindow
+            # -------------------------------------------------------------------------
             elif TabClass.__name__ == "UserTabSettingsTab":
                 real_tab = TabClass(self.notebook, *args)
             elif TabClass.__name__ in ["RequestLockTab", "PasswordResetRequestsWindow"]:
