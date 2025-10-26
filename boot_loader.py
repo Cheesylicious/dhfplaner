@@ -26,7 +26,8 @@ class Application:
             self.root.destroy()
             sys.exit(1)  # Beendet die Anwendung, wenn DB nicht geht
 
-        print("[DEBUG] Application.__init__: Datenbank initialisiert.")
+        # --- HINWEIS: initialize_db() wird jetzt *innerhalb* von check_db_connection() aufgerufen ---
+        # print("[DEBUG] Application.__init__: Datenbank initialisiert.") # (Doppelte Meldung)
         self.login_window = None
         self.main_window = None
 
@@ -37,29 +38,45 @@ class Application:
         # ------------------------------------
 
     def check_db_connection(self):
-        """Prüft, ob der DB-Pool erfolgreich erstellt wurde."""
+        """
+        Prüft die DB-Verbindung und initialisiert die Tabellen.
+        Geänderte Reihenfolge: Erst Pool testen, dann Schema initialisieren.
+        """
         try:
-            db_core.initialize_db()
-            # Der Pool wird in db_core erstellt. Prüfen, ob er existiert.
+            # --- KORREKTUR START: Reihenfolge geändert ---
+
+            # 1. Prüfen, ob der Pool überhaupt erstellt wurde
             if db_core.db_pool is None:
-                print("ERROOOOOR")
+                print("[FEHLER] Der Datenbank-Verbindungspool (db_pool) ist None.")
                 messagebox.showerror("Kritischer DB Fehler",
                                      "Der Datenbank-Verbindungspool konnte nicht erstellt werden. "
                                      "Siehe Konsole für Details.\nAnwendung wird beendet.")
                 return False
 
-            # Test-Verbindung holen und wieder schließen
-            conn = db_core.create_connection()
-            if conn is None:
+            # 2. Test-Verbindung holen und wieder schließen (einfacher Pool-Test)
+            print("[DEBUG] check_db_connection: Teste Verbindung aus Pool...")
+            conn_test = db_core.create_connection()
+            if conn_test is None:
                 messagebox.showerror("Kritischer DB Fehler",
-                                     "Konnte keine Verbindung zur Datenbank herstellen. "
+                                     "Konnte keine Verbindung zur Datenbank herstellen (Pool-Test fehlgeschlagen). "
                                      "Ist der Server erreichbar?\nAnwendung wird beendet.")
                 return False
-            conn.close()
+            conn_test.close()
+            print("[DEBUG] check_db_connection: Pool-Test erfolgreich.")
+
+            # 3. Erst JETZT die Tabellen-Struktur initialisieren/prüfen
+            db_core.initialize_db()
+            print("[DEBUG] check_db_connection: Datenbank-Schema (Tabellen/Spalten) überprüft.")
+
             return True
+            # --- KORREKTUR ENDE ---
+
         except Exception as e:
+            # --- KORREKTUR: Bessere Fehleranzeige statt nur "{e}" ---
+            error_details = repr(e)  # Zeigt den Exception-Typ an (z.B. mysql.connector.Error(errno=...))
+            print(f"[FEHLER] Unerwarteter Fehler beim DB-Start: {error_details}")
             messagebox.showerror("Kritischer DB Fehler",
-                                 f"Ein unerwarteter Fehler beim DB-Start ist aufgetreten: {e}\n"
+                                 f"Ein unerwarteter Fehler beim DB-Start ist aufgetreten:\n{error_details}\n\n"
                                  "Anwendung wird beendet.")
             return False
 

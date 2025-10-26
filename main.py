@@ -1,7 +1,7 @@
 # main.py
 import tkinter as tk
 from tkinter import messagebox
-from boot_loader import Application  # Importiert die Haupt-Anwendungsklasse
+# Importe hier entfernt (nach innen verschoben)
 import sys
 import os
 
@@ -24,6 +24,11 @@ except Exception as e:
 
 def main():
     try:
+        # --- KORREKTUR: Importe hierher verschoben ---
+        # Importiert die Haupt-Anwendungsklasse
+        from boot_loader import Application
+        # -------------------------------------------
+
         # 1. Erstelle die Anwendungs-Instanz
         #    Die Application-Klasse (im boot_loader) erstellt jetzt das 'root'-Fenster
         print("[DEBUG] main.py: Erstelle Application()...")
