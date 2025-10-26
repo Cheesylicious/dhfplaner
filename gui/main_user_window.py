@@ -391,12 +391,18 @@ class MainUserWindow(tk.Toplevel):
         self.switch_to_tab("Chat")
 
         def _select_user_after_load():
+            # --- KORREKTUR (Race Condition): Prüfe auf 'loaded_tabs' statt 'loading_tabs' ---
             if "Chat" in self.loaded_tabs and hasattr(self.tab_frames["Chat"], "select_user"):
+                print(f"[DEBUG] Chat-Tab ist geladen, rufe select_user({user_id}) auf.")
                 self.tab_frames["Chat"].select_user(user_id)
-            elif "Chat" in self.loading_tabs:
-                self.after(100, _select_user_after_load)
+
+            # --- KORREKTUR: Prüfe, ob der Tab *noch lädt* oder *noch nicht geladen* ist ---
+            elif "Chat" in self.loading_tabs or "Chat" not in self.loaded_tabs:
+                print("[DEBUG] go_to_chat: Chat-Tab noch nicht geladen, warte 200ms...")
+                self.after(200, _select_user_after_load)
+            # --- ENDE KORREKTUR ---
             else:
-                print("[DEBUG] go_to_chat: Konnte Benutzer nicht auswählen, Tab lädt nicht?")
+                print(f"[DEBUG] go_to_chat: Konnte Benutzer {user_id} nicht auswählen, Tab-Status unbekannt.")
 
         _select_user_after_load()
 
@@ -522,8 +528,8 @@ class MainUserWindow(tk.Toplevel):
         def _select_report_after_load():
             if "Bug-Reports" in self.loaded_tabs and hasattr(self.tab_frames["Bug-Reports"], "select_report"):
                 self.tab_frames["Bug-Reports"].select_report(report_id)
-            elif "Bug-Reports" in self.loading_tabs:
-                self.after(100, _select_report_after_load)
+            elif "Bug-Reports" in self.loading_tabs or "Bug-Reports" not in self.loaded_tabs:
+                self.after(200, _select_report_after_load)
 
         if report_id:
             _select_report_after_load()

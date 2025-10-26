@@ -1,171 +1,159 @@
+# gui/dialogs/shift_order_window.py
 import tkinter as tk
 from tkinter import ttk, messagebox
-from database.db_shifts import get_ordered_shift_abbrevs, save_shift_order
+# KORREKTUR: save_shift_order erwartet jetzt nur 3 Werte pro Tupel
+from database.db_shifts import get_ordered_shift_abbrevs, save_shift_order, clear_shift_order_cache
 
 
 class ShiftOrderWindow(tk.Toplevel):
-    def __init__(self, parent, callback=None):
-        super().__init__(parent)
-        self.parent = parent
+    def __init__(self, master, callback):
+        super().__init__(master)
         self.callback = callback
-
-        self.title("Schicht-Reihenfolge und Sichtbarkeit anpassen")
-        self.transient(parent)
+        # KORREKTUR: Titel angepasst
+        self.title("Schicht-Reihenfolge & Sichtbarkeit anpassen")
+        self.geometry("500x600") # Breite reduziert
+        self.transient(master)
         self.grab_set()
 
-        self.shift_list = []
+        self.main_frame = ttk.Frame(self, padding=10)
+        self.main_frame.pack(fill='both', expand=True)
 
-        self.create_widgets()
+        # KORREKTUR: Beschreibung angepasst
+        ttk.Label(self.main_frame,
+                  text="Ziehen Sie die Schichten in die gewünschte Reihenfolge.\n"
+                       "Deaktivieren Sie 'Sichtbar', um eine Schicht im Plan auszublenden.").pack(pady=5)
+
+        # Container für Treeview und Scrollbar
+        tree_container = ttk.Frame(self.main_frame)
+        tree_container.pack(fill='both', expand=True, pady=10)
+
+        # --- KORREKTUR: Spalte 'Check' entfernt ---
+        self.tree = ttk.Treeview(tree_container, columns=('Visible',), show='tree headings') # Nur noch 'Visible'
+        self.tree.heading('#0', text='Schichtart (Name - Abkürzung)')
+        self.tree.heading('Visible', text='Sichtbar?')
+        # self.tree.heading('Check', text='Prüfen?') # Entfernt
+
+        self.tree.column('#0', width=300, stretch=tk.YES)
+        self.tree.column('Visible', width=80, anchor='center')
+        # self.tree.column('Check', width=80, anchor='center') # Entfernt
+
+        # Scrollbar hinzufügen
+        vsb = ttk.Scrollbar(tree_container, orient="vertical", command=self.tree.yview)
+        vsb.pack(side='right', fill='y')
+        self.tree.configure(yscrollcommand=vsb.set)
+
+        self.tree.pack(fill='both', expand=True)
+        # --- ENDE KORREKTUR ---
+
+        # Daten laden
         self.load_shifts()
 
-        self.update_idletasks()
+        # Drag & Drop Bindings
+        self.tree.bind("<ButtonPress-1>", self.on_press)
+        self.tree.bind("<B1-Motion>", self.on_drag)
+        self.tree.bind("<ButtonRelease-1>", self.on_release)
+        # KORREKTUR: Nur noch Klick auf Sichtbar-Checkbox behandeln
+        self.tree.bind("<Button-1>", self.on_tree_click, add='+')
 
-        header_height = 30
-        row_height = 28
-        button_frame_height = 60
-        label_height = 40
+        self.drag_start_item = None
+        self.drag_start_y = 0
 
-        total_height = header_height + (len(self.shift_list) * row_height) + button_frame_height + label_height
+        btn_frame = ttk.Frame(self.main_frame)
+        btn_frame.pack(fill='x', pady=10)
 
-        max_height = int(parent.winfo_height() * 0.8)
-        total_height = min(total_height, max_height)
+        save_btn = ttk.Button(btn_frame, text="Speichern", command=self.save)
+        save_btn.pack(side='right', padx=5)
 
-        # --- KORREKTUR: Mindestbreite erhöht ---
-        min_width = 650
-
-        parent_x = parent.winfo_x()
-        parent_y = parent.winfo_y()
-        parent_width = parent.winfo_width()
-        parent_height = parent.winfo_height()
-
-        position_x = parent_x + (parent_width // 2) - (min_width // 2)
-        position_y = parent_y + (parent_height // 2) - (total_height // 2)
-
-        self.geometry(f"{min_width}x{total_height}+{position_x}+{position_y}")
-        self.minsize(min_width, 300)
-
-    def create_widgets(self):
-        main_frame = ttk.Frame(self, padding="10")
-        main_frame.pack(fill="both", expand=True)
-
-        ttk.Label(main_frame,
-                  text="Sortieren per Drag & Drop oder mit Buttons. Doppelklick zum Ändern der Optionen.").pack(
-            anchor="w", pady=(0, 10))
-
-        list_frame = ttk.Frame(main_frame)
-        list_frame.pack(fill="both", expand=True)
-        list_frame.columnconfigure(0, weight=1)
-        list_frame.rowconfigure(0, weight=1)
-
-        self.tree = ttk.Treeview(list_frame, columns=("name", "abbreviation", "visible", "understaffing"),
-                                 show="headings", selectmode="browse")
-        self.tree.grid(row=0, column=0, sticky="nsew")
-
-        self.tree.heading("name", text="Name der Schicht")
-        self.tree.heading("abbreviation", text="Abkürzung")
-        self.tree.heading("visible", text="Sichtbar in Zählung")
-        self.tree.heading("understaffing", text="Unterbesetzung prüfen")
-
-        # --- KORREKTUR: "name"-Spalte dehnbar gemacht ---
-        self.tree.column("name", minwidth=200, stretch=tk.YES)
-        self.tree.column("abbreviation", width=80, anchor="center", stretch=tk.NO)
-        self.tree.column("visible", width=120, anchor="center", stretch=tk.NO)
-        self.tree.column("understaffing", width=150, anchor="center", stretch=tk.NO)
-
-        scrollbar = ttk.Scrollbar(list_frame, orient="vertical", command=self.tree.yview)
-        self.tree.configure(yscrollcommand=scrollbar.set)
-        scrollbar.grid(row=0, column=1, sticky="ns")
-
-        button_subframe = ttk.Frame(list_frame)
-        button_subframe.grid(row=0, column=2, sticky="ns", padx=(10, 0))
-
-        up_button = ttk.Button(button_subframe, text="▲", command=lambda: self.move_entry(-1))
-        up_button.pack(pady=5)
-
-        down_button = ttk.Button(button_subframe, text="▼", command=lambda: self.move_entry(1))
-        down_button.pack(pady=5)
-
-        self.tree.bind("<Double-1>", self.toggle_visibility)
-        self.tree.bind("<B1-Motion>", self.move_item_dnd)
-
-        bottom_frame = ttk.Frame(main_frame)
-        bottom_frame.pack(fill="x", pady=(10, 0))
-
-        save_button = ttk.Button(bottom_frame, text="Speichern & Schließen", command=self.save_order)
-        save_button.pack(side="right")
-
-        cancel_button = ttk.Button(bottom_frame, text="Abbrechen", command=self.destroy)
-        cancel_button.pack(side="right", padx=10)
+        cancel_btn = ttk.Button(btn_frame, text="Abbrechen", command=self.destroy)
+        cancel_btn.pack(side='right')
 
     def load_shifts(self):
-        self.shift_list = get_ordered_shift_abbrevs(include_hidden=True)
-        self.populate_tree()
+        # Lösche alte Einträge
+        for item in self.tree.get_children():
+            self.tree.delete(item)
 
-    def populate_tree(self):
-        for i in self.tree.get_children():
-            self.tree.delete(i)
+        # Lade Schichten inkl. versteckter
+        # get_ordered_shift_abbrevs liefert jetzt den 'check_for_understaffing'-Wert aus shift_types
+        self.shifts_data = get_ordered_shift_abbrevs(include_hidden=True)
+        self.shift_map = {shift['abbreviation']: shift for shift in self.shifts_data}
 
-        for shift in self.shift_list:
-            visible_text = "Ja" if shift.get('is_visible', 1) else "Nein"
-            understaffing_text = "Ja" if shift.get('check_for_understaffing', 0) else "Nein"
-            tags = ()
-            if not shift.get('is_visible', 1):
-                tags = ('hidden',)
-            self.tree.tag_configure('hidden', foreground='gray')
+        # Füge Elemente zum Treeview hinzu
+        for i, shift in enumerate(self.shifts_data):
+            abbrev = shift['abbreviation']
+            name = shift.get('name', abbrev)
+            display_name = f"{name} - {abbrev}"
+            # 'is_visible' kommt weiterhin aus shift_order (oder Default 1)
+            is_visible = shift.get('is_visible', 1)
+            # 'check_staffing' wird hier nicht mehr benötigt
 
-            self.tree.insert("", "end", iid=shift['abbreviation'],
-                             values=(shift['name'], shift['abbreviation'], visible_text, understaffing_text),
-                             tags=tags)
+            # Füge Item ein, speichere Abkürzung in 'tags'
+            item_id = self.tree.insert('', tk.END, text=display_name, tags=(abbrev,))
 
-    def move_item_dnd(self, event):
-        item_id = self.tree.identify_row(event.y)
-        if item_id:
-            self.tree.move(item_id, "", self.tree.index(item_id))
+            # Setze Checkbox-Wert für Sichtbarkeit
+            self.tree.set(item_id, 'Visible', "✔" if is_visible else "☐")
+            # Setzen für 'Check' entfällt
 
-    def move_entry(self, direction):
-        selected_items = self.tree.selection()
-        if not selected_items:
-            return
-        item_id = selected_items[0]
-        current_index = self.tree.index(item_id)
-        self.tree.move(item_id, '', current_index + direction)
-
-    def toggle_visibility(self, event):
-        item_id = self.tree.identify_row(event.y)
-        if not item_id: return
-
+    # KORREKTUR: Klick-Handler angepasst (nur noch für Spalte 'Visible')
+    def on_tree_click(self, event):
+        region = self.tree.identify_region(event.x, event.y)
         column_id = self.tree.identify_column(event.x)
+        item_id = self.tree.identify_row(event.y)
 
-        for shift in self.shift_list:
-            if shift['abbreviation'] == item_id:
-                if column_id == "#3":  # Sichtbar-Spalte
-                    shift['is_visible'] = 1 - shift.get('is_visible', 1)
-                elif column_id == "#4":  # Unterbesetzung-Spalte
-                    shift['check_for_understaffing'] = 1 - shift.get('check_for_understaffing', 0)
-                break
-        self.populate_tree()
-        self.tree.selection_set(item_id)
-        self.tree.focus(item_id)
+        if region == 'cell' and item_id:
+            # Spaltenindex: #1 ist 'Visible'
+            if column_id == '#1': # Sichtbar-Spalte
+                current_value = self.tree.set(item_id, 'Visible')
+                new_value = "☐" if current_value == "✔" else "✔"
+                self.tree.set(item_id, 'Visible', new_value)
+            # Klick auf andere Spalten oder den Namen wird ignoriert
 
-    def save_order(self):
-        new_order_abbrevs = self.tree.get_children()
-        final_order_data = []
+    # --- Drag & Drop Methoden (on_press, on_drag, on_release) bleiben unverändert ---
+    def on_press(self, event):
+        region = self.tree.identify_region(event.x, event.y)
+        if region == 'tree':
+            self.drag_start_item = self.tree.identify_row(event.y)
+            self.drag_start_y = event.y
+            if self.drag_start_item:
+                 self.tree.selection_set(self.drag_start_item)
+        else:
+             self.drag_start_item = None
 
-        shift_map = {s['abbreviation']: s for s in self.shift_list}
+    def on_drag(self, event):
+        if not self.drag_start_item: return
+        item_over = self.tree.identify_row(event.y)
+        if item_over and item_over != self.drag_start_item:
+             self.tree.move(self.drag_start_item, self.tree.parent(item_over), self.tree.index(item_over))
+             self.drag_start_y = event.y
 
-        for index, abbrev in enumerate(new_order_abbrevs):
-            if abbrev in shift_map:
-                shift = shift_map[abbrev]
-                final_order_data.append(
-                    (abbrev, index, shift.get('is_visible', 1), shift.get('check_for_understaffing', 0))
-                )
+    def on_release(self, event):
+        self.drag_start_item = None
+    # --- Ende Drag & Drop ---
 
-        success, message = save_shift_order(final_order_data)
 
+    def save(self):
+        new_order_data = []
+        for i, item_id in enumerate(self.tree.get_children()):
+            abbrev_tuple = self.tree.item(item_id, 'tags')
+            if not abbrev_tuple: continue
+            abbrev = abbrev_tuple[0]
+
+            is_visible_text = self.tree.set(item_id, 'Visible')
+            # 'check_staffing_text' wird nicht mehr ausgelesen
+
+            is_visible = 1 if is_visible_text == "✔" else 0
+            # 'check_staffing' wird nicht mehr gespeichert
+
+            # --- KORREKTUR: Tupel hat nur noch 3 Elemente ---
+            # (abbreviation, sort_order, is_visible)
+            new_order_data.append((abbrev, i, is_visible))
+            # --- ENDE KORREKTUR ---
+
+        # Speichere die neue Reihenfolge und Sichtbarkeit in der DB
+        # Die Funktion save_shift_order erwartet jetzt nur noch 3 Werte
+        success, message = save_shift_order(new_order_data)
         if success:
-            messagebox.showinfo("Erfolg", message, parent=self)
-            if self.callback:
-                self.callback()
+            clear_shift_order_cache()
+            self.callback()
             self.destroy()
         else:
-            messagebox.showerror("Fehler", message, parent=self)
+            messagebox.showerror("Fehler", f"Reihenfolge konnte nicht gespeichert werden:\n{message}", parent=self)

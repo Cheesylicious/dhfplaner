@@ -366,7 +366,7 @@ class ShiftPlanTab(ttk.Frame):
         year, month = self.app.current_display_date.year, self.app.current_display_date.month
         days_in_month = calendar.monthrange(year, month)[1]
 
-        # --- KORREKTUR START ---
+        # --- KORREKTUR START (BUG 2) ---
         # Das Neuladen der Daten überschreibt die inkrementellen Änderungen (z.B. das Löschen von "T."),
         # die nur im Arbeitsspeicher (im DataManager) vorhanden sind, bevor die Prüfung läuft.
         # Wir müssen *direkt* die Daten verwenden, die der DataManager *jetzt* hat.

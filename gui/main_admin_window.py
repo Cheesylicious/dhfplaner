@@ -67,7 +67,7 @@ class MainAdminWindow(tk.Toplevel):
     def __init__(self, master, user_data, app):
         print("[DEBUG] MainAdminWindow.__init__: Start")
         super().__init__(master)
-        self.app = app # Die Haupt-Applikationsinstanz
+        self.app = app  # Die Haupt-Applikationsinstanz
         self.user_data = user_data
 
         full_name = f"{self.user_data['vorname']} {self.user_data['name']}".strip()
@@ -148,19 +148,21 @@ class MainAdminWindow(tk.Toplevel):
             print(f"[Thread-Admin] Lade Tab: {tab_name}...")
             real_tab = None
             if TabClass.__name__ == "UserTabSettingsTab":
-                all_user_tab_names = ["Schichtplan", "Meine Anfragen", "Mein Urlaub", "Bug-Reports", "Teilnahmen", "Chat"]
+                all_user_tab_names = ["Schichtplan", "Meine Anfragen", "Mein Urlaub", "Bug-Reports", "Teilnahmen",
+                                      "Chat"]
                 real_tab = TabClass(self.notebook, all_user_tab_names)
             # --- Korrektur: ShiftTypesTab braucht nur app ---
             elif TabClass.__name__ == "ShiftTypesTab":
-                 real_tab = TabClass(self.notebook, self.app) # Callback entfernt
+                real_tab = TabClass(self.notebook, self.app)  # Callback entfernt
             # ----------------------------------------------------
             else:
                 try:
                     # Die meisten Admin-Tabs erwarten (master, self = MainAdminWindow)
                     real_tab = TabClass(self.notebook, self)
                 except Exception as e1:
-                    print(f"[Thread-Admin] Warnung: {tab_name} mit (master, admin_window) fehlgeschlagen: {e1}. Versuche (master)...")
-                    try: # Fallback für Tabs, die nur (master) erwarten
+                    print(
+                        f"[Thread-Admin] Warnung: {tab_name} mit (master, admin_window) fehlgeschlagen: {e1}. Versuche (master)...")
+                    try:  # Fallback für Tabs, die nur (master) erwarten
                         real_tab = TabClass(self.notebook)
                     except Exception as e2:
                         print(f"[Thread-Admin] FEHLER: {tab_name} auch mit (master) fehlgeschlagen: {e2}")
@@ -170,15 +172,15 @@ class MainAdminWindow(tk.Toplevel):
             print(f"[Thread-Admin] Tab '{tab_name}' fertig geladen.")
         except Exception as e:
             print(f"[Thread-Admin] FEHLER beim Laden von Tab '{tab_name}': {e}")
-            self.tab_load_queue.put((tab_name, e, tab_index)) # Fehler in die Queue legen
+            self.tab_load_queue.put((tab_name, e, tab_index))  # Fehler in die Queue legen
 
     def _check_tab_load_queue(self):
         """Prüft die Queue und fügt geladene Tabs im GUI-Thread ein."""
-        tab_name_processed = None # Merker, welcher Tab bearbeitet wird
+        tab_name_processed = None  # Merker, welcher Tab bearbeitet wird
         try:
             result = self.tab_load_queue.get_nowait()
             tab_name, real_tab_or_exception, tab_index = result
-            tab_name_processed = tab_name # Merken für finally Block
+            tab_name_processed = tab_name  # Merken für finally Block
 
             print(f"[GUI-Checker-Admin] Empfange Ergebnis für: {tab_name}")
 
@@ -186,17 +188,18 @@ class MainAdminWindow(tk.Toplevel):
             if not placeholder_frame or not placeholder_frame.winfo_exists():
                 print(f"[GUI-Checker-Admin] FEHLER: Platzhalter für {tab_name} existiert nicht mehr.")
                 # loading_tabs wird im finally bereinigt
-                return # Mit nächstem Check fortfahren
+                return  # Mit nächstem Check fortfahren
 
             # Alte Lade-Labels entfernen
             for widget in placeholder_frame.winfo_children():
-                 if isinstance(widget, ttk.Label) and "Lade" in widget.cget("text"):
-                     widget.destroy()
+                if isinstance(widget, ttk.Label) and "Lade" in widget.cget("text"):
+                    widget.destroy()
 
             if isinstance(real_tab_or_exception, Exception):
                 # Fehler beim Laden anzeigen
                 e = real_tab_or_exception
-                ttk.Label(placeholder_frame, text=f"Fehler beim Laden:\n{e}", font=("Segoe UI", 12), foreground="red").pack(expand=True, anchor="center")
+                ttk.Label(placeholder_frame, text=f"Fehler beim Laden:\n{e}", font=("Segoe UI", 12),
+                          foreground="red").pack(expand=True, anchor="center")
                 print(f"[GUI-Checker-Admin] Fehler beim Laden von Tab '{tab_name}' angezeigt.")
             else:
                 # Erfolgreich geladen, Tab einsetzen
@@ -214,7 +217,7 @@ class MainAdminWindow(tk.Toplevel):
                     self.notebook.select(real_tab)
                     # Status aktualisieren
                     self.loaded_tabs.add(tab_name)
-                    self.tab_frames[tab_name] = real_tab # Referenz auf echten Tab
+                    self.tab_frames[tab_name] = real_tab  # Referenz auf echten Tab
                     print(f"[GUI-Checker-Admin] Tab '{tab_name}' erfolgreich eingesetzt.")
                 except tk.TclError as e:
                     # Fehler beim Einsetzen (z.B. Widget bereits zerstört)
@@ -240,11 +243,10 @@ class MainAdminWindow(tk.Toplevel):
 
             # Den Checker am Laufen halten? Nur wenn noch Arbeit da ist.
             if not self.tab_load_queue.empty() or self.loading_tabs:
-                self.after(100, self._check_tab_load_queue) # Weiter prüfen
+                self.after(100, self._check_tab_load_queue)  # Weiter prüfen
             else:
-                self.tab_load_checker_running = False # Keine Arbeit mehr, pausieren
+                self.tab_load_checker_running = False  # Keine Arbeit mehr, pausieren
                 print("[GUI-Checker-Admin] Keine Tabs mehr in Queue oder am Laden. Checker pausiert.")
-
 
     def _load_tab_directly(self, tab_name, tab_index):
         # (Wird nicht mehr direkt verwendet, bleibt als Fallback)
@@ -260,33 +262,35 @@ class MainAdminWindow(tk.Toplevel):
         for widget in placeholder_frame.winfo_children(): widget.destroy()
         loading_label = ttk.Label(placeholder_frame, text=f"Lade {tab_name}...", font=("Segoe UI", 16))
         loading_label.pack(expand=True, anchor="center")
-        self.update_idletasks() # Wichtig, damit Label sichtbar wird
+        self.update_idletasks()  # Wichtig, damit Label sichtbar wird
 
         real_tab = None
         try:
             # Initialisierung je nach Tab-Typ
             if TabClass.__name__ == "UserTabSettingsTab":
-                all_user_tab_names = ["Schichtplan", "Meine Anfragen", "Mein Urlaub", "Bug-Reports", "Teilnahmen", "Chat"]
+                all_user_tab_names = ["Schichtplan", "Meine Anfragen", "Mein Urlaub", "Bug-Reports", "Teilnahmen",
+                                      "Chat"]
                 real_tab = TabClass(self.notebook, all_user_tab_names)
             # --- Korrektur: ShiftTypesTab braucht nur app ---
             elif TabClass.__name__ == "ShiftTypesTab":
-                 real_tab = TabClass(self.notebook, self.app) # Callback entfernt
+                real_tab = TabClass(self.notebook, self.app)  # Callback entfernt
             # ----------------------------------------------------
             else:
-                try: # Versuche (master, self = MainAdminWindow)
+                try:  # Versuche (master, self = MainAdminWindow)
                     real_tab = TabClass(self.notebook, self)
-                except TypeError: # Fallback auf (master)
-                    print(f"[GUI - direct load] Warnung: {tab_name} mit (master, admin_window) fehlgeschlagen. Versuche (master)...")
+                except TypeError:  # Fallback auf (master)
+                    print(
+                        f"[GUI - direct load] Warnung: {tab_name} mit (master, admin_window) fehlgeschlagen. Versuche (master)...")
                     real_tab = TabClass(self.notebook)
 
             # Tab einsetzen (im GUI-Thread)
             if placeholder_frame.winfo_exists():
-                tab_options = self.notebook.tab(placeholder_frame) # Optionen holen
-                self.notebook.forget(placeholder_frame) # Platzhalter entfernen
-                self.notebook.insert(tab_index, real_tab, **tab_options) # Echten Tab einfügen
-                self.notebook.select(real_tab) # Echten Tab auswählen
+                tab_options = self.notebook.tab(placeholder_frame)  # Optionen holen
+                self.notebook.forget(placeholder_frame)  # Platzhalter entfernen
+                self.notebook.insert(tab_index, real_tab, **tab_options)  # Echten Tab einfügen
+                self.notebook.select(real_tab)  # Echten Tab auswählen
                 self.loaded_tabs.add(tab_name)
-                self.tab_frames[tab_name] = real_tab # Referenz aktualisieren
+                self.tab_frames[tab_name] = real_tab  # Referenz aktualisieren
                 print(f"[GUI - direct load] Tab '{tab_name}' erfolgreich eingesetzt.")
             else:
                 # Sollte nicht passieren, aber sicher ist sicher
@@ -294,12 +298,12 @@ class MainAdminWindow(tk.Toplevel):
 
         except Exception as e:
             print(f"[GUI - direct load] FEHLER beim Laden/Einsetzen von Tab '{tab_name}': {e}")
-            if placeholder_frame.winfo_exists(): # Fehler im Platzhalter anzeigen
+            if placeholder_frame.winfo_exists():  # Fehler im Platzhalter anzeigen
                 for widget in placeholder_frame.winfo_children(): widget.destroy()
-                ttk.Label(placeholder_frame, text=f"Fehler beim Laden:\n{e}", font=("Segoe UI", 12), foreground="red").pack(expand=True, anchor="center")
+                ttk.Label(placeholder_frame, text=f"Fehler beim Laden:\n{e}", font=("Segoe UI", 12),
+                          foreground="red").pack(expand=True, anchor="center")
         finally:
-             if tab_name in self.loading_tabs: self.loading_tabs.remove(tab_name)
-
+            if tab_name in self.loading_tabs: self.loading_tabs.remove(tab_name)
 
     def on_tab_changed(self, event):
         """Startet den Lade-Thread für den ausgewählten Tab."""
@@ -330,7 +334,8 @@ class MainAdminWindow(tk.Toplevel):
             return
 
         for widget in placeholder_frame.winfo_children(): widget.destroy()
-        ttk.Label(placeholder_frame, text=f"Lade {tab_name}...", font=("Segoe UI", 16)).pack(expand=True, anchor="center")
+        ttk.Label(placeholder_frame, text=f"Lade {tab_name}...", font=("Segoe UI", 16)).pack(expand=True,
+                                                                                             anchor="center")
         self.update_idletasks()
 
         self.loading_tabs.add(tab_name)
@@ -419,7 +424,8 @@ class MainAdminWindow(tk.Toplevel):
                 else:
                     print(f"[DEBUG] switch_to_tab: Frame für '{tab_name}' ist kein aktueller Tab mehr.")
             except (tk.TclError, KeyError):
-                print(f"[DEBUG] switch_to_tab: Fehler beim Auswählen von '{tab_name}' (Widget ungültig/Elternteil nicht Notebook).")
+                print(
+                    f"[DEBUG] switch_to_tab: Fehler beim Auswählen von '{tab_name}' (Widget ungültig/Elternteil nicht Notebook).")
         else:
             print(f"[DEBUG] switch_to_tab: Tab/Frame '{tab_name}' nicht gefunden oder zerstört.")
 
@@ -432,7 +438,8 @@ class MainAdminWindow(tk.Toplevel):
                     if self.notebook.nametowidget(frame.winfo_parent()) == self.notebook:
                         self.notebook.select(frame)
                         return
-                except (tk.TclError, KeyError): pass
+                except (tk.TclError, KeyError):
+                    pass
             if tab_name in self.loaded_tabs: self.loaded_tabs.remove(tab_name)
             if tab_name in self.tab_frames: del self.tab_frames[tab_name]
 
@@ -461,15 +468,15 @@ class MainAdminWindow(tk.Toplevel):
         try:
             # --- Korrektur: app Instanz für ShiftTypesTab (falls dynamisch geladen) ---
             if TabClass.__name__ == "ShiftTypesTab":
-                 real_tab = TabClass(self.notebook, self.app) # Callback entfernt
+                real_tab = TabClass(self.notebook, self.app)  # Callback entfernt
             # -----------------------------------------------------------------------
             elif TabClass.__name__ == "UserTabSettingsTab":
-                 real_tab = TabClass(self.notebook, *args)
+                real_tab = TabClass(self.notebook, *args)
             elif TabClass.__name__ in ["RequestLockTab", "PasswordResetRequestsWindow"]:
-                 real_tab = TabClass(self.notebook, *args)
+                real_tab = TabClass(self.notebook, *args)
             else:
-                 print(f"[WARNUNG] _load_dynamic_tab: Unbekannter Typ {TabClass.__name__}, versuche mit (master).")
-                 real_tab = TabClass(self.notebook)
+                print(f"[WARNUNG] _load_dynamic_tab: Unbekannter Typ {TabClass.__name__}, versuche mit (master).")
+                real_tab = TabClass(self.notebook)
 
             if placeholder_frame.winfo_exists():
                 tab_options = self.notebook.tab(placeholder_frame)
@@ -493,14 +500,15 @@ class MainAdminWindow(tk.Toplevel):
             print(f"[GUI] FEHLER beim Laden/Einfügen von dynamischem Tab '{tab_name}': {e}")
             if placeholder_frame.winfo_exists():
                 for widget in placeholder_frame.winfo_children(): widget.destroy()
-                ttk.Label(placeholder_frame, text=f"Fehler beim Laden:\n{e}", font=("Segoe UI", 12), foreground="red").pack(expand=True, anchor="center")
+                ttk.Label(placeholder_frame, text=f"Fehler beim Laden:\n{e}", font=("Segoe UI", 12),
+                          foreground="red").pack(expand=True, anchor="center")
             else:
-                 print(f"[GUI] FEHLER: Platzhalter für {tab_name} existierte nicht mehr bei Fehlerbehandlung (dyn. Tab).")
-                 messagebox.showerror("Fehler beim Laden", f"Konnte Tab '{tab_name}' nicht laden:\n{e}", parent=self)
+                print(
+                    f"[GUI] FEHLER: Platzhalter für {tab_name} existierte nicht mehr bei Fehlerbehandlung (dyn. Tab).")
+                messagebox.showerror("Fehler beim Laden", f"Konnte Tab '{tab_name}' nicht laden:\n{e}", parent=self)
         finally:
             if tab_name in self.loading_tabs:
                 self.loading_tabs.remove(tab_name)
-
 
     def open_request_lock_window(self):
         self._load_dynamic_tab("Antragssperre", RequestLockTab, self)
@@ -523,9 +531,9 @@ class MainAdminWindow(tk.Toplevel):
         print("[DEBUG] MainAdminWindow.on_close aufgerufen.")
         self.save_shift_frequency()
         try:
-             log_user_logout(self.user_data['id'], self.user_data['vorname'], self.user_data['name'])
+            log_user_logout(self.user_data['id'], self.user_data['vorname'], self.user_data['name'])
         except Exception as e:
-             print(f"[FEHLER] Konnte Logout nicht loggen: {e}")
+            print(f"[FEHLER] Konnte Logout nicht loggen: {e}")
         self.app.on_app_close()
 
     def logout(self):
@@ -536,7 +544,6 @@ class MainAdminWindow(tk.Toplevel):
         except Exception as e:
             print(f"[FEHLER] Konnte Logout nicht loggen: {e}")
         self.app.on_logout(self)
-
 
     def setup_header(self):
         self.notification_frame = ttk.Frame(self.header_frame)
@@ -570,7 +577,8 @@ class MainAdminWindow(tk.Toplevel):
         db_menu.add_separator()
         db_menu.add_command(label="Update: Freischaltung Spalte ('is_approved')", command=self.apply_is_approved_fix)
         db_menu.add_command(label="Update: Archivierung Spalte ('is_archived')", command=self.apply_is_archived_fix)
-        db_menu.add_command(label="Update: Archivierungsdatum Spalte ('archived_date')", command=self.apply_archived_date_fix)
+        db_menu.add_command(label="Update: Archivierungsdatum Spalte ('archived_date')",
+                            command=self.apply_archived_date_fix)
         db_menu.add_separator()
         db_menu.add_command(label="Update für Chat ausführen", command=self.apply_database_fix)
 
@@ -598,7 +606,7 @@ class MainAdminWindow(tk.Toplevel):
         if messagebox.askyesno("ACHTUNG: FIX BESTÄTIGEN",
                                "Sind Sie sicher, dass Sie ALLE bestehenden Benutzer freischalten möchten...?",
                                icon='warning', parent=self):
-             self._run_db_update_with_confirmation("Wirklich ALLE User freischalten?", run_db_fix_approve_all_users)
+            self._run_db_update_with_confirmation("Wirklich ALLE User freischalten?", run_db_fix_approve_all_users)
 
     def apply_is_approved_fix(self):
         msg = "Dies führt ein Update durch, um die fehlende 'is_approved' Spalte hinzuzufügen... Fortfahren?"
@@ -608,13 +616,13 @@ class MainAdminWindow(tk.Toplevel):
         msg = "Dies führt ein Update der Datenbank für die Chat-Funktion durch... Fortfahren?"
         self._run_db_update_with_confirmation(msg, run_db_update_v1)
 
-
     def setup_footer(self):
         footer_frame = ttk.Frame(self, padding=5)
         footer_frame.pack(fill="x", side="bottom")
-        ttk.Button(footer_frame, text="Abmelden", command=self.logout, style='Logout.TButton').pack(side="left", padx=10, pady=5)
-        ttk.Button(footer_frame, text="Bug / Fehler melden", command=self.open_bug_report_dialog, style='Bug.TButton').pack(side="right", padx=10, pady=5)
-
+        ttk.Button(footer_frame, text="Abmelden", command=self.logout, style='Logout.TButton').pack(side="left",
+                                                                                                    padx=10, pady=5)
+        ttk.Button(footer_frame, text="Bug / Fehler melden", command=self.open_bug_report_dialog,
+                   style='Bug.TButton').pack(side="right", padx=10, pady=5)
 
     def check_chat_notifications(self):
         try:
@@ -646,14 +654,14 @@ class MainAdminWindow(tk.Toplevel):
             self.chat_notification_frame.pack_forget()
 
         finally:
-             self.after(10000, self.check_chat_notifications)
-
+            self.after(10000, self.check_chat_notifications)
 
     def go_to_chat(self, user_id):
         print(f"[DEBUG] go_to_chat aufgerufen für User ID: {user_id}")
         self.switch_to_tab("Chat")
 
         def _select_user_when_ready():
+            # --- KORREKTUR (Race Condition): Prüfe auf 'loaded_tabs' statt 'loading_tabs' ---
             if "Chat" in self.loaded_tabs:
                 chat_tab = self.tab_frames.get("Chat")
                 if chat_tab and chat_tab.winfo_exists() and hasattr(chat_tab, "select_user"):
@@ -662,18 +670,24 @@ class MainAdminWindow(tk.Toplevel):
                         chat_tab.select_user(user_id)
                     except Exception as e:
                         print(f"[FEHLER] beim Aufrufen von select_user für {user_id}: {e}")
+                # ... (Restliche Fehlerbehandlungen bleiben gleich) ...
                 elif chat_tab and not chat_tab.winfo_exists():
-                     print("[DEBUG] go_to_chat/_select_user_when_ready: Chat-Tab existiert nicht mehr.")
+                    print("[DEBUG] go_to_chat/_select_user_when_ready: Chat-Tab existiert nicht mehr.")
                 elif not chat_tab:
-                     print("[DEBUG] go_to_chat/_select_user_when_ready: Chat-Tab nicht im Frame-Dict.")
+                    print("[DEBUG] go_to_chat/_select_user_when_ready: Chat-Tab nicht im Frame-Dict.")
                 else:
                     print("[DEBUG] go_to_chat/_select_user_when_ready: Chat-Tab hat keine 'select_user' Methode.")
+
+            # --- KORREKTUR: Prüfe, ob der Tab *noch lädt* oder *noch nicht geladen* ist ---
+            elif "Chat" in self.loading_tabs or "Chat" not in self.loaded_tabs:
+                print("[DEBUG] go_to_chat/_select_user_when_ready: Chat-Tab noch nicht geladen, warte 200ms...")
+                self.after(200, _select_user_when_ready)
+            # --- ENDE KORREKTUR ---
             else:
-                 print("[DEBUG] go_to_chat/_select_user_when_ready: Chat-Tab noch nicht geladen, warte...")
-                 self.after(200, _select_user_when_ready)
+                print(
+                    f"[DEBUG] go_to_chat/_select_user_when_ready: Unbekannter Status für Chat-Tab (UserID: {user_id}). Breche ab.")
 
         self.after(50, _select_user_when_ready)
-
 
     def check_for_updates(self):
         print("[DEBUG] check_for_updates gestartet.")
@@ -691,12 +705,10 @@ class MainAdminWindow(tk.Toplevel):
             print(f"[FEHLER] in check_for_updates: {e}")
 
         finally:
-             self.after(60000, self.check_for_updates)
-
+            self.after(60000, self.check_for_updates)
 
     def open_bug_report_dialog(self):
         BugReportDialog(self, self.user_data['id'], self.check_for_updates)
-
 
     def refresh_antragssperre_views(self):
         print("[DEBUG] refresh_antragssperre_views aufgerufen.")
@@ -712,7 +724,6 @@ class MainAdminWindow(tk.Toplevel):
                 print("[DEBUG] -> Lade Sperren neu im Antragssperre-Tab.")
                 lock_tab.load_locks_for_year()
 
-
     def update_header_notifications(self):
         for widget in self.notification_frame.winfo_children():
             widget.destroy()
@@ -721,23 +732,32 @@ class MainAdminWindow(tk.Toplevel):
         try:
             pending_password_resets = get_pending_password_resets_count()
             if pending_password_resets > 0:
-                notifications.append({"text": f"{pending_password_resets} Passwort-Reset(s)", "bg": "mediumpurple", "fg": "white", "action": self.open_password_resets_window})
+                notifications.append(
+                    {"text": f"{pending_password_resets} Passwort-Reset(s)", "bg": "mediumpurple", "fg": "white",
+                     "action": self.open_password_resets_window})
 
             pending_wunsch_count = len(get_pending_wunschfrei_requests())
             if pending_wunsch_count > 0:
-                notifications.append({"text": f"{pending_wunsch_count} Offene Wunschanfrage(n)", "bg": "orange", "fg": "black", "tab": "Wunschanfragen"})
+                notifications.append(
+                    {"text": f"{pending_wunsch_count} Offene Wunschanfrage(n)", "bg": "orange", "fg": "black",
+                     "tab": "Wunschanfragen"})
 
             pending_urlaub_count = get_pending_vacation_requests_count()
             if pending_urlaub_count > 0:
-                notifications.append({"text": f"{pending_urlaub_count} Offene Urlaubsanträge", "bg": "lightblue", "fg": "black", "tab": "Urlaubsanträge"})
+                notifications.append(
+                    {"text": f"{pending_urlaub_count} Offene Urlaubsanträge", "bg": "lightblue", "fg": "black",
+                     "tab": "Urlaubsanträge"})
 
             user_feedback_count = get_reports_with_user_feedback_count()
             if user_feedback_count > 0:
-                 notifications.append({"text": f"{user_feedback_count} User-Feedback(s)", "bg": "springgreen", "fg": "black", "tab": "Bug-Reports"})
+                notifications.append(
+                    {"text": f"{user_feedback_count} User-Feedback(s)", "bg": "springgreen", "fg": "black",
+                     "tab": "Bug-Reports"})
 
             open_bug_count = get_open_bug_reports_count()
             if open_bug_count > 0:
-                 notifications.append({"text": f"{open_bug_count} Offene Bug-Report(s)", "bg": "tomato", "fg": "white", "tab": "Bug-Reports"})
+                notifications.append({"text": f"{open_bug_count} Offene Bug-Report(s)", "bg": "tomato", "fg": "white",
+                                      "tab": "Bug-Reports"})
 
         except Exception as e:
             print(f"[FEHLER] beim Abrufen der Benachrichtigungsdaten: {e}")
@@ -745,12 +765,15 @@ class MainAdminWindow(tk.Toplevel):
             return
 
         if not notifications:
-            ttk.Label(self.notification_frame, text="Keine neuen Benachrichtigungen", font=('Segoe UI', 10, 'italic')).pack(padx=5)
+            ttk.Label(self.notification_frame, text="Keine neuen Benachrichtigungen",
+                      font=('Segoe UI', 10, 'italic')).pack(padx=5)
         else:
             for i, notif in enumerate(notifications):
                 style_name = f'Notif{i}.TButton'
-                self.style.configure(style_name, background=notif["bg"], foreground=notif["fg"], font=('Segoe UI', 10, 'bold'), padding=(10, 5))
-                self.style.map(style_name, background=[('active', self._calculate_hover_color(notif["bg"]))], relief=[('pressed', 'sunken')])
+                self.style.configure(style_name, background=notif["bg"], foreground=notif["fg"],
+                                     font=('Segoe UI', 10, 'bold'), padding=(10, 5))
+                self.style.map(style_name, background=[('active', self._calculate_hover_color(notif["bg"]))],
+                               relief=[('pressed', 'sunken')])
 
                 command = None
                 if "action" in notif:
@@ -765,14 +788,17 @@ class MainAdminWindow(tk.Toplevel):
 
     def _calculate_hover_color(self, base_color):
         try:
-            if not isinstance(base_color, str) or not base_color.startswith('#') or len(base_color) not in [4, 7]: return '#e0e0e0'
-            if len(base_color) == 4: r, g, b = [int(c*2, 16) for c in base_color[1:]]
-            else: r, g, b = [int(base_color[i:i+2], 16) for i in (1, 3, 5)]
+            if not isinstance(base_color, str) or not base_color.startswith('#') or len(base_color) not in [4,
+                                                                                                            7]: return '#e0e0e0'
+            if len(base_color) == 4:
+                r, g, b = [int(c * 2, 16) for c in base_color[1:]]
+            else:
+                r, g, b = [int(base_color[i:i + 2], 16) for i in (1, 3, 5)]
             factor = 0.85
             r, g, b = max(0, int(r * factor)), max(0, int(g * factor)), max(0, int(b * factor))
             return f"#{r:02x}{g:02x}{b:02x}"
-        except ValueError: return '#e0e0e0'
-
+        except ValueError:
+            return '#e0e0e0'
 
     def load_all_data(self):
         print("[DEBUG] load_all_data gestartet.")
@@ -785,12 +811,12 @@ class MainAdminWindow(tk.Toplevel):
             print(f"[DEBUG] Basisdaten für {current_year} geladen.")
         except Exception as e:
             print(f"[FEHLER] beim Laden der Basisdaten: {e}")
-            messagebox.showerror("Fehler beim Laden", f"Einige Basisdaten konnten nicht geladen werden:\n{e}", parent=self)
-
+            messagebox.showerror("Fehler beim Laden", f"Einige Basisdaten konnten nicht geladen werden:\n{e}",
+                                 parent=self)
 
     def refresh_all_tabs(self):
         print("[DEBUG] Aktualisiere alle *geladenen* Tabs...")
-        self.load_all_data() # Basisdaten neu laden
+        self.load_all_data()  # Basisdaten neu laden
 
         loaded_tab_names = list(self.loaded_tabs)
         for tab_name in loaded_tab_names:
@@ -805,25 +831,28 @@ class MainAdminWindow(tk.Toplevel):
                         elif hasattr(frame, 'refresh_plan'):
                             print(f"[DEBUG] -> rufe refresh_plan() für {tab_name} auf")
                             frame.refresh_plan()
-                except (tk.TclError, KeyError) as e: print(f"[WARNUNG] Fehler beim Zugriff auf Tab '{tab_name}' für Refresh: {e}")
-                except Exception as e: print(f"[FEHLER] Unerwarteter Fehler beim Refresh von Tab '{tab_name}': {e}")
+                except (tk.TclError, KeyError) as e:
+                    print(f"[WARNUNG] Fehler beim Zugriff auf Tab '{tab_name}' für Refresh: {e}")
+                except Exception as e:
+                    print(f"[FEHLER] Unerwarteter Fehler beim Refresh von Tab '{tab_name}': {e}")
 
-        self.check_for_updates() # Allgemeine UI-Updates
+        self.check_for_updates()  # Allgemeine UI-Updates
         print("[DEBUG] Refresh aller geladenen Tabs abgeschlossen.")
-
 
     def load_shift_types(self):
         try:
-             self.shift_types_data = {st['abbreviation']: st for st in get_all_shift_types()}
-             print(f"[DEBUG] {len(self.shift_types_data)} Schichtarten geladen.")
+            self.shift_types_data = {st['abbreviation']: st for st in get_all_shift_types()}
+            print(f"[DEBUG] {len(self.shift_types_data)} Schichtarten geladen.")
         except Exception as e:
-             print(f"[FEHLER] beim Laden der Schichtarten: {e}")
-             self.shift_types_data = {}
+            print(f"[FEHLER] beim Laden der Schichtarten: {e}")
+            self.shift_types_data = {}
 
     def load_staffing_rules(self):
         try:
             rules = load_config_json(MIN_STAFFING_RULES_CONFIG_KEY)
-            default_colors = {"alert_bg": "#FF5555", "overstaffed_bg": "#FFFF99", "success_bg": "#90EE90", "weekend_bg": "#EAF4FF", "holiday_bg": "#FFD700", "violation_bg": "#FF5555", "Ausstehend": "orange", "Admin_Ausstehend": "#E0B0FF"}
+            default_colors = {"alert_bg": "#FF5555", "overstaffed_bg": "#FFFF99", "success_bg": "#90EE90",
+                              "weekend_bg": "#EAF4FF", "holiday_bg": "#FFD700", "violation_bg": "#FF5555",
+                              "Ausstehend": "orange", "Admin_Ausstehend": "#E0B0FF"}
             defaults = {"Mo-Do": {}, "Fr": {}, "Sa-So": {}, "Holiday": {}, "Daily": {}, "Colors": default_colors}
 
             if not rules or not isinstance(rules, dict):
@@ -831,17 +860,19 @@ class MainAdminWindow(tk.Toplevel):
                 self.staffing_rules = defaults
             else:
                 for key, default_val in defaults.items():
-                    if key not in rules: rules[key] = default_val
-                    elif key == "Colors" and isinstance(rules[key], dict): # Farben einzeln prüfen
+                    if key not in rules:
+                        rules[key] = default_val
+                    elif key == "Colors" and isinstance(rules[key], dict):  # Farben einzeln prüfen
                         for ckey, cval in default_colors.items():
-                             if ckey not in rules["Colors"]: rules["Colors"][ckey] = cval
-                    elif key == "Colors" and not isinstance(rules[key], dict): # Komplette Colors ersetzen, wenn kein Dict
-                         rules["Colors"] = default_colors
+                            if ckey not in rules["Colors"]: rules["Colors"][ckey] = cval
+                    elif key == "Colors" and not isinstance(rules[key],
+                                                            dict):  # Komplette Colors ersetzen, wenn kein Dict
+                        rules["Colors"] = default_colors
                 self.staffing_rules = rules
                 print("[DEBUG] Besetzungsregeln geladen und validiert.")
         except Exception as e:
             print(f"[FEHLER] beim Laden der Besetzungsregeln: {e}")
-            self.staffing_rules = defaults # Fallback
+            self.staffing_rules = defaults  # Fallback
 
     def _load_holidays_for_year(self, year):
         try:
@@ -861,27 +892,32 @@ class MainAdminWindow(tk.Toplevel):
 
     def is_holiday(self, check_date):
         if not isinstance(check_date, date):
-             try: check_date = date.fromisoformat(str(check_date))
-             except (TypeError, ValueError): return False
+            try:
+                check_date = date.fromisoformat(str(check_date))
+            except (TypeError, ValueError):
+                return False
         return check_date in self.current_year_holidays
-
 
     def get_event_type(self, current_date):
         if not isinstance(current_date, date):
-             try: current_date = date.fromisoformat(str(current_date))
-             except (TypeError, ValueError): return None
+            try:
+                current_date = date.fromisoformat(str(current_date))
+            except (TypeError, ValueError):
+                return None
         return EventManager.get_event_type(current_date, self.events)
 
-
     def get_contrast_color(self, hex_color):
-        if not isinstance(hex_color, str) or not hex_color.startswith('#') or len(hex_color) not in [4, 7]: return 'black'
+        if not isinstance(hex_color, str) or not hex_color.startswith('#') or len(hex_color) not in [4,
+                                                                                                     7]: return 'black'
         try:
-            if len(hex_color) == 4: r, g, b = [int(c*2, 16) for c in hex_color[1:]]
-            else: r, g, b = [int(hex_color[i:i+2], 16) for i in (1, 3, 5)]
+            if len(hex_color) == 4:
+                r, g, b = [int(c * 2, 16) for c in hex_color[1:]]
+            else:
+                r, g, b = [int(hex_color[i:i + 2], 16) for i in (1, 3, 5)]
             luminance = (r * 299 + g * 587 + b * 114) / 1000
             return 'black' if luminance >= 128 else 'white'
-        except ValueError: return 'black'
-
+        except ValueError:
+            return 'black'
 
     def load_shift_frequency(self):
         try:
@@ -895,10 +931,12 @@ class MainAdminWindow(tk.Toplevel):
         try:
             freq_to_save = dict(self.shift_frequency)
             if not save_shift_frequency(freq_to_save):
-                messagebox.showwarning("Speicherfehler", "Die Schichthäufigkeit konnte nicht ... gespeichert werden.", parent=self)
+                messagebox.showwarning("Speicherfehler", "Die Schichthäufigkeit konnte nicht ... gespeichert werden.",
+                                       parent=self)
         except Exception as e:
             print(f"[FEHLER] beim Speichern der Schichthäufigkeit: {e}")
-            messagebox.showerror("Schwerer Fehler", f"Speichern der Schichthäufigkeit fehlgeschlagen:\n{e}", parent=self)
+            messagebox.showerror("Schwerer Fehler", f"Speichern der Schichthäufigkeit fehlgeschlagen:\n{e}",
+                                 parent=self)
 
     def reset_shift_frequency(self):
         if messagebox.askyesno("Bestätigen", "Möchten Sie den Zähler ... zurücksetzen?", parent=self):
@@ -933,13 +971,16 @@ class MainAdminWindow(tk.Toplevel):
             try:
                 if save_config_json(MIN_STAFFING_RULES_CONFIG_KEY, new_rules):
                     self.staffing_rules = new_rules
-                    messagebox.showinfo("Gespeichert", "Die Besetzungsregeln wurden erfolgreich aktualisiert.", parent=self)
+                    messagebox.showinfo("Gespeichert", "Die Besetzungsregeln wurden erfolgreich aktualisiert.",
+                                        parent=self)
                     self.refresh_specific_tab("Schichtplan")
                 else:
-                    messagebox.showerror("Fehler", "Die Besetzungsregeln konnten nicht ... gespeichert werden.", parent=self)
+                    messagebox.showerror("Fehler", "Die Besetzungsregeln konnten nicht ... gespeichert werden.",
+                                         parent=self)
             except Exception as e:
                 print(f"[FEHLER] beim Speichern der Besetzungsregeln: {e}")
                 messagebox.showerror("Schwerer Fehler", f"Speichern fehlgeschlagen:\n{e}", parent=self)
+
         staffing_window = MinStaffingWindow(self, current_rules=self.staffing_rules, callback=save_and_refresh)
         staffing_window.focus_force()
 
@@ -951,21 +992,31 @@ class MainAdminWindow(tk.Toplevel):
         if tab_name in self.loaded_tabs:
             frame = self.tab_frames.get(tab_name)
             if frame and frame.winfo_exists():
-                try: is_tab = self.notebook.nametowidget(frame.winfo_parent()) == self.notebook
-                except (tk.TclError, KeyError): is_tab = False
+                try:
+                    is_tab = self.notebook.nametowidget(frame.winfo_parent()) == self.notebook
+                except (tk.TclError, KeyError):
+                    is_tab = False
                 if is_tab:
                     if hasattr(frame, 'refresh_data'):
                         print(f"[DEBUG] -> rufe refresh_data() für {tab_name} auf")
-                        try: frame.refresh_data()
-                        except Exception as e: print(f"[FEHLER] bei refresh_data() für {tab_name}: {e}")
+                        try:
+                            frame.refresh_data()
+                        except Exception as e:
+                            print(f"[FEHLER] bei refresh_data() für {tab_name}: {e}")
                     elif hasattr(frame, 'refresh_plan'):
                         print(f"[DEBUG] -> rufe refresh_plan() für {tab_name} auf")
-                        try: frame.refresh_plan()
-                        except Exception as e: print(f"[FEHLER] bei refresh_plan() für {tab_name}: {e}")
-                    else: print(f"[WARNUNG] Tab '{tab_name}' hat keine Refresh-Methode.")
-            elif frame and not frame.winfo_exists(): print(f"[WARNUNG] refresh_specific_tab: {tab_name}-Tab existiert nicht mehr.")
-            elif not frame: print(f"[WARNUNG] refresh_specific_tab: {tab_name}-Tab nicht im Frame-Dictionary.")
-        else: print(f"[DEBUG] Tab '{tab_name}' ist nicht geladen, kein Refresh nötig.")
+                        try:
+                            frame.refresh_plan()
+                        except Exception as e:
+                            print(f"[FEHLER] bei refresh_plan() für {tab_name}: {e}")
+                    else:
+                        print(f"[WARNUNG] Tab '{tab_name}' hat keine Refresh-Methode.")
+            elif frame and not frame.winfo_exists():
+                print(f"[WARNUNG] refresh_specific_tab: {tab_name}-Tab existiert nicht mehr.")
+            elif not frame:
+                print(f"[WARNUNG] refresh_specific_tab: {tab_name}-Tab nicht im Frame-Dictionary.")
+        else:
+            print(f"[DEBUG] Tab '{tab_name}' ist nicht geladen, kein Refresh nötig.")
 
     def open_holiday_settings_window(self):
         HolidaySettingsWindow(self, year=self.current_display_date.year, callback=self.refresh_all_tabs)
@@ -981,4 +1032,3 @@ class MainAdminWindow(tk.Toplevel):
 
     def open_planning_assistant_settings(self):
         PlanningAssistantSettingsWindow(self)
-
