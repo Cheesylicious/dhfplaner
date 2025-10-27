@@ -163,7 +163,12 @@ class MainUserWindow(tk.Toplevel):
 
         if self.notebook.tabs():
             self.notebook.select(0)
+
+            # --- Expliziten Aufruf wieder hinzufügen ---
+            # Dieser Aufruf startet das Laden von Tab 0, ohne auf das Event
+            # zu warten (welches evtl. noch nicht ausgelöst wird).
             self.on_tab_changed(None)
+            # --- ENDE ---
 
         print("[DEBUG] MainUserWindow.__init__: Initialisierung abgeschlossen.")
 
@@ -179,9 +184,13 @@ class MainUserWindow(tk.Toplevel):
 
             # WICHTIG: Prüfen, welches Argument die Tab-Klasse erwartet
             # (self = MainUserWindow, self.user_data = dict)
+
+            # --- KORREKTUR: "Mein Urlaub" benötigt jetzt auch 'self' (die app Instanz) ---
             if tab_name in ["Schichtplan", "Chat", "Bug-Reports", "Mein Urlaub"]:
                 real_tab = TabClass(self.notebook, self)
             else:
+                # --- ENDE KORREKTUR ---
+
                 # Fallback für Tabs, die nur user_data erwarten (wie MyRequestsTab)
                 try:
                     real_tab = TabClass(self.notebook, self.user_data)
@@ -209,24 +218,45 @@ class MainUserWindow(tk.Toplevel):
 
             placeholder_frame = self.tab_frames[tab_name]
 
+            # Prüfen ob der Platzhalter noch existiert (wichtig bei schnellem Tab-Wechsel)
+            if not placeholder_frame.winfo_exists():
+                print(f"[GUI-Checker] Platzhalter für {tab_name} existiert nicht mehr. Abbruch.")
+                if tab_name in self.loading_tabs:
+                    self.loading_tabs.remove(tab_name)
+                return
+
             if isinstance(real_tab, Exception):
                 ttk.Label(placeholder_frame,
                           text=f"Fehler beim Laden:\n{real_tab}",
                           font=("Segoe UI", 12), foreground="red").pack(expand=True, anchor="center")
                 for widget in placeholder_frame.winfo_children():
-                    if isinstance(widget, ttk.Label) and "Lade" in widget.cget("text"):
+                    if isinstance(widget, ttk.Label) and "Lade" in widget.c_get("text"):
                         widget.destroy()
-                self.loading_tabs.remove(tab_name)
+                if tab_name in self.loading_tabs:
+                    self.loading_tabs.remove(tab_name)
             else:
                 tab_options = self.notebook.tab(placeholder_frame)
+
+                # --- Kaskadeneffekt durch unbind/bind stoppen ---
+                self.notebook.unbind("<<NotebookTabChanged>>")
+
+                self.notebook.insert(placeholder_frame, real_tab, **tab_options)
                 self.notebook.forget(placeholder_frame)
-                self.notebook.insert(tab_index, real_tab, **tab_options)
+
+                # WICHTIG: Den neuen Tab explizit auswählen, damit der
+                # Fokus nicht auf dem nächsten Platzhalter landet.
                 self.notebook.select(real_tab)
 
+                # Binding wieder hinzufügen
+                self.notebook.bind("<<NotebookTabChanged>>", self.on_tab_changed)
+                # --- ENDE ---
+
                 self.loaded_tabs.add(tab_name)
-                self.loading_tabs.remove(tab_name)
+                if tab_name in self.loading_tabs:
+                    self.loading_tabs.remove(tab_name)
                 self.tab_frames[tab_name] = real_tab
-                print(f"[GUI-Checker] Tab '{tab_name}' erfolgreich eingesetzt.")
+
+                print(f"[GUI-Checker] Tab '{tab_name}' erfolgreich eingesetzt und ausgewählt.")
 
         except Empty:
             pass
@@ -243,7 +273,10 @@ class MainUserWindow(tk.Toplevel):
         Startet jetzt nur noch den Lade-Thread.
         """
         try:
-            tab_index = self.notebook.index(self.notebook.select())
+            selected_widget_name = self.notebook.select()
+            if not selected_widget_name:  # Kann passieren, wenn alle Tabs geschlossen werden
+                return
+            tab_index = self.notebook.index(selected_widget_name)
             tab_name = self.notebook.tab(tab_index, "text")
         except (tk.TclError, IndexError):
             return
@@ -266,8 +299,10 @@ class MainUserWindow(tk.Toplevel):
             return
 
         # 2. "Wird geladen..."-Nachricht anzeigen
-        ttk.Label(placeholder_frame, text=f"Lade {tab_name}...",
-                  font=("Segoe UI", 16)).pack(expand=True, anchor="center")
+        # (Sicherstellen, dass nicht mehrere Labels gestapelt werden)
+        if not any(isinstance(w, ttk.Label) for w in placeholder_frame.winfo_children()):
+            ttk.Label(placeholder_frame, text=f"Lade {tab_name}...",
+                      font=("Segoe UI", 16)).pack(expand=True, anchor="center")
 
         # 3. Status auf "lädt" setzen
         self.loading_tabs.add(tab_name)
@@ -387,20 +422,16 @@ class MainUserWindow(tk.Toplevel):
         self.after(10000, self.check_chat_notifications)
 
     def go_to_chat(self, user_id):
-        # ... (angepasst für Thread-Wartezeit) ...
+        # ... (unverändert) ...
         self.switch_to_tab("Chat")
 
         def _select_user_after_load():
-            # --- KORREKTUR (Race Condition): Prüfe auf 'loaded_tabs' statt 'loading_tabs' ---
             if "Chat" in self.loaded_tabs and hasattr(self.tab_frames["Chat"], "select_user"):
                 print(f"[DEBUG] Chat-Tab ist geladen, rufe select_user({user_id}) auf.")
                 self.tab_frames["Chat"].select_user(user_id)
-
-            # --- KORREKTUR: Prüfe, ob der Tab *noch lädt* oder *noch nicht geladen* ist ---
             elif "Chat" in self.loading_tabs or "Chat" not in self.loaded_tabs:
                 print("[DEBUG] go_to_chat: Chat-Tab noch nicht geladen, warte 200ms...")
                 self.after(200, _select_user_after_load)
-            # --- ENDE KORREKTUR ---
             else:
                 print(f"[DEBUG] go_to_chat: Konnte Benutzer {user_id} nicht auswählen, Tab-Status unbekannt.")
 
@@ -522,7 +553,7 @@ class MainUserWindow(tk.Toplevel):
         self.switch_to_tab("Schichtplan")
 
     def go_to_bug_reports(self, report_id=None):
-        # ... (angepasst für Thread-Wartezeit) ...
+        # ... (unverändert) ...
         self.switch_to_tab("Bug-Reports")
 
         def _select_report_after_load():
@@ -535,7 +566,7 @@ class MainUserWindow(tk.Toplevel):
             _select_report_after_load()
 
     def check_all_notifications(self):
-        # ... (unverändert, nutzt sicheren Zugriff auf self.loaded_tabs) ...
+        # ... (unverändert) ...
         all_messages = [];
         tabs_to_refresh = []
         unnotified_requests = get_unnotified_requests(self.user_data['id'])
