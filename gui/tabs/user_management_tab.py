@@ -1,410 +1,440 @@
 # gui/tabs/user_management_tab.py
 import tkinter as tk
-from tkinter import ttk, messagebox, simpledialog  # simpledialog importiert
-from gui.user_edit_window import UserEditWindow
-from gui.dialogs.user_order_window import UserOrderWindow
-from database.db_users import (get_all_users_with_details, delete_user, save_user_order, get_ordered_users_for_schedule,
-                               get_pending_approval_users, approve_user,
-                               archive_user, unarchive_user)  # NEUE IMPORTE
-from database.db_core import ROLE_HIERARCHY
-from datetime import datetime, timedelta # datetime importiert
+from tkinter import ttk, messagebox, simpledialog # simpledialog hinzugefügt
+# datetime und date importieren
+from datetime import datetime, date, timedelta # timedelta hinzugefügt
+from database.db_users import (
+    get_all_users_with_details, delete_user, approve_user,
+    get_pending_approval_users, archive_user, unarchive_user,
+    clear_user_order_cache
+)
+from database.db_admin import admin_reset_password # create_user_by_admin wird nicht direkt hier gebraucht
+from database.db_core import save_config_json, load_config_json
+from ..user_edit_window import UserEditWindow
 
+USER_MGMT_VISIBLE_COLUMNS_KEY = "USER_MGMT_VISIBLE_COLUMNS"
 
 class UserManagementTab(ttk.Frame):
-    def __init__(self, master, current_user_data):
+    def __init__(self, master, admin_window):
         super().__init__(master)
-        # HINWEIS: master ist das Notebook. Wir brauchen den MainAdminWindow
-        if isinstance(current_user_data, dict):
-            # Normaler Fall im Lade-Thread, wenn direkt user_data übergeben wird
-            self.current_user_id = current_user_data['id']
-            self.master_window = master.winfo_toplevel()  # Nur eine Annahme
+        self.admin_window = admin_window
+        self.current_user = admin_window.user_data
+
+        self.all_columns = {
+            "id": ("ID", 0),
+            "vorname": ("Vorname", 150),
+            "name": ("Nachname", 150),
+            "role": ("Rolle", 100),
+            "geburtstag": ("Geburtstag", 100),
+            "telefon": ("Telefon", 120),
+            "diensthund": ("Diensthund", 100),
+            "urlaub_gesamt": ("Urlaub Total", 80),
+            "urlaub_rest": ("Urlaub Rest", 80),
+            "entry_date": ("Eintritt", 100),
+            "last_ausbildung": ("Letzte Ausb.", 100),
+            "last_schiessen": ("Letztes Sch.", 100),
+            "last_seen": ("Zuletzt Online", 120),
+            "is_approved": ("Freigegeben?", 80),
+            "is_archived": ("Archiviert?", 80),
+            "archived_date": ("Archiviert am", 120)
+        }
+        loaded_visible_keys = load_config_json(USER_MGMT_VISIBLE_COLUMNS_KEY)
+        if loaded_visible_keys and isinstance(loaded_visible_keys, list):
+             self.visible_column_keys = [key for key in loaded_visible_keys if key in self.all_columns]
         else:
-            # Wenn das MainAdminWindow-Objekt übergeben wird (häufig in den Tabs)
-            self.current_user_id = current_user_data.user_data['id']
-            self.master_window = current_user_data  # Dies ist das MainAdminWindow
+            self.visible_column_keys = [k for k in self.all_columns if k not in ['id', 'is_approved', 'is_archived', 'archived_date', 'last_seen']]
 
-        self.user_data = []  # Liste aller Benutzer
+        if 'id' not in self.visible_column_keys:
+            self.visible_column_keys.insert(0, 'id')
 
-        # --- Frames ---
-        self.top_frame = ttk.Frame(self)
-        self.top_frame.pack(fill='x', padx=10, pady=(10, 0))
+        self._sort_by = 'name'
+        self._sort_desc = False
 
-        # Der pending_frame wird als erstes angezeigt (vor der Benutzerliste)
-        self.pending_frame = ttk.Frame(self, padding=(10, 0))
-        self.pending_frame.pack(fill='x', pady=(5, 10))
+        self._create_widgets()
+        self.load_users()
 
-        self.main_frame = ttk.Frame(self)
-        self.main_frame.pack(fill='both', expand=True, padx=10, pady=10)
+    def _create_widgets(self):
+        top_frame = ttk.Frame(self)
+        top_frame.pack(fill="x", pady=10, padx=10)
 
-        self.setup_ui()
-        self.load_data()
-        self.check_pending_approvals()
+        ttk.Button(top_frame, text="🔄 Aktualisieren", command=self.load_users).pack(side="left", padx=5)
+        ttk.Button(top_frame, text="➕ Mitarbeiter hinzufügen", command=self.add_user).pack(side="left", padx=5)
+        ttk.Button(top_frame, text="📊 Spalten auswählen", command=self.open_column_chooser).pack(side="left", padx=5)
+        # --- KORREKTUR: Button-Text angepasst ---
+        ttk.Button(top_frame, text="🕒 Freischaltungen prüfen", command=self.check_pending_approvals).pack(side="right", padx=5)
+        # --- ENDE KORREKTUR ---
 
-    def setup_ui(self):
-        # Top Frame (Buttons)
-        ttk.Button(self.top_frame, text="Benutzer bearbeiten", command=self.open_edit_window).pack(side='left', padx=5)
-        # NEUER BUTTON
-        ttk.Button(self.top_frame, text="Archivieren / Reaktivieren", command=self.toggle_archive_status).pack(
-            side='left', padx=5)
-        ttk.Button(self.top_frame, text="Reihenfolge/Sichtbarkeit", command=self.open_order_window).pack(side='left',
-                                                                                                         padx=5)
-        ttk.Button(self.top_frame, text="Benutzer löschen", command=self.delete_selected_user).pack(side='left', padx=5)
+        tree_frame = ttk.Frame(self)
+        tree_frame.pack(expand=True, fill="both", padx=10, pady=(0, 10))
 
-        # Treeview (Benutzerliste)
-        # KORREKTUR: Spalte "Freigeschaltet" in "Status" geändert
-        columns = ("ID", "Vorname", "Name", "Rolle", "Geburtstag", "Telefon", "Diensthund", "Urlaub Gesamt",
-                   "Urlaub Rest", "Status")
-        self.tree = ttk.Treeview(self.main_frame, columns=columns, show="headings")
+        all_col_keys = list(self.all_columns.keys())
+        self.tree = ttk.Treeview(tree_frame, columns=all_col_keys, show="headings")
 
-        # Scrollbar hinzufügen
-        vsb = ttk.Scrollbar(self.main_frame, orient="vertical", command=self.tree.yview)
+        display_keys = [key for key in self.visible_column_keys if key != 'id' or self.all_columns['id'][1] > 0]
+        self.tree.configure(displaycolumns=display_keys)
+
+        for col_key in all_col_keys:
+            col_name, col_width = self.all_columns[col_key]
+            is_displayed = col_key in display_keys
+            width = col_width if is_displayed else 0
+            minwidth = 30 if is_displayed and col_key != "id" else 0
+            stretch = tk.YES if is_displayed and col_key != "id" else tk.NO
+            heading_options = {'text': col_name}
+            if is_displayed: heading_options['command'] = lambda _col=col_key: self.sort_column(_col)
+            self.tree.heading(col_key, **heading_options)
+            self.tree.column(col_key, width=width, minwidth=minwidth, stretch=stretch, anchor=tk.W)
+
+        vsb = ttk.Scrollbar(tree_frame, orient="vertical", command=self.tree.yview)
         vsb.pack(side='right', fill='y')
-        self.tree.configure(yscrollcommand=vsb.set)
+        hsb = ttk.Scrollbar(tree_frame, orient="horizontal", command=self.tree.xview)
+        hsb.pack(side='bottom', fill='x')
+        self.tree.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
 
-        self.tree.pack(fill='both', expand=True)
+        self.tree.pack(expand=True, fill="both")
+        self.tree.bind("<Double-1>", self.edit_user_dialog)
+        self.tree.bind("<Button-3>", self.show_context_menu)
 
-        for col in columns:
-            self.tree.heading(col, text=col, command=lambda c=col: self.sort_treeview(self.tree, c, False))
-            self.tree.column(col, width=100, anchor=tk.CENTER)
+        self.context_menu = tk.Menu(self, tearoff=0)
+        self.context_menu.add_command(label="✏️ Bearbeiten", command=self.edit_user_context)
+        self.context_menu.add_command(label="🔑 Passwort zurücksetzen", command=self.reset_password_context)
+        self.context_menu.add_separator()
+        self.context_menu.add_command(label="✅ Freischalten", command=self.approve_user_context)
+        self.context_menu.add_command(label="🔒 Archivieren...", command=self.archive_user_context) # Text angepasst
+        self.context_menu.add_command(label="🔓 Reaktivieren", command=self.unarchive_user_context)
+        self.context_menu.add_separator()
+        self.context_menu.add_command(label="❌ Löschen", command=self.delete_user_context)
 
-        self.tree.column("Vorname", width=120, anchor=tk.W)
-        self.tree.column("Name", width=120, anchor=tk.W)
-        self.tree.column("ID", width=50)
-        self.tree.column("Status", width=100)  # Geänderte Spalte
+        self.selected_user_id = None
+        self.selected_user_data = None
 
-        self.tree.bind("<<TreeviewSelect>>", self.on_select)
-        self.tree.bind('<Double-1>', self.open_edit_window)
 
-    # =====================================================================================
-    # --- FREISCHALTUNGSLOGIK ---
-    # =====================================================================================
+    def load_users(self):
+        for i in self.tree.get_children():
+            try: self.tree.delete(i)
+            except tk.TclError: pass
 
-    def check_pending_approvals(self):
-        """Prüft und zeigt Benachrichtigungen für ausstehende Freischaltungen an."""
-        for widget in self.pending_frame.winfo_children():
-            widget.destroy()
+        try:
+            self.all_users_data = get_all_users_with_details()
+            if not self.all_users_data: return
 
-        # Diese Funktion holt dank DB-Update nur noch (is_approved=0 AND is_archived=0)
-        pending_users = get_pending_approval_users()
-        count = len(pending_users)
+            def sort_key(user_item):
+                value = user_item.get(self._sort_by)
+                if value is None or value == "":
+                    is_date_col = self._sort_by in ['entry_date', 'last_ausbildung', 'last_schiessen', 'archived_date', 'geburtstag', 'last_seen']
+                    if self._sort_desc: return date.min if is_date_col else ""
+                    else: return date.max if is_date_col else "~~~~"
+                if isinstance(value, str): return value.lower()
+                if self._sort_by in ['entry_date', 'last_ausbildung', 'last_schiessen', 'archived_date', 'geburtstag']:
+                     try:
+                         if isinstance(value, datetime): return value.date()
+                         if isinstance(value, date): return value
+                         return datetime.strptime(str(value), '%Y-%m-%d').date()
+                     except: return date.min
+                if self._sort_by == 'last_seen':
+                     try:
+                         if isinstance(value, datetime): return value
+                         if isinstance(value, date): return datetime.combine(value, datetime.min.time())
+                         return datetime.strptime(str(value), '%Y-%m-%d %H:%M:%S')
+                     except: return datetime.min
+                try:
+                    if isinstance(value, (int, float)): return value
+                    return float(value)
+                except: return float('-inf')
 
-        if count > 0:
-            self.pending_frame.configure(relief='solid', borderwidth=1, padding=10)
+            sorted_users = sorted(self.all_users_data, key=sort_key, reverse=self._sort_desc)
+            current_tree_columns = list(self.tree['columns'])
+            if not current_tree_columns: current_tree_columns = list(self.all_columns.keys())
 
-            # Titel
-            title_label = ttk.Label(self.pending_frame, text=f"⚠️ {count} neue(r) Benutzer warten auf Freischaltung",
-                                    font=('Segoe UI', 12, 'bold'), foreground='red')
-            title_label.pack(anchor='w', pady=(0, 5))
+            for user in sorted_users:
+                values_to_insert = []
+                for col_key in current_tree_columns:
+                    value = user.get(col_key, "")
+                    if value is None: value = ""
+                    if col_key in ["is_approved", "is_archived"]: value = "Ja" if value == 1 else "Nein"
+                    elif col_key in ['entry_date', 'last_ausbildung', 'last_schiessen', 'geburtstag']:
+                         if isinstance(value, datetime): value = value.strftime('%Y-%m-%d')
+                         elif isinstance(value, date): value = value.strftime('%Y-%m-%d')
+                    elif col_key == 'last_seen':
+                         if isinstance(value, datetime): value = value.strftime('%Y-%m-%d %H:%M')
+                    elif col_key == 'archived_date':
+                         # --- KORREKTUR: Auch hier nur Datum anzeigen, wenn Datum gesetzt ---
+                         if isinstance(value, datetime): value = value.strftime('%Y-%m-%d') # Nur Datum
+                         elif isinstance(value, date): value = value.strftime('%Y-%m-%d')
+                         else: value = "" # Ansonsten leer
+                         # --- ENDE KORREKTUR ---
+                    values_to_insert.append(value)
+                try: self.tree.insert("", "end", iid=user['id'], values=tuple(values_to_insert))
+                except tk.TclError as e: print(f"TclError User {user['id']}: {e}. Skip.")
 
-            # Liste der Benutzer
-            for user in pending_users:
-                user_text = f"{user['vorname']} {user['name']} (Registriert: {user['entry_date']})"
-                row_frame = ttk.Frame(self.pending_frame)
-                row_frame.pack(fill='x', pady=2)
+        except Exception as e:
+            messagebox.showerror("Fehler Laden", f"Benutzerdaten laden fehlgeschlagen:\n{e}", parent=self)
+            import traceback; traceback.print_exc()
 
-                ttk.Label(row_frame, text=user_text).pack(side='left')
-
-                # Button zum Freischalten
-                approve_btn = ttk.Button(row_frame, text="Freischalten",
-                                         command=lambda u_id=user['id']: self.approve_user_action(u_id),
-                                         style='Accent.TButton')
-                approve_btn.pack(side='right', padx=10)
-
-                # Button zum Löschen (Ablehnen)
-                delete_btn = ttk.Button(row_frame, text="Löschen/Ablehnen",
-                                        command=lambda u_id=user['id'],
-                                                       u_name=f"{user['vorname']} {user['name']}": self.delete_user_action(
-                                            u_id, u_name),
-                                        style='Danger.TButton')
-                delete_btn.pack(side='right')
-
-        else:
-            # Entferne visuelle Begrenzung wenn leer
-            self.pending_frame.configure(relief='flat', borderwidth=0, padding=0)
-
-    def approve_user_action(self, user_id):
-        """Führt die Freischaltung des Benutzers durch."""
-        success, message = approve_user(user_id, self.current_user_id)
-
-        if success:
-            messagebox.showinfo("Erfolg", message, parent=self)
-            self.load_data()  # Hauptliste aktualisieren (Status ändert sich)
-            self.check_pending_approvals()  # Pending-Liste aktualisieren
-            # Informiere das Hauptfenster, dass eine Aktualisierung der Benachrichtigungen nötig ist
-            if hasattr(self.master_window, 'check_for_updates'):
-                self.master_window.check_for_updates()
-            if hasattr(self.master_window, 'refresh_shift_plan'):
-                self.master_window.refresh_shift_plan()  # Wichtig
-        else:
-            messagebox.showerror("Fehler", message, parent=self)
-
-    def delete_user_action(self, user_id, user_name):
-        """Löscht einen Benutzer, z.B. wenn die Registrierung abgelehnt wird."""
-        if messagebox.askyesno("Benutzer löschen",
-                               f"Sind Sie sicher, dass Sie den Benutzer {user_name} dauerhaft löschen (die Registrierung ablehnen) möchten? Alle Daten werden entfernt.",
-                               parent=self):
-
-            # Nutzt die bestehende delete_user Funktion
-            success, message = delete_user(user_id, self.current_user_id)
-            if success:
-                messagebox.showinfo("Erfolg", message, parent=self)
-                self.load_data()
-                self.check_pending_approvals()
-                if hasattr(self.master_window, 'refresh_shift_plan'):
-                    self.master_window.refresh_shift_plan()  # Wichtig
-            else:
-                messagebox.showerror("Fehler", message, parent=self)
-
-    # =====================================================================================
-    # --- NEUE METHODE FÜR ARCHIVIERUNG (ÜBERARBEITET) ---
-    # =====================================================================================
-
-    def toggle_archive_status(self):
-        """Archiviert oder reaktiviert den ausgewählten Benutzer."""
-        user = self.get_selected_user()
-        if not user:
-            messagebox.showinfo("Auswahl erforderlich", "Bitte wählen Sie einen Benutzer aus.", parent=self)
-            return
-
-        user_id = user['id']
-        user_name = f"{user['vorname']} {user['name']}"
-        is_archived = user.get('is_archived', 0)
-        is_approved = user.get('is_approved', 0)
-        archived_date = user.get('archived_date')  # Hinzugefügt
-
-        if is_approved == 0:
-            messagebox.showwarning("Aktion nicht möglich",
-                                   f"Der Benutzer '{user_name}' muss zuerst freigeschaltet werden, bevor er archiviert werden kann.",
-                                   parent=self)
-            return
-
-        # Prüfen, ob eine zukünftige Archivierung vorliegt
-        is_future_archive = False
-        if is_archived and archived_date and archived_date > datetime.now():
-            is_future_archive = True
-
-        success = False
-        message = ""
-
-        if is_archived:
-            # --- Reaktivieren (gilt für sofort und zukünftig Archivierte) ---
-            prompt_msg = f"Möchten Sie den Benutzer '{user_name}' wirklich reaktivieren?\n"
-            if is_future_archive:
-                prompt_msg += f"Die geplante Archivierung zum {archived_date.strftime('%d.%m.%Y')} wird damit aufgehoben."
-            else:
-                prompt_msg += "Er/Sie kann sich danach wieder anmelden und wird in zukünftigen Plänen berücksichtigt."
-
-            if not messagebox.askyesno("Benutzer reaktivieren", prompt_msg, parent=self):
-                return
-            success, message = unarchive_user(user_id, self.current_user_id)
-
-        else:
-            # --- Archivieren ---
-            msg = f"Möchten Sie den Benutzer '{user_name}' archivieren?\n\n[Ja] = Sofort archivieren\n[Nein] = Zukünftiges Datum festlegen\n[Abbrechen] = Nichts tun"
-            response = messagebox.askyesnocancel("Archivieren", msg, parent=self)
-
-            archive_dt = None
-
-            if response is True:  # JA - Sofort
-                if messagebox.askyesno("Sofort archivieren",
-                                       f"Sind Sie sicher, dass Sie '{user_name}' sofort archivieren möchten?",
-                                       parent=self):
-                    archive_dt = datetime.now()
-                    success, message = archive_user(user_id, self.current_user_id, archive_dt)
-
-            elif response is False:  # NEIN - Zukünftiges Datum
-                today_str = (datetime.now() + timedelta(days=1)).strftime('%Y-%m-%d')
-                date_str = simpledialog.askstring("Zukünftiges Datum",
-                                                  f"Geben Sie das Datum ein, an dem '{user_name}' archiviert werden soll.\nDer Benutzer ist bis zu diesem Datum (exklusive) aktiv.\n(Format: YYYY-MM-DD, z.B. {today_str})",
-                                                  parent=self)
-                if date_str:
-                    try:
-                        # Wir setzen die Uhrzeit auf Mitternacht (Anfang des Tages)
-                        archive_dt = datetime.strptime(date_str, '%Y-%m-%d')
-                        # Prüfen, ob das Datum heute oder in der Vergangenheit liegt
-                        if archive_dt < datetime.now().replace(hour=0, minute=0, second=0, microsecond=0):
-                            messagebox.showerror("Fehler", "Das Datum darf nicht in der Vergangenheit liegen.",
-                                                 parent=self)
-                        else:
-                            success, message = archive_user(user_id, self.current_user_id, archive_dt)
-                    except ValueError:
-                        messagebox.showerror("Ungültiges Format", "Das Datum muss im Format YYYY-MM-DD sein.",
-                                             parent=self)
-
-            else:  # Cancel (response is None)
-                return
-
-        # --- Ergebnisverarbeitung ---
-        if success:
-            messagebox.showinfo("Erfolg", message, parent=self)
-            self.load_data()  # Liste neu laden, um Status anzuzeigen
-            # Schichtplan und andere Tabs müssen aktualisiert werden
-            if hasattr(self.master_window, 'refresh_all_tabs'):
-                self.master_window.refresh_all_tabs()
-        elif message:  # Nur Fehler anzeigen, wenn 'message' gesetzt, aber 'success' false ist
-            messagebox.showerror("Fehler", message, parent=self)
-
-    # =====================================================================================
-    # --- BESTEHENDE METHODEN (ANGEPASST) ---
-    # =====================================================================================
-
-    def load_data(self):
-        """Lädt alle Benutzerdaten und befüllt das Treeview."""
-        # Lösche vorhandene Einträge
-        for item in self.tree.get_children():
-            self.tree.delete(item)
-
-        # Holt alle User, inkl. archivierter (SELECT * from users)
-        self.user_data = get_all_users_with_details()
-
-        for user in self.user_data:
-            # NEUE STATUSLOGIK
-            is_approved = user.get('is_approved', 0)
-            is_archived = user.get('is_archived', 0)
-            archived_date = user.get('archived_date')  # Hinzugefügt
-
-            status_text = ""
-            tag = ""
-
-            if is_approved == 0:
-                status_text = "Ausstehend ⚠️"
-                tag = 'pending'
-            elif is_archived == 1:
-                if archived_date and archived_date > datetime.now():
-                    status_text = f"Archiviert ab {archived_date.strftime('%d.%m.%Y')} 🗓️"
-                    tag = 'future_archive'
-                else:
-                    status_text = "Archiviert 📦"
-                    tag = 'archived'
-            else:
-                status_text = "Aktiv ✅"
-                tag = 'approved'
-            # ENDE NEUE LOGIK
-
-            self.tree.insert('', tk.END, iid=user['id'], tags=(tag,), values=(
-                user['id'],
-                user['vorname'],
-                user['name'],
-                user['role'],
-                user.get('geburtstag', ''),
-                user.get('telefon', ''),
-                user.get('diensthund', ''),
-                user.get('urlaub_gesamt', ''),
-                user.get('urlaub_rest', ''),
-                status_text  # Status statt 'is_approved'
-            ))
-
-        # Konfiguriere Tags für Farben
-        self.tree.tag_configure('pending', background='#ffe0e0', foreground='red')  # Rot für ausstehende Freischaltung
-        self.tree.tag_configure('approved', background='white', foreground='black')  # Normal (Aktiv)
-        self.tree.tag_configure('archived', background='#f0f0f0', foreground='#555555')  # Grau für Archiviert
-        self.tree.tag_configure('future_archive', background='#fffbe0',
-                                foreground='#a18c00')  # Gelb für zukünftige Archivierung
-
-        # Nach dem Laden der Daten, Status der ausstehenden Freischaltungen prüfen
-        self.check_pending_approvals()
-
-    def on_select(self, event):
-        # Hält die ausgewählte Benutzer-ID
-        selected_item = self.tree.selection()
-        if selected_item:
-            self.selected_user_id = int(selected_item[0])
-        else:
-            self.selected_user_id = None
-
-    def get_selected_user(self):
-        selected_item = self.tree.selection()
-        if selected_item:
-            user_id = int(selected_item[0])
-            return next((u for u in self.user_data if u['id'] == user_id), None)
-        return None
-
-    def open_edit_window(self, event=None):
-        user = self.get_selected_user()
-        if user:
-            # (Unverändert, Aufruf ist korrekt seit letztem Fix)
-            allowed_roles = []
-            if hasattr(self.master_window, 'get_allowed_roles'):
-                allowed_roles = self.master_window.get_allowed_roles()
-            else:
-                print("[WARN] UserManagementTab: MainAdminWindow 'get_allowed_roles' not found.")
-                allowed_roles = list(ROLE_HIERARCHY.keys())
-
-            UserEditWindow(
-                self.master_window,
-                user['id'],
-                user,
-                self.load_data,
-                False,
-                allowed_roles,
-                self.current_user_id
-            )
-        elif event is None:
-            messagebox.showinfo("Auswahl erforderlich", "Bitte wählen Sie einen Benutzer zum Bearbeiten aus.")
-
-    def delete_selected_user(self):
-        user = self.get_selected_user()
-        if not user:
-            messagebox.showinfo("Auswahl erforderlich", "Bitte wählen Sie einen Benutzer zum Löschen aus.")
-            return
-
-        user_name = f"{user['vorname']} {user['name']}"
-
-        # Zusatzwarnung, wenn Benutzer nicht archiviert ist
-        is_archived = user.get('is_archived', 0)
-        archived_date = user.get('archived_date')
-
-        warning = ""
-        is_active = True
-        if is_archived == 1:
-            if not archived_date or archived_date <= datetime.now():
-                is_active = False  # Bereits archiviert
-
-        if is_active:
-            warning = "\n\nWARNUNG: Dieser Benutzer ist noch aktiv.\nBevorzugen Sie die 'Archivieren'-Funktion, wenn der Benutzer nur deaktiviert werden soll."
-
-        if messagebox.askyesno("Löschen bestätigen",
-                               f"Sind Sie sicher, dass Sie den Benutzer '{user_name}' DAUERHAFT löschen möchten?\nAlle seine Daten (auch alte Schichten) werden unwiderruflich entfernt.{warning}",
-                               parent=self):
-            success, message = delete_user(user['id'], self.current_user_id)
-            if success:
-                messagebox.showinfo("Erfolg", message, parent=self)
-                self.load_data()
-                if hasattr(self.master_window, 'refresh_all_tabs'):
-                    self.master_window.refresh_all_tabs()
-            else:
-                messagebox.showerror("Fehler", message, parent=self)
-
-    def open_order_window(self):
-        # HINWEIS: Diese Funktion ist unverändert.
-        # UserOrderWindow ruft get_ordered_users_for_schedule(include_hidden=True) auf.
-        # Da diese DB-Funktion jetzt (is_archived = 0 ODER zukünftiges Datum) filtert,
-        # werden archivierte Benutzer hier korrekterweise nicht mehr angezeigt,
-        # aber zukünftig zu archivierende Benutzer schon.
-        UserOrderWindow(self.master_window, callback=self.master_window.refresh_all_tabs)
-
-    def sort_treeview(self, tree, col, reverse):
-        # Sortierlogik bleibt unverändert
-        l = [(tree.set(k, col), k) for k in tree.get_children('')]
-
-        # Spezielle Sortierung für Zahlen (ID, Urlaub etc.)
-        if col in ["ID", "Urlaub Gesamt", "Urlaub Rest"]:
+    def sort_column(self, col):
+        if col not in self.all_columns: return
+        if self._sort_by == col: self._sort_desc = not self._sort_desc
+        else: self._sort_by = col; self._sort_desc = False
+        for c_key, (c_name, _) in self.all_columns.items():
+            try: self.tree.heading(c_key, text=c_name)
+            except tk.TclError: pass
+        current_display_columns = self.tree['displaycolumns']
+        if not current_display_columns: current_display_columns = [key for key in self.visible_column_keys if key != 'id' or self.all_columns['id'][1] > 0]
+        if col in current_display_columns:
             try:
-                l.sort(key=lambda x: int(x[0]) if x[0] else float('-inf'), reverse=reverse)
-            except ValueError:
-                l.sort(key=lambda x: x[0], reverse=reverse)
+                header_text = self.all_columns[col][0]
+                sort_indicator = " ▼" if self._sort_desc else " ▲"
+                self.tree.heading(col, text=header_text + sort_indicator)
+            except tk.TclError: pass
+        self.load_users()
 
-        # Sortierung nach Rolle (basierend auf der Hierarchie)
-        elif col == "Rolle":
-            l.sort(key=lambda x: ROLE_HIERARCHY.get(x[0], 0), reverse=reverse)
+    def open_column_chooser(self):
+        visible_for_chooser = [key for key in self.visible_column_keys if key != 'id' or self.all_columns['id'][1] > 0]
+        ColumnChooser(self, self.all_columns, visible_for_chooser, self.update_visible_columns)
 
-        # Standardsortierung für Text
+    def update_visible_columns(self, new_visible_keys_from_chooser):
+        print(f"[DEBUG] update_visible_columns: Empfangen: {new_visible_keys_from_chooser}")
+        new_visible_keys = list(new_visible_keys_from_chooser)
+        if 'id' not in new_visible_keys: new_visible_keys.insert(0, 'id')
+        self.visible_column_keys = new_visible_keys
+        if not save_config_json(USER_MGMT_VISIBLE_COLUMNS_KEY, self.visible_column_keys):
+             messagebox.showwarning("Speichern fehlgeschlagen", "Spaltenauswahl nicht gespeichert.", parent=self)
+        display_keys = [key for key in self.visible_column_keys if key != 'id' or self.all_columns['id'][1] > 0]
+        try: self.tree.configure(displaycolumns=display_keys)
+        except tk.TclError as e:
+             print(f"Fehler displaycolumns: {e}")
+             valid_display_keys = [k for k in display_keys if k in self.tree['columns']]
+             try: self.tree.configure(displaycolumns=valid_display_keys)
+             except tk.TclError: print("Setzen displaycolumns erneut fehlgeschlagen.")
+        for col_key in self.all_columns:
+            col_name, col_width = self.all_columns[col_key]
+            is_displayed = col_key in display_keys
+            width = col_width if is_displayed else 0
+            minwidth = 30 if is_displayed and col_key != "id" else 0
+            stretch = tk.YES if is_displayed and col_key != "id" else tk.NO
+            heading_options = {'text': col_name}
+            if is_displayed: heading_options['command'] = lambda _col=col_key: self.sort_column(_col)
+            if col_key == self._sort_by and is_displayed:
+                 sort_indicator = " ▼" if self._sort_desc else " ▲"
+                 heading_options['text'] += sort_indicator
+            try:
+                self.tree.heading(col_key, **heading_options)
+                self.tree.column(col_key, width=width, minwidth=minwidth, stretch=stretch, anchor=tk.W)
+            except tk.TclError: pass
+        self.load_users()
+
+    def add_user(self):
+        edit_win = UserEditWindow(master=self, user_id=None, user_data=None, is_new=True,
+                                  allowed_roles=self.admin_window.get_allowed_roles(),
+                                  admin_user_id=self.current_user['id'], callback=self.on_user_saved)
+        edit_win.grab_set()
+
+    def edit_user_dialog(self, event=None):
+        selected_item = self.tree.focus()
+        if not selected_item: return
+        try: user_id = int(selected_item)
+        except ValueError: return
+        user_data = next((user for user in self.all_users_data if user['id'] == user_id), None)
+        if user_data:
+            edit_win = UserEditWindow(master=self, user_id=user_id, user_data=user_data, is_new=False,
+                                      allowed_roles=self.admin_window.get_allowed_roles(),
+                                      admin_user_id=self.current_user['id'], callback=self.on_user_saved)
+            edit_win.grab_set()
         else:
-            l.sort(key=lambda x: x[0], reverse=reverse)
+             print(f"Warnung: User {user_id} nicht im Cache bei Doppelklick.")
+             self.load_users()
+             user_data = next((user for user in self.all_users_data if user['id'] == user_id), None)
+             if user_data:
+                  edit_win = UserEditWindow(master=self, user_id=user_id, user_data=user_data, is_new=False,
+                                            allowed_roles=self.admin_window.get_allowed_roles(),
+                                            admin_user_id=self.current_user['id'], callback=self.on_user_saved)
+                  edit_win.grab_set()
+             else: messagebox.showerror("Fehler", f"User {user_id} nicht geladen.", parent=self)
 
-        # Neu in Treeview einfügen
-        for index, (val, k) in enumerate(l):
-            tree.move(k, '', index)
+    def on_user_saved(self):
+        clear_user_order_cache(); self.load_users()
 
-        # Nächste Sortierrichtung festlegen
-        tree.heading(col, command=lambda: self.sort_treeview(tree, col, not reverse))
+    def show_context_menu(self, event):
+        iid = self.tree.identify_row(event.y)
+        if iid:
+            self.tree.selection_set(iid); self.tree.focus(iid)
+            try: self.selected_user_id = int(iid)
+            except ValueError: return
+            self.selected_user_data = next((user for user in self.all_users_data if user['id'] == self.selected_user_id), None)
+            if self.selected_user_data:
+                is_approved = self.selected_user_data.get('is_approved', 0) == 1
+                is_archived = self.selected_user_data.get('is_archived', 0) == 1
+                states = { "Freischalten": tk.DISABLED if is_approved else tk.NORMAL,
+                           "Archivieren...": tk.DISABLED if is_archived else tk.NORMAL, # Text angepasst
+                           "Reaktivieren": tk.DISABLED if not is_archived else tk.NORMAL,
+                           "Bearbeiten": tk.NORMAL, "Passwort zurücksetzen": tk.NORMAL, "Löschen": tk.NORMAL }
+                for label, state in states.items():
+                     try: self.context_menu.entryconfigure(label, state=state)
+                     except tk.TclError: pass
+                self.context_menu.tk_popup(event.x_root, event.y_root)
+            else: self.selected_user_id = None; self.selected_user_data = None
+        else:
+            self.selected_user_id = None; self.selected_user_data = None
+            try: self.tree.selection_remove(self.tree.selection())
+            except tk.TclError: pass
+
+    def _get_selected_user_id_and_data(self):
+         selected_item = self.tree.focus()
+         if not selected_item: messagebox.showwarning("Auswahl", "Bitte Mitarbeiter wählen.", parent=self); return None, None
+         try:
+             user_id = int(selected_item)
+             user_data = next((user for user in self.all_users_data if user['id'] == user_id), None)
+             if not user_data: messagebox.showerror("Fehler", "User nicht gefunden.", parent=self); return None, None
+             return user_id, user_data
+         except ValueError: return None, None
+
+    def edit_user_context(self):
+         user_id, user_data = self._get_selected_user_id_and_data()
+         if user_id and user_data:
+             edit_win = UserEditWindow(master=self, user_id=user_id, user_data=user_data, is_new=False,
+                                       allowed_roles=self.admin_window.get_allowed_roles(),
+                                       admin_user_id=self.current_user['id'], callback=self.on_user_saved)
+             edit_win.grab_set()
+
+    def reset_password_context(self):
+        user_id, user_data = self._get_selected_user_id_and_data()
+        if user_id and user_data:
+            name = f"{user_data.get('vorname','')} {user_data.get('name','')}".strip()
+            if messagebox.askyesno("Reset", f"Passwort für '{name}' resetten?", parent=self):
+                pw = "NeuesPasswort123"
+                ok, msg = admin_reset_password(user_id, pw)
+                if ok: messagebox.showinfo("OK", f"{msg}\nTemp. PW: {pw}", parent=self)
+                else: messagebox.showerror("Fehler", msg, parent=self)
+
+    def approve_user_context(self):
+        user_id, user_data = self._get_selected_user_id_and_data()
+        if user_id and user_data:
+            if user_data.get('is_approved') == 1: return
+            name = f"{user_data.get('vorname','')} {user_data.get('name','')}".strip()
+            if messagebox.askyesno("Freigabe", f"'{name}' freischalten?", parent=self):
+                ok, msg = approve_user(user_id, self.current_user['id'])
+                if ok: messagebox.showinfo("OK", msg, parent=self); self.load_users(); self.admin_window.check_for_updates()
+                else: messagebox.showerror("Fehler", msg, parent=self)
+
+    # --- KORRIGIERTE FUNKTION ---
+    def archive_user_context(self):
+        """Archiviert einen Benutzer sofort oder zu einem gewählten Datum."""
+        user_id, user_data = self._get_selected_user_id_and_data()
+        if user_id and user_data:
+            if user_data.get('is_archived') == 1:
+                messagebox.showinfo("Bereits archiviert", "Dieser Benutzer ist bereits archiviert.", parent=self)
+                return
+
+            user_fullname = f"{user_data.get('vorname', '')} {user_data.get('name', '')}".strip()
+            archive_date = None # Standard: Sofort
+
+            # Frage, ob sofort oder später
+            choice = messagebox.askyesnocancel("Archivieren", f"Möchten Sie '{user_fullname}' **sofort** archivieren?\n\n(Klicken Sie auf 'Nein', um ein Datum auszuwählen)", parent=self)
+
+            if choice is None: # Abbrechen
+                return
+            elif choice is False: # Nein -> Datum wählen
+                # Verwende simpledialog, um das Datum abzufragen
+                today_str = date.today().strftime('%Y-%m-%d')
+                prompt = f"Geben Sie das Datum (JJJJ-MM-TT) ein, ab dem '{user_fullname}' archiviert sein soll:\n(Muss in der Zukunft liegen)"
+                date_str = simpledialog.askstring("Archivierungsdatum", prompt, initialvalue=today_str, parent=self)
+
+                if not date_str: # Leere Eingabe oder Abbrechen im Dialog
+                    return
+
+                try:
+                    # Versuche, das Datum zu parsen und zu validieren
+                    chosen_date = datetime.strptime(date_str, '%Y-%m-%d').date()
+                    if chosen_date <= date.today():
+                         messagebox.showwarning("Ungültiges Datum", "Das Archivierungsdatum muss in der Zukunft liegen.", parent=self)
+                         return
+                    # Setze die Uhrzeit auf 00:00:00 für den Vergleich in der DB
+                    archive_date = datetime.combine(chosen_date, datetime.min.time())
+                    print(f"[DEBUG] Gewähltes Archivierungsdatum: {archive_date}")
+                except ValueError:
+                    messagebox.showerror("Ungültiges Format", "Bitte geben Sie das Datum im Format JJJJ-MM-TT ein.", parent=self)
+                    return
+
+            # Führe die Archivierung durch (entweder mit None für sofort oder mit dem gewählten Datum)
+            success, message = archive_user(user_id, self.current_user['id'], archive_date=archive_date)
+            if success:
+                messagebox.showinfo("Erfolg", message, parent=self)
+                clear_user_order_cache()
+                self.load_users() # Lade neu, um das Datum anzuzeigen (wenn Spalte sichtbar)
+                self.admin_window.check_for_updates()
+            else:
+                messagebox.showerror("Fehler", message, parent=self)
+    # --- ENDE KORRIGIERTE FUNKTION ---
+
+    def unarchive_user_context(self):
+        user_id, user_data = self._get_selected_user_id_and_data()
+        if user_id and user_data:
+            if user_data.get('is_archived') == 0: return
+            name = f"{user_data.get('vorname','')} {user_data.get('name','')}".strip()
+            if messagebox.askyesno("Reaktivieren", f"'{name}' reaktivieren?", parent=self):
+                ok, msg = unarchive_user(user_id, self.current_user['id'])
+                if ok: messagebox.showinfo("OK", msg, parent=self); clear_user_order_cache(); self.load_users(); self.admin_window.check_for_updates()
+                else: messagebox.showerror("Fehler", msg, parent=self)
+
+    def delete_user_context(self):
+        user_id, user_data = self._get_selected_user_id_and_data()
+        if user_id and user_data:
+             name = f"{user_data.get('vorname','')} {user_data.get('name','')}".strip()
+             if messagebox.askyesno("Löschen", f"'{name}' wirklich löschen?", icon='warning', parent=self):
+                 ok, msg = delete_user(user_id, self.current_user['id'])
+                 if ok: messagebox.showinfo("OK", msg, parent=self); clear_user_order_cache(); self.load_users(); self.admin_window.check_for_updates()
+                 else: messagebox.showerror("Fehler", msg, parent=self)
+
+    # --- KORRIGIERTE FUNKTION ---
+    def check_pending_approvals(self):
+        """Prüft auf Freischaltungen und zeigt Meldung NUR wenn welche anstehen."""
+        try:
+            pending_users = get_pending_approval_users()
+            if pending_users: # Nur wenn Liste nicht leer ist
+                user_list = "\n".join([f"- {user['vorname']} {user['name']}" for user in pending_users])
+                messagebox.showinfo("Ausstehende Freischaltungen",
+                                    f"Die folgenden Benutzer warten auf Freischaltung:\n{user_list}",
+                                    parent=self)
+            # else: Keine Meldung ausgeben, wenn nichts ansteht
+        except Exception as e:
+             messagebox.showerror("Fehler", f"Fehler beim Prüfen der Freischaltungen:\n{e}", parent=self)
+    # --- ENDE KORRIGIERTE FUNKTION ---
+
+    def refresh_data(self):
+        self.load_users()
+
+# --- Klasse ColumnChooser (unverändert) ---
+class ColumnChooser(tk.Toplevel):
+    def __init__(self, master, all_columns, visible_keys, callback):
+        super().__init__(master)
+        self.title("Spalten auswählen")
+        self.all_columns = all_columns
+        self.visible_keys_for_display = [k for k in visible_keys if k != 'id' or self.all_columns['id'][1] > 0]
+        self.callback = callback
+        self.vars = {}
+        self.resizable(False, False)
+        self.geometry(f"+{master.winfo_rootx()+50}+{master.winfo_rooty()+50}")
+        main_frame = ttk.Frame(self, padding="10"); main_frame.pack(expand=True, fill="both")
+        ttk.Label(main_frame, text="Wählen Sie die anzuzeigenden Spalten aus:").pack(pady=(0, 10))
+        checkbox_frame = ttk.Frame(main_frame); checkbox_frame.pack(expand=True, fill="x")
+        sorted_column_items = sorted(self.all_columns.items(), key=lambda item: item[1][0])
+        for key, (name, width) in sorted_column_items:
+            if key == "id" and width <= 0 : continue
+            is_visible = key in self.visible_keys_for_display
+            var = tk.BooleanVar(value=is_visible)
+            ttk.Checkbutton(checkbox_frame, text=name, variable=var).pack(anchor="w", padx=5)
+            self.vars[key] = var
+        button_frame = ttk.Frame(main_frame); button_frame.pack(fill="x", pady=(10, 0))
+        ttk.Button(button_frame, text="OK", command=self.apply_changes, style="Accent.TButton").pack(side="right", padx=5)
+        ttk.Button(button_frame, text="Abbrechen", command=self.destroy).pack(side="right")
+        self.grab_set(); self.focus_set(); self.wait_window()
+
+    def apply_changes(self):
+        new_visible = []
+        for key in self.all_columns:
+            if key == 'id':
+                if key in self.vars and self.vars[key].get() and self.all_columns['id'][1] > 0:
+                    new_visible.append(key)
+                continue
+            if key in self.vars and self.vars[key].get():
+                new_visible.append(key)
+        self.callback(new_visible); self.destroy()
