@@ -1,7 +1,10 @@
 # database/db_admin.py
 from datetime import datetime
-from .db_core import create_connection, hash_password, _create_admin_notification
+# --- ANGEPASSTE IMPORTE ---
+from .db_core import create_connection, hash_password, _create_admin_notification, get_vacation_days_for_tenure
+# --- ENDE ANPASSUNG ---
 import mysql.connector
+
 
 # --- (Alle anderen Funktionen in dieser Datei bleiben unverändert) ---
 def lock_month(year, month):
@@ -9,47 +12,62 @@ def lock_month(year, month):
     if conn is None: return False
     try:
         cursor = conn.cursor()
+        # Annahme: 'locked_months' Tabelle existiert (wurde in initialize_db nicht gezeigt)
         cursor.execute("INSERT IGNORE INTO locked_months (year, month) VALUES (%s, %s)", (year, month))
         conn.commit()
         return True
     except mysql.connector.Error as e:
-        print(f"DB Error on lock_month: {e}")
+        if e.errno == 1146:
+            print("FEHLER: Tabelle 'locked_months' existiert nicht.")
+        else:
+            print(f"DB Error on lock_month: {e}")
         return False
     finally:
         if conn and conn.is_connected():
             cursor.close()
             conn.close()
+
 
 def unlock_month(year, month):
     conn = create_connection()
     if conn is None: return False
     try:
         cursor = conn.cursor()
+        # Annahme: 'locked_months' Tabelle existiert
         cursor.execute("DELETE FROM locked_months WHERE year = %s AND month = %s", (year, month))
         conn.commit()
         return True
     except mysql.connector.Error as e:
-        print(f"DB Error on unlock_month: {e}")
+        if e.errno == 1146:
+            print("FEHLER: Tabelle 'locked_months' existiert nicht.")
+        else:
+            print(f"DB Error on unlock_month: {e}")
         return False
     finally:
         if conn and conn.is_connected():
             cursor.close()
             conn.close()
 
+
 def is_month_locked(year, month):
     conn = create_connection()
     if conn is None: return False
     try:
         cursor = conn.cursor()
+        # Annahme: 'locked_months' Tabelle existiert
         cursor.execute("SELECT 1 FROM locked_months WHERE year = %s AND month = %s", (year, month))
         return cursor.fetchone() is not None
     except mysql.connector.Error as e:
+        if e.errno == 1146:
+            print("FEHLER: Tabelle 'locked_months' existiert nicht.")
+            return False
         print(f"DB Error on is_month_locked: {e}")
         return False
     finally:
         if conn and conn.is_connected():
             cursor.close()
             conn.close()
+
 
 def admin_reset_password(user_id, new_password):
     conn = create_connection()
@@ -69,6 +87,7 @@ def admin_reset_password(user_id, new_password):
             cursor.close()
             conn.close()
 
+
 def get_unread_admin_notifications():
     conn = create_connection()
     if conn is None: return []
@@ -80,6 +99,7 @@ def get_unread_admin_notifications():
         if conn and conn.is_connected():
             cursor.close()
             conn.close()
+
 
 def mark_admin_notifications_as_read(notification_ids):
     if not notification_ids:
@@ -97,6 +117,7 @@ def mark_admin_notifications_as_read(notification_ids):
             cursor.close()
             conn.close()
 
+
 # --- HIER IST DIE KORREKTUR ---
 def create_user_by_admin(data):
     """Erstellt einen neuen Benutzer durch einen Admin und gibt (Erfolg, Nachricht) zurück."""
@@ -105,12 +126,31 @@ def create_user_by_admin(data):
         return False, "Keine Datenbankverbindung."
     try:
         cursor = conn.cursor()
-        urlaub_gesamt = data.get('urlaub_gesamt') or 30
+
+        # --- NEUE LOGIK FÜR URLAUBSBERECHNUNG ---
+        entry_date_str = data.get('entry_date')
+
+        # Rufe die Standard-Urlaubstage (Basiswert, z.B. 30) ODER den berechneten Wert
+        # data.get('urlaub_gesamt') wird nur als Fallback verwendet, falls manuell eingegeben,
+        # aber die Logik sollte jetzt die Regeln verwenden.
+        default_days = 30
+        try:
+            # Versuche, den manuell eingegebenen Wert zu verwenden, falls vorhanden
+            default_days = int(data.get('urlaub_gesamt', 30))
+        except (ValueError, TypeError):
+            default_days = 30  # Fallback
+
+        # Berechne die Tage basierend auf dem Eintrittsdatum und den Regeln
+        # Die Funktion get_vacation_days_for_tenure nutzt default_days als Fallback
+        urlaub_gesamt = get_vacation_days_for_tenure(entry_date_str, default_days)
+        # --- ENDE NEUE LOGIK ---
+
         cursor.execute(
             "INSERT INTO users (vorname, name, password_hash, role, geburtstag, telefon, diensthund, urlaub_gesamt, urlaub_rest, entry_date) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
             (data['vorname'], data['name'], hash_password(data['password']), data['role'], data.get('geburtstag', ''),
              data.get('telefon', ''), data.get('diensthund', ''), urlaub_gesamt, urlaub_gesamt,
-             data.get('entry_date', '')))
+             # urlaub_rest = urlaub_gesamt
+             entry_date_str))
         conn.commit()
         return True, "Mitarbeiter erfolgreich hinzugefügt."
     except mysql.connector.IntegrityError:
@@ -136,8 +176,9 @@ def request_password_reset(vorname, name):
             user_id = user['id']
             timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
             cursor.execute(
-                "INSERT INTO password_reset_requests (user_id, timestamp) VALUES (%s, %s)",
-                (user_id, timestamp)
+                "INSERT INTO password_reset_requests (user_id, token, timestamp) VALUES (%s, %s, %s) ON DUPLICATE KEY UPDATE token=VALUES(token), timestamp=VALUES(timestamp)",
+                (user_id, 'dummy_token', timestamp)
+                # Token wird nicht wirklich verwendet, aber Feld muss gefüllt sein (basierend auf DB-Schema)
             )
             _create_admin_notification(cursor, f"Benutzer {vorname} {name} hat ein Passwort-Reset angefordert.")
             conn.commit()
@@ -145,11 +186,18 @@ def request_password_reset(vorname, name):
         else:
             return False, "Benutzer nicht gefunden."
     except mysql.connector.Error as e:
+        if e.errno == 1062:  # Duplicate entry for user_id (UNIQUE constraint)
+            # Dies ist OK, bedeutet, dass schon eine Anfrage besteht.
+            _create_admin_notification(cursor, f"Benutzer {vorname} {name} hat ERNEUT ein Passwort-Reset angefordert.")
+            conn.commit()
+            return True, "Eine Anfrage für diesen Benutzer existiert bereits und wurde erneut an einen Admin gemeldet."
+        print(f"DB Error on request_password_reset: {e}")
         return False, f"Datenbankfehler: {e}"
     finally:
         if conn and conn.is_connected():
             cursor.close()
             conn.close()
+
 
 def get_pending_password_resets():
     conn = create_connection()
@@ -157,17 +205,18 @@ def get_pending_password_resets():
     try:
         cursor = conn.cursor(dictionary=True)
         cursor.execute("""
-            SELECT pr.id, u.vorname, u.name, pr.timestamp
-            FROM password_reset_requests pr
-            JOIN users u ON pr.user_id = u.id
-            WHERE pr.status = 'Ausstehend'
-            ORDER BY pr.timestamp ASC
-        """)
+                       SELECT pr.id, u.vorname, u.name, pr.timestamp, u.id as user_id
+                       FROM password_reset_requests pr
+                                JOIN users u ON pr.user_id = u.id
+                       ORDER BY pr.timestamp ASC
+                       """)
+        # Filterung auf 'Ausstehend' entfernt, da das Schema (aus db_core) keine 'status' Spalte hat
         return cursor.fetchall()
     finally:
         if conn and conn.is_connected():
             cursor.close()
             conn.close()
+
 
 def approve_password_reset(request_id, new_password):
     conn = create_connection()
@@ -182,7 +231,8 @@ def approve_password_reset(request_id, new_password):
                 "UPDATE users SET password_hash = %s, password_changed = 0 WHERE id = %s",
                 (hash_password(new_password), user_id)
             )
-            cursor.execute("UPDATE password_reset_requests SET status = 'Genehmigt' WHERE id = %s", (request_id,))
+            # Anfrage löschen, da sie bearbeitet wurde
+            cursor.execute("DELETE FROM password_reset_requests WHERE id = %s", (request_id,))
             conn.commit()
             return True, f"Passwort für Benutzer ID {user_id} wurde zurückgesetzt."
         return False, "Anfrage nicht gefunden."
@@ -193,14 +243,16 @@ def approve_password_reset(request_id, new_password):
             cursor.close()
             conn.close()
 
+
 def reject_password_reset(request_id):
     conn = create_connection()
     if conn is None: return False, "Keine Datenbankverbindung."
     try:
         cursor = conn.cursor()
-        cursor.execute("UPDATE password_reset_requests SET status = 'Abgelehnt' WHERE id = %s", (request_id,))
+        # Anfrage löschen, da sie bearbeitet (abgelehnt) wurde
+        cursor.execute("DELETE FROM password_reset_requests WHERE id = %s", (request_id,))
         conn.commit()
-        return True, "Anfrage abgelehnt."
+        return True, "Anfrage abgelehnt und entfernt."
     except mysql.connector.Error as e:
         return False, f"Datenbankfehler: {e}"
     finally:
@@ -208,12 +260,14 @@ def reject_password_reset(request_id):
             cursor.close()
             conn.close()
 
+
 def get_pending_password_resets_count():
     conn = create_connection()
     if conn is None: return 0
     try:
         cursor = conn.cursor()
-        cursor.execute("SELECT COUNT(*) FROM password_reset_requests WHERE status = 'Ausstehend'")
+        cursor.execute("SELECT COUNT(*) FROM password_reset_requests")
+        # Filterung auf 'Ausstehend' entfernt
         return cursor.fetchone()[0]
     finally:
         if conn and conn.is_connected():

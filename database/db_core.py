@@ -3,7 +3,7 @@ import mysql.connector
 from mysql.connector import pooling
 import hashlib
 import json
-from datetime import datetime
+from datetime import datetime, date  # 'date' hinzugefügt
 from collections import defaultdict
 import sys
 import os
@@ -122,6 +122,9 @@ REQUEST_LOCKS_CONFIG_KEY = "REQUEST_LOCKS"
 ADMIN_MENU_CONFIG_KEY = "ADMIN_MENU_CONFIG"
 USER_TAB_ORDER_CONFIG_KEY = "USER_TAB_ORDER"
 ADMIN_TAB_ORDER_CONFIG_KEY = "ADMIN_TAB_ORDER"
+# --- NEUER SCHLÜSSEL ---
+VACATION_RULES_CONFIG_KEY = "VACATION_RULES"
+# --- ENDE NEU ---
 
 def hash_password(password):
     return hashlib.sha256(password.encode('utf-8')).hexdigest()
@@ -321,6 +324,63 @@ def load_config_json(key):
     finally:
         if conn and conn.is_connected(): cursor.close(); conn.close()
 
+# --- NEUE HILFSFUNKTION FÜR URLAUBSBERECHNUNG ---
+def get_vacation_days_for_tenure(entry_date_obj, default_days=30):
+    """
+    Berechnet den Urlaubsanspruch basierend auf der Betriebszugehörigkeit.
+    Lädt Regeln aus VACATION_RULES_CONFIG_KEY.
+    entry_date_obj muss ein date-Objekt oder None sein.
+    """
+    if not entry_date_obj:
+        return default_days
+
+    # Sicherstellen, dass wir mit einem date-Objekt arbeiten (falls ein str übergeben wurde)
+    if isinstance(entry_date_obj, str):
+        try:
+            entry_date_obj = datetime.strptime(entry_date_obj, '%Y-%m-%d').date()
+        except ValueError:
+            print(f"Warnung: Ungültiges entry_date-Format: {entry_date_obj}. Verwende Standard-Urlaubstage.")
+            return default_days
+    elif isinstance(entry_date_obj, datetime):
+        entry_date_obj = entry_date_obj.date()
+    elif not isinstance(entry_date_obj, date):
+         print(f"Warnung: Ungültiger entry_date-Typ: {type(entry_date_obj)}. Verwende Standard-Urlaubstage.")
+         return default_days
+
+    rules_config = load_config_json(VACATION_RULES_CONFIG_KEY)
+    if not rules_config or not isinstance(rules_config, list):
+        return default_days
+
+    try:
+        # Regeln müssen numerisch sein und werden absteigend sortiert
+        # Format: [{"years": 10, "days": 35}, {"years": 5, "days": 32}, {"years": 0, "days": 30}]
+        rules = sorted(
+            [{"years": int(r["years"]), "days": int(r["days"])} for r in rules_config],
+            key=lambda x: x["years"],
+            reverse=True
+        )
+    except (ValueError, KeyError, TypeError) as e:
+        print(f"Fehler beim Parsen der Urlaubsregeln: {e}. Verwende Standard-Urlaubstage.")
+        return default_days
+
+    # Dienstjahre berechnen
+    today = date.today()
+    # (today.year - entry_date_obj.year) ist eine Annäherung.
+    # Genauer: Prüfen, ob das Dienstjubiläum dieses Jahr schon war.
+    tenure_years = today.year - entry_date_obj.year
+    if (today.month, today.day) < (entry_date_obj.month, entry_date_obj.day):
+        tenure_years -= 1 # Jubiläum war dieses Jahr noch nicht
+
+    # Die erste zutreffende Regel (von oben nach unten) finden
+    for rule in rules:
+        if tenure_years >= rule["years"]:
+            return rule["days"]
+
+    # Fallback, falls Regeln konfiguriert sind, aber keine zutrifft (z.B. 0 Jahre nicht definiert)
+    return default_days
+
+# --- ENDE NEU ---
+
 def save_shift_frequency(frequency_dict):
     conn = create_connection()
     if conn is None: return False
@@ -379,11 +439,19 @@ def save_special_appointment(date_str, appointment_type, description=""):
     if conn is None: return False
     try:
         cursor = conn.cursor()
+        # Annahme: 'special_appointments' Tabelle existiert (wurde in initialize_db nicht gezeigt)
+        # Falls nicht, muss sie hinzugefügt werden.
         query = "INSERT INTO special_appointments (appointment_date, appointment_type, description) VALUES (%s, %s, %s) ON DUPLICATE KEY UPDATE appointment_type=VALUES(appointment_type), description=VALUES(description)"
         cursor.execute(query, (date_str, appointment_type, description))
         conn.commit()
         return True
-    except mysql.connector.Error as e: print(f"DB Error on save_special_appointment: {e}"); conn.rollback(); return False
+    except mysql.connector.Error as e:
+        if e.errno == 1146: # Table doesn't exist
+            print("FEHLER: Tabelle 'special_appointments' existiert nicht. Bitte in initialize_db() hinzufügen.")
+        else:
+            print(f"DB Error on save_special_appointment: {e}")
+        conn.rollback()
+        return False
     finally:
         if conn and conn.is_connected(): cursor.close(); conn.close()
 
@@ -392,11 +460,18 @@ def delete_special_appointment(date_str, appointment_type):
     if conn is None: return False
     try:
         cursor = conn.cursor()
+        # Annahme: 'special_appointments' Tabelle existiert
         query = "DELETE FROM special_appointments WHERE appointment_date = %s AND appointment_type = %s"
         cursor.execute(query, (date_str, appointment_type))
         conn.commit()
         return True
-    except mysql.connector.Error as e: print(f"DB Error on delete_special_appointment: {e}"); conn.rollback(); return False
+    except mysql.connector.Error as e:
+        if e.errno == 1146:
+             print("FEHLER: Tabelle 'special_appointments' existiert nicht.")
+        else:
+            print(f"DB Error on delete_special_appointment: {e}")
+        conn.rollback();
+        return False
     finally:
         if conn and conn.is_connected(): cursor.close(); conn.close()
 
@@ -405,9 +480,15 @@ def get_special_appointments():
     if conn is None: return []
     try:
         cursor = conn.cursor(dictionary=True)
+        # Annahme: 'special_appointments' Tabelle existiert
         cursor.execute("SELECT * FROM special_appointments")
         return cursor.fetchall()
-    except mysql.connector.Error as e: print(f"DB Error on get_special_appointments: {e}"); return []
+    except mysql.connector.Error as e:
+        if e.errno == 1146:
+             print("FEHLER: Tabelle 'special_appointments' existiert nicht.")
+             return []
+        print(f"DB Error on get_special_appointments: {e}");
+        return []
     finally:
         if conn and conn.is_connected(): cursor.close(); conn.close()
 

@@ -1,6 +1,9 @@
 # database/db_users.py
-from database.db_core import create_connection, hash_password, _log_activity, _create_admin_notification
-from datetime import datetime  # Importiere datetime direkt
+# --- ANGEPASSTE IMPORTE ---
+from database.db_core import create_connection, hash_password, _log_activity, _create_admin_notification, \
+    get_vacation_days_for_tenure
+from datetime import datetime
+# --- ENDE ANPASSUNG ---
 import mysql.connector
 
 # --- NEUE GLOBALE CACHE-VARIABLEN ---
@@ -13,7 +16,7 @@ def clear_user_order_cache():
     _USER_ORDER_CACHE = None
 
 
-# --- Restliche Funktionen (get_user_count bis get_all_users_with_details) bleiben unverändert ---
+# --- Restliche Funktionen (get_user_count bis log_user_logout) bleiben unverändert ---
 
 def get_user_count():
     # ... (unverändert) ...
@@ -106,7 +109,7 @@ def log_user_logout(user_id, vorname, name):
 
 
 def register_user(vorname, name, password, role="Benutzer"):
-    # ... (unverändert) ...
+    # ... (verändert) ...
     conn = create_connection()
     if conn is None:
         return False, "Keine Datenbankverbindung."
@@ -114,10 +117,17 @@ def register_user(vorname, name, password, role="Benutzer"):
         cursor = conn.cursor()
         password_hash = hash_password(password)
         entry_date = datetime.now().strftime('%Y-%m-%d')
+
+        # --- NEUE LOGIK FÜR URLAUBSBERECHNUNG ---
+        # (Standard 30 wird von der Funktion als Fallback genutzt)
+        urlaub_gesamt = get_vacation_days_for_tenure(entry_date)
+        # --- ENDE NEUE LOGIK ---
+
         # is_archived standardmäßig 0, archived_date ist NULL
+        # urlaub_gesamt und urlaub_rest werden jetzt dynamisch gesetzt
         cursor.execute(
-            "INSERT INTO users (vorname, name, password_hash, role, entry_date, is_approved, is_archived, archived_date) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
-            (vorname, name, password_hash, role, entry_date, 0, 0, None)
+            "INSERT INTO users (vorname, name, password_hash, role, entry_date, is_approved, is_archived, archived_date, urlaub_gesamt, urlaub_rest) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+            (vorname, name, password_hash, role, entry_date, 0, 0, None, urlaub_gesamt, urlaub_gesamt)
         )
         _log_activity(cursor, None, 'USER_REGISTRATION',
                       f'Benutzer {vorname} {name} hat sich registriert und wartet auf Freischaltung.')
@@ -377,13 +387,78 @@ def get_all_user_participation():
 
 
 def update_user_details(user_id, details, current_user_id):
-    # ... (unverändert) ...
     conn = create_connection()
     if conn is None:
         return False, "Keine Datenbankverbindung."
     try:
         cursor = conn.cursor()
         valid_details = {k: v for k, v in details.items() if k != 'password'}
+
+        # --- ANPASSUNG FÜR URLAUBSBERECHNUNG BEI DATUMSÄNDERUNG ---
+        if 'entry_date' in valid_details:
+            new_entry_date = valid_details['entry_date']
+            default_days = 30 # Standardwert
+
+            # Wenn urlaub_gesamt im Update-Paket ist, nutze diesen als neuen Basiswert (falls Datum leer)
+            # Konvertiere sicherheitshalber zu int
+            if 'urlaub_gesamt' in valid_details:
+                try:
+                    default_days = int(valid_details['urlaub_gesamt'])
+                except (ValueError, TypeError):
+                    print(f"Warnung: Ungültiger Wert für urlaub_gesamt in details: {valid_details['urlaub_gesamt']}. Fallback auf 30.")
+                    default_days = 30
+            else:
+                # Wenn urlaub_gesamt NICHT geändert wird, hole aktuellen Wert aus DB als Basis
+                cursor.execute("SELECT urlaub_gesamt FROM users WHERE id = %s", (user_id,))
+                current_total_result = cursor.fetchone()
+                if current_total_result:
+                    try:
+                        default_days = int(current_total_result[0])
+                    except (ValueError, TypeError):
+                        print(f"Warnung: Ungültiger Wert für urlaub_gesamt in DB: {current_total_result[0]}. Fallback auf 30.")
+                        default_days = 30
+
+            # Berechne neuen Gesamtanspruch
+            new_total_vacation = get_vacation_days_for_tenure(new_entry_date, default_days)
+
+            # Hole alten Gesamtanspruch und Resturlaub
+            cursor.execute("SELECT urlaub_gesamt, urlaub_rest FROM users WHERE id = %s", (user_id,))
+            current_vacation = cursor.fetchone()
+            if current_vacation:
+                try:
+                    # --- KORREKTUR: Explizite Konvertierung zu int ---
+                    old_total = int(current_vacation[0])
+                    old_rest = int(current_vacation[1])
+                    # --- ENDE KORREKTUR ---
+
+                    diff = new_total_vacation - old_total # Jetzt sollte es int - int sein
+                    new_rest = old_rest + diff
+
+                    valid_details['urlaub_gesamt'] = new_total_vacation
+                    valid_details['urlaub_rest'] = new_rest if new_rest >= 0 else 0 # Sicherstellen, dass Rest nicht negativ wird
+
+                except (ValueError, TypeError) as e:
+                    print(f"Fehler bei Konvertierung der Urlaubstage für User {user_id}: {e}. Urlaubstage werden nicht automatisch angepasst.")
+                    # Entferne die automatisch berechneten Werte, falls Konvertierung fehlschlägt
+                    if 'urlaub_gesamt' in valid_details and valid_details['urlaub_gesamt'] == new_total_vacation:
+                       del valid_details['urlaub_gesamt']
+                    if 'urlaub_rest' in valid_details:
+                       del valid_details['urlaub_rest']
+            else:
+                 print(f"Warnung: Konnte alte Urlaubstage für User {user_id} nicht abrufen. Automatische Anpassung übersprungen.")
+                 # Entferne die automatisch berechneten Werte
+                 if 'urlaub_gesamt' in valid_details and valid_details['urlaub_gesamt'] == new_total_vacation:
+                    del valid_details['urlaub_gesamt']
+                 if 'urlaub_rest' in valid_details:
+                    del valid_details['urlaub_rest']
+
+
+        # --- ENDE ANPASSUNG ---
+
+        # Nur fortfahren, wenn noch Felder zum Aktualisieren übrig sind
+        if not valid_details:
+             return True, "Keine Änderungen zum Speichern vorhanden (nach Berechnungsprüfung)." # Oder eine passendere Meldung
+
         fields = ', '.join([f"`{key}` = %s" for key in valid_details])
         values = list(valid_details.values()) + [user_id]
         query = f"UPDATE users SET {fields} WHERE id = %s"
@@ -392,8 +467,14 @@ def update_user_details(user_id, details, current_user_id):
         conn.commit()
         clear_user_order_cache()
         return True, "Benutzerdaten erfolgreich aktualisiert."
+    except mysql.connector.Error as db_err:
+        conn.rollback()
+        print(f"DB Fehler beim Aktualisieren von User {user_id}: {db_err}")
+        return False, f"Datenbankfehler: {db_err}"
     except Exception as e:
         conn.rollback()
+        print(f"Allgemeiner Fehler beim Aktualisieren von User {user_id}: {e}")
+        # Gib die spezifische Fehlermeldung zurück, die der Nutzer gesehen hat
         return False, f"Fehler beim Aktualisieren der Benutzerdaten: {e}"
     finally:
         if conn and conn.is_connected():
@@ -537,7 +618,7 @@ def update_last_event_date(user_id, event_type, date_str):
 
 
 # ==============================================================================
-# --- NEUE FUNKTIONEN FÜR ADMIN-FREISCHALTUNG & ARCHIVIERUNG ---
+# --- FUNKTIONEN FÜR ADMIN-FREISCHALTUNG & ARCHIVIERUNG ---
 # ==============================================================================
 
 def get_pending_approval_users():
@@ -655,3 +736,81 @@ def unarchive_user(user_id, current_user_id):
         if conn and conn.is_connected():
             cursor.close()
             conn.close()
+
+
+# --- NEUE FUNKTION FÜR BATCH-UPDATE URLAUB ---
+
+def admin_batch_update_vacation_entitlements(current_user_id):
+    """
+    Aktualisiert den Urlaubsanspruch (gesamt und rest) für ALLE aktiven Benutzer
+    basierend auf den in der DB gespeicherten Regeln (VACATION_RULES_CONFIG_KEY).
+    """
+    conn = create_connection()
+    if conn is None:
+        return False, "Keine Datenbankverbindung."
+
+    try:
+        cursor = conn.cursor(dictionary=True)
+
+        # 1. Alle aktiven Benutzer holen (inkl. zukünftig archivierte)
+        now_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        cursor.execute(f"""
+            SELECT id, vorname, name, entry_date, urlaub_gesamt, urlaub_rest
+            FROM users
+            WHERE is_approved = 1 
+            AND (is_archived = 0 OR (is_archived = 1 AND archived_date > '{now_str}'))
+        """)
+        all_users = cursor.fetchall()
+
+        if not all_users:
+            return False, "Keine aktiven Benutzer gefunden."
+
+        updated_count = 0
+        logs = []
+
+        for user in all_users:
+            user_id = user['id']
+            old_total = user['urlaub_gesamt']
+            old_rest = user['urlaub_rest']
+            entry_date = user['entry_date']  # Ist bereits ein date-Objekt oder None
+
+            # 2. Neuen Anspruch berechnen
+            # Wir nutzen old_total als Fallback, falls die Regeln nicht greifen
+            new_total = get_vacation_days_for_tenure(entry_date, default_days=old_total)
+
+            if new_total != old_total:
+                # 3. Differenz berechnen und Resturlaub anpassen
+                diff = new_total - old_total
+                new_rest = old_rest + diff
+
+                # 4. Update durchführen
+                cursor.execute(
+                    "UPDATE users SET urlaub_gesamt = %s, urlaub_rest = %s WHERE id = %s",
+                    (new_total, new_rest, user_id)
+                )
+                updated_count += 1
+                logs.append(
+                    f"Benutzer {user['vorname']} {user['name']} (ID {user_id}): Anspruch von {old_total} auf {new_total} Tage geändert (Rest: {old_rest} -> {new_rest}).")
+
+        if updated_count > 0:
+            log_details = f"Batch-Update für Urlaubsanspruch durchgeführt. {updated_count} Mitarbeiter aktualisiert.\nDetails:\n" + "\n".join(
+                logs)
+            _log_activity(cursor, current_user_id, 'VACATION_BATCH_UPDATE', log_details)
+            _create_admin_notification(cursor,
+                                       f"Urlaubsansprüche für {updated_count} Mitarbeiter erfolgreich aktualisiert.")
+            conn.commit()
+            return True, f"Erfolgreich {updated_count} Mitarbeiter aktualisiert."
+        else:
+            conn.rollback()
+            return True, "Keine Änderungen erforderlich. Alle Ansprüche sind bereits aktuell."
+
+    except Exception as e:
+        conn.rollback()
+        print(f"Fehler beim Batch-Update des Urlaubsanspruchs: {e}")
+        return False, f"Fehler beim Update: {e}"
+    finally:
+        if conn and conn.is_connected():
+            cursor.close()
+            conn.close()
+
+# --- ENDE NEU ---
