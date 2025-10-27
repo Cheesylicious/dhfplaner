@@ -7,6 +7,8 @@ import traceback  # Import für detailliertere Fehlermeldungen
 # DB Imports
 from database.db_shifts import get_consolidated_month_data
 from database.db_users import get_user_by_id, get_ordered_users_for_schedule
+# NEU: Import der Konfigurationsfunktionen für die Persistenz
+from database.db_core import load_config_json, save_config_json
 
 
 class ShiftPlanDataManager:
@@ -14,6 +16,9 @@ class ShiftPlanDataManager:
     Verantwortlich für das Laden, Vorverarbeiten und Berechnen aller Daten,
     die für die Anzeige des Dienstplans benötigt werden (Staffing, Stunden, Konflikte).
     """
+
+    # NEU: Eindeutiger Schlüssel für die DB-Speicherung der Generator-Einstellungen
+    GENERATOR_CONFIG_KEY = "GENERATOR_SETTINGS_V1"
 
     def __init__(self, app):
         self.app = app
@@ -36,23 +41,74 @@ class ShiftPlanDataManager:
         # Set zur Nachverfolgung von Warnungen über fehlende Schichtzeiten
         self._warned_missing_times = set()
 
+    # --- NEUE METHODEN ZUR SPEICHERUNG DER GENERATOR-EINSTELLUNGEN ---
+
+    def get_generator_config(self):
+        """Lädt die Einstellungen des Schichtplan-Generators aus der Datenbank."""
+        # Standardwerte mit neuem Schlüssel für priorisierte Partner
+        default = {
+            'max_consecutive_same_shift': 4,
+            'enable_24h_planning': False,
+            'preferred_partners_prioritized': []  # Verwendet den neuen Schlüssel
+        }
+        loaded = load_config_json(self.GENERATOR_CONFIG_KEY)
+
+        # Migration von alter Struktur (ohne Priorität) zu neuer Struktur
+        if loaded and 'preferred_partners' in loaded and 'preferred_partners_prioritized' not in loaded:
+            print("[WARNUNG] Alte Partnerstruktur gefunden, migriere zu priorisierter Struktur mit Prio 1...")
+            migrated_partners = []
+            for pair in loaded.get('preferred_partners', []):
+                if isinstance(pair, dict) and 'id_a' in pair and 'id_b' in pair:
+                    try:
+                        # Fügt jedem alten Paar die Standard-Priorität 1 hinzu
+                        migrated_partners.append({
+                            'id_a': int(pair['id_a']),
+                            'id_b': int(pair['id_b']),
+                            'priority': 1
+                        })
+                    except (ValueError, TypeError):
+                        pass  # Ignoriere fehlerhafte alte Einträge
+            loaded['preferred_partners_prioritized'] = migrated_partners
+            # Optional: Alten Schlüssel entfernen, um Daten sauber zu halten
+            # if 'preferred_partners' in loaded: del loaded['preferred_partners']
+            # Optional: Migrierte Daten sofort speichern? Könnte man machen, aber Laden reicht erstmal.
+            # self.save_generator_config(loaded)
+
+        return loaded or default  # Gibt geladene oder Standard-Config zurück
+
+    def save_generator_config(self, config_data):
+        """Speichert die Einstellungen des Schichtplan-Generators in die Datenbank."""
+        # --- KORREKTUR: Gibt das Tupel (success, message) zurück ---
+        # save_config_json gibt (True/False, message) zurück
+        return save_config_json(self.GENERATOR_CONFIG_KEY, config_data)
+        # --- ENDE KORREKTUR ---
+
+    # --- ENDE NEUE METHODEN ---
+
+    # --- Originalmethoden aus der hochgeladenen Datei (teilweise leicht angepasst) ---
+
+    def get_user_data_map(self):
+        """ Gibt eine Map {user_id: user_dict} der aktuell geladenen Benutzer zurück. """
+        # Stellt sicher, dass die Liste existiert und gibt sie als Dict zurück
+        return {user['id']: user for user in self.cached_users_for_month if 'id' in user}
+
     def _get_shift_helper(self, user_id_str, date_obj, current_year, current_month):
-        """ Holt die Schicht für einen User an einem Datum, berücksichtigt Vormonat-Cache. """
+        """ Holt die *Arbeits*-Schicht für einen User an einem Datum, berücksichtigt Vormonat-Cache. """
         date_str = date_obj.strftime('%Y-%m-%d')
         shift = self.shift_schedule_data.get(user_id_str, {}).get(date_str)
 
-        is_previous_month = False
-        if date_obj.year < current_year:
-            is_previous_month = True
-        elif date_obj.year == current_year and date_obj.month < current_month:
-            is_previous_month = True
+        is_previous_month = (date_obj.year < current_year or
+                             (date_obj.year == current_year and date_obj.month < current_month))
 
         if shift is None and is_previous_month:
+            # Vormonat-Cache nutzen
             shift = self._prev_month_shifts.get(user_id_str, {}).get(date_str, "")
         elif shift is None:
+            # Kein Eintrag für das Datum gefunden (weder aktuell noch Vormonat)
             shift = ""
 
-        return shift if shift not in ["", "FREI", None] else ""
+        # Gebe leeren String zurück für Nicht-Arbeitstage (explizite Prüfung statt free_shifts_indicators)
+        return shift if shift not in ["", "FREI", None, "U", "X", "EU", "WF", "U?"] else ""
 
     def load_and_process_data(self, year, month, progress_callback=None):
         """
@@ -64,79 +120,68 @@ class ShiftPlanDataManager:
 
         update_progress(5, "Lade Benutzerreihenfolge...")
 
-        # --- KORREKTUR: Stichtag muss der Monatsanfang sein ---
-        # Wir übergeben den *Anfang des aktuellen Monats* (z.B. 1. Okt. 00:00:00)
-        # Die DB-Logik (archived_date > Stichtag) prüft dann:
-        # 1. Plan Okt: Archiviert 15. Okt. -> '15. Okt' > '1. Okt' -> TRUE (wird angezeigt)
-        # 2. Plan Nov: Archiviert 15. Okt. -> '15. Okt' > '1. Nov' -> FALSE (wird nicht angezeigt)
-
         first_day_current_month = date(year, month, 1)
-        # Wichtig: datetime-Objekt verwenden, kein reines date-Objekt
         current_date_for_archive_check = datetime.combine(first_day_current_month, time(0, 0, 0))
 
+        # Benutzer für den Planungszeitraum laden
         self.cached_users_for_month = get_ordered_users_for_schedule(include_hidden=True,
                                                                      for_date=current_date_for_archive_check)
         print(
             f"[DM Load] {len(self.cached_users_for_month)} Benutzer für {year}-{month} geladen (Stichtag: {current_date_for_archive_check}).")
 
         update_progress(10, "Lade alle Monatsdaten in einem Durchgang (DB-Optimierung)...")
+        # Konsolidierte Daten aus der DB holen
         consolidated_data = get_consolidated_month_data(year, month)
         if consolidated_data is None:
             print("[FEHLER] get_consolidated_month_data gab None zurück.")
+            # Setze alle Caches auf leere Werte, um Folgefehler zu vermeiden
             self.shift_schedule_data, self.daily_counts, self.wunschfrei_data, self._prev_month_shifts, self.processed_vacations = {}, {}, {}, {}, {}
             self.violation_cells.clear()
             raise Exception("Fehler beim Abrufen der Kerndaten aus der Datenbank.")
 
         update_progress(60, "Verarbeite Schicht- und Antragsdaten...")
+        # Daten in die Caches des DataManagers laden
         self.shift_schedule_data = consolidated_data.get('shifts', {})
-
-        # --- KORREKTUR START ---
-        # self.daily_counts = consolidated_data.get('daily_counts', {}) # <-- ENTFERNT: Diese Daten sind veraltet.
-
-        # Stattdessen: Berechne daily_counts jedes Mal neu aus den frisch geladenen shift_schedule_data
-        print("[DM Load] Neuberechnung der Tageszählungen (daily_counts) aus Schichtdaten...")
-        self.daily_counts.clear()  # Alte (potenziell veraltete) Daten löschen
-
-        def should_count_shift(shift_abbr):
-            # Dieselbe Logik wie in recalculate_daily_counts_for_day
-            return shift_abbr and shift_abbr not in ['U', 'X', 'EU', 'WF', 'U?', 'T./N.?']
-
-        # Iteriere über die gerade geladenen Schichtdaten
-        for user_id_str, shifts in self.shift_schedule_data.items():
-            for date_str, shift in shifts.items():
-                # Prüfen, ob das Datum im aktuellen Monat liegt (wichtig!)
-                try:
-                    shift_date = datetime.strptime(date_str, '%Y-%m-%d').date()
-                    if shift_date.year != year or shift_date.month != month:
-                        continue  # Schicht gehört nicht zum aktuellen Monat
-                except ValueError:
-                    continue  # Ungültiges Datum überspringen
-
-                # Wenn die Schicht gezählt werden soll, füge sie hinzu
-                if should_count_shift(shift):
-                    if date_str not in self.daily_counts:
-                        self.daily_counts[date_str] = {}
-                    counts_today = self.daily_counts[date_str]
-                    counts_today[shift] = counts_today.get(shift, 0) + 1
-        print("[DM Load] Tageszählungen erfolgreich neu berechnet.")
-        # --- KORREKTUR ENDE ---
-
         self.wunschfrei_data = consolidated_data.get('wunschfrei_requests', {})
-        self._prev_month_shifts = consolidated_data.get('prev_month_shifts', {})
+        self._prev_month_shifts = consolidated_data.get('prev_month_shifts', {})  # Cache für Vormonat
         raw_vacations = consolidated_data.get('vacation_requests', [])
         self.processed_vacations = self._process_vacations(year, month, raw_vacations)
 
-        self._preprocess_shift_times()  # Muss nach Laden der Schichtdaten erfolgen
+        # Neuberechnung der Tageszählungen (daily_counts) aus den gerade geladenen Schichtdaten
+        print("[DM Load] Neuberechnung der Tageszählungen (daily_counts) aus Schichtdaten...")
+        self.daily_counts.clear()  # Alte Zählungen löschen
 
-        update_progress(80, "Prüfe Konflikte (Ruhezeit, Hunde) und Staffing...")
+        def should_count_shift(shift_abbr):
+            # Definiert, welche Schichten für die Tageszählung relevant sind
+            return shift_abbr and shift_abbr not in ['U', 'X', 'EU', 'WF', 'U?', 'T./N.?']  # Liste anpassen bei Bedarf
+
+        for user_id_str, shifts in self.shift_schedule_data.items():
+            for date_str, shift in shifts.items():
+                try:  # Sicherstellen, dass das Datum zum aktuellen Monat gehört
+                    shift_date = datetime.strptime(date_str, '%Y-%m-%d').date()
+                    if shift_date.year != year or shift_date.month != month: continue
+                except ValueError:
+                    continue  # Ungültiges Datum ignorieren
+                # Wenn Schicht gezählt werden soll, inkrementieren
+                if should_count_shift(shift):
+                    if date_str not in self.daily_counts: self.daily_counts[date_str] = {}
+                    self.daily_counts[date_str][shift] = self.daily_counts[date_str].get(shift, 0) + 1
+        print("[DM Load] Tageszählungen erfolgreich neu berechnet.")
+
+        # Schichtzeiten vorverarbeiten (nachdem Schichtdaten geladen wurden)
+        self._preprocess_shift_times()
+
+        update_progress(80, "Prüfe Konflikte (Ruhezeit, Hunde)...")
+        # Volle Konfliktprüfung für den gesamten Monat durchführen
         self.update_violation_set(year, month)
 
         update_progress(95, "Vorbereitung abgeschlossen.")
 
+        # Geladene und verarbeitete Daten zurückgeben
         return self.shift_schedule_data, self.processed_vacations, self.wunschfrei_data, self.daily_counts
 
     def update_violations_incrementally(self, user_id, date_obj, old_shift, new_shift):
-        """Aktualisiert das violation_cells Set gezielt und gibt betroffene Zellen zurück."""
+        """Aktualisiert das violation_cells Set gezielt nach einer Schichtänderung und gibt betroffene Zellen zurück."""
         print(f"[DM-Incr] Update für User {user_id} am {date_obj}: '{old_shift}' -> '{new_shift}'")
         affected_cells = set()
         day = date_obj.day;
@@ -144,93 +189,113 @@ class ShiftPlanDataManager:
         month = date_obj.month
         user_id_str = str(user_id)
 
+        # Hilfsfunktionen zum Hinzufügen/Entfernen von Violations
         def add_violation(uid, d):
-            cell = (uid, d);
-            if cell not in self.violation_cells: print(f"    -> ADD V: U{uid}, D{d}"); self.violation_cells.add(
-                cell); affected_cells.add(cell)
+            cell = (uid, d)
+            if cell not in self.violation_cells: # Korrekte Einrückung
+                print(f"    -> ADD V: U{uid}, D{d}")
+                self.violation_cells.add(cell)
+                affected_cells.add(cell)
 
         def remove_violation(uid, d):
-            cell = (uid, d);
-            if cell in self.violation_cells: print(f"    -> REMOVE V: U{uid}, D{d}"); self.violation_cells.discard(
-                cell); affected_cells.add(cell)
+            cell = (uid, d)
+            if cell in self.violation_cells: # Korrekte Einrückung
+                print(f"    -> REMOVE V: U{uid}, D{d}")
+                self.violation_cells.discard(cell)
+                affected_cells.add(cell)
 
-        # 1. Ruhezeit
+        # 1. Ruhezeitkonflikte (N -> T/6) prüfen und aktualisieren
         print("  Prüfe Ruhezeit...")
         prev_day_obj = date_obj - timedelta(days=1);
         next_day_obj = date_obj + timedelta(days=1)
         prev_shift = self._get_shift_helper(user_id_str, prev_day_obj, year, month)
-        # next_shift direkt holen (kann Folgemonat sein)
+        # Nächste Schicht direkt aus aktuellen Daten holen (könnte Folgemonat sein)
         next_shift = self.shift_schedule_data.get(user_id_str, {}).get(next_day_obj.strftime('%Y-%m-%d'), "")
-        next_shift = next_shift if next_shift not in ["", "FREI", None] else ""
+        # Prüfen ob nächste Schicht eine Arbeitsschicht ist
+        is_next_shift_work = next_shift not in ["", "FREI", None, "U", "X", "EU", "WF", "U?"]
+        # Prüfen ob alte Schicht Konflikt war
+        is_old_shift_conflict = old_shift not in ["", "N.", "U", "X", "EU", "WF", "U?"]
+        # Prüfen ob neue Schicht Konflikt ist
+        is_new_shift_conflict = new_shift not in ["", "N.", "U", "X", "EU", "WF", "U?"]
 
-        # a) Alte entfernen
+        # a) Alte Konflikte entfernen
         if old_shift == 'N.':
             remove_violation(user_id, day)
             if next_day_obj.month == month and next_day_obj.year == year: remove_violation(user_id, day + 1)
-        if prev_shift == 'N.' and old_shift not in ["", "N.", "U", "X", "EU"]:
+        if prev_shift == 'N.' and is_old_shift_conflict:
             if prev_day_obj.month == month and prev_day_obj.year == year: remove_violation(user_id, day - 1)
             remove_violation(user_id, day)
-        # b) Neue hinzufügen
-        if new_shift == 'N.' and next_shift not in ["", "N.", "U", "X", "EU"]:
+
+        # b) Neue Konflikte hinzufügen
+        if new_shift == 'N.' and is_next_shift_work:
             add_violation(user_id, day)
             if next_day_obj.month == month and next_day_obj.year == year: add_violation(user_id, day + 1)
-        if prev_shift == 'N.' and new_shift not in ["", "N.", "U", "X", "EU"]:
+        if prev_shift == 'N.' and is_new_shift_conflict:
             if prev_day_obj.month == month and prev_day_obj.year == year: add_violation(user_id, day - 1)
             add_violation(user_id, day)
 
-        # 2. Hundekonflikt
+        # 2. Hundekonflikte prüfen und aktualisieren
         print("  Prüfe Hundekonflikt...")
-        user_data = next((u for u in self.cached_users_for_month if u['id'] == user_id), None)
-        dog = user_data.get('diensthund') if user_data else None
+        user_data = next((u for u in self.cached_users_for_month if u.get('id') == user_id), None)
+        # Aktueller Hund des Users
+        dog = user_data.get('diensthund') if user_data and user_data.get('diensthund') != '---' else None
+        # Alter Hund des Users
+        old_dog = user_data.get('diensthund') if user_data else None
+        if old_dog == '---': old_dog = None
 
-        if dog and dog != '---':
+        involved_dogs = set()  # Hunde, deren Konflikte neu bewertet werden müssen
+        if dog: involved_dogs.add(dog)
+        if old_dog and old_dog != dog: involved_dogs.add(old_dog)
+        if old_shift and not new_shift and old_dog: involved_dogs.add(old_dog) # User hat Dienst entfernt
+        # Fallback
+        if not involved_dogs and old_shift:
+            for other_user in self.cached_users_for_month:
+                other_dog = other_user.get('diensthund')
+                if other_dog and other_dog != '---':
+                    other_id = other_user.get('id')
+                    if other_id is None: continue
+                    other_shift_exists = self._get_shift_helper(str(other_id), date_obj, year, month)
+                    if other_shift_exists or (other_id == user_id and dog == other_dog):
+                        involved_dogs.add(other_dog)
+
+        print(f"    -> Hunde zu prüfen für Tag {day}: {involved_dogs}")
+
+        # Neubewertung für jeden betroffenen Hund
+        for current_dog in involved_dogs:
+            # Explizite Schleife statt List Comprehension
             assignments_today = []
             for other_user in self.cached_users_for_month:
-                if other_user.get('diensthund') == dog:
-                    other_user_id = other_user['id'];
-                    other_user_id_str = str(other_user_id)
-                    current_shift = new_shift if other_user_id == user_id else self._get_shift_helper(other_user_id_str,
-                                                                                                      date_obj, year,
-                                                                                                      month)
-                    if current_shift: assignments_today.append({'id': other_user_id, 'shift': current_shift})
-            involved_user_ids = set(a['id'] for a in assignments_today)
-            if old_shift: involved_user_ids.add(user_id)  # User auch prüfen, wenn er Dienst entfernt hat
-            print(f"    Hund '{dog}' T{day}. Beteiligte: {involved_user_ids}. Assignments: {assignments_today}")
-            print(f"    -> Entferne alte Konflikte für Hund '{dog}' T{day}...")
-            for uid_involved in involved_user_ids: remove_violation(uid_involved, day)
-            print(f"    -> Prüfe neue Konflikte für Hund '{dog}' T{day}...")
+                if other_user.get('diensthund') == current_dog:
+                    other_user_id = other_user.get('id')
+                    if other_user_id is None: continue
+                    current_shift_for_other = new_shift if other_user_id == user_id else self._get_shift_helper(str(other_user_id), date_obj, year, month)
+                    if current_shift_for_other: # Nur hinzufügen, wenn der User eine *Arbeits*-Schicht hat
+                        assignments_today.append({'id': other_user_id, 'shift': current_shift_for_other})
+
+            # User, die vorher/jetzt beteiligt waren/sind
+            involved_user_ids_now = {a['id'] for a in assignments_today}
+            involved_user_ids_before = set(involved_user_ids_now)
+            if old_shift and user_id not in involved_user_ids_now and old_dog == current_dog:
+                involved_user_ids_before.add(user_id)
+            all_potentially_involved = involved_user_ids_now.union(involved_user_ids_before)
+            print(f"    Hund '{current_dog}' T{day}. Beteiligte (Vorher/Nachher): {all_potentially_involved}. Aktuelle Assignments: {assignments_today}")
+
+            # Entferne alte Konflikte
+            print(f"    -> Entferne alte Konflikte für Hund '{current_dog}' T{day}...")
+            for uid_involved in all_potentially_involved:
+                remove_violation(uid_involved, day)
+
+            # Prüfe neue Konflikte
+            print(f"    -> Prüfe neue Konflikte für Hund '{current_dog}' T{day}...")
             if len(assignments_today) > 1:
                 for i in range(len(assignments_today)):
                     for j in range(i + 1, len(assignments_today)):
-                        u1, u2 = assignments_today[i], assignments_today[j]
+                        u1 = assignments_today[i];
+                        u2 = assignments_today[j]
                         if self._check_time_overlap_optimized(u1['shift'], u2['shift']):
                             print(f"      -> Konflikt: {u1['id']}({u1['shift']}) vs {u2['id']}({u2['shift']})")
                             add_violation(u1['id'], day);
                             add_violation(u2['id'], day)
-        else:  # User hat keinen Hund oder keinen Dienst mehr
-            remove_violation(user_id, day)  # Sicherstellen, dass er selbst keinen Konflikt hat
-            old_dog = user_data.get('diensthund') if user_data else None  # Hund *vor* Änderung?
-            if old_shift and old_dog and old_dog != '---':  # Nur prüfen, wenn er vorher Dienst MIT Hund hatte
-                remaining_assignments = [];
-                involved_user_ids = set()
-                for other_user in self.cached_users_for_month:
-                    if other_user['id'] == user_id: continue  # Ignoriere aktuellen User
-                    if other_user.get('diensthund') == old_dog:
-                        other_shift = self._get_shift_helper(str(other_user['id']), date_obj, year, month)
-                        if other_shift:
-                            assign_data = {'id': other_user['id'], 'shift': other_shift}
-                            remaining_assignments.append(assign_data);
-                            involved_user_ids.add(other_user['id'])
-                print(f"    User {user_id} entfernt. Prüfe Rest für Hund '{old_dog}' T{day}...")
-                for uid_involved in involved_user_ids: remove_violation(uid_involved, day)  # Alte entfernen
-                if len(remaining_assignments) > 1:  # Neue prüfen
-                    for i in range(len(remaining_assignments)):
-                        for j in range(i + 1, len(remaining_assignments)):
-                            u1, u2 = remaining_assignments[i], remaining_assignments[j]
-                            if self._check_time_overlap_optimized(u1['shift'], u2['shift']):
-                                print(f"      -> Rest-Konflikt: {u1['id']}({u1['shift']}) vs {u2['id']}({u2['shift']})")
-                                add_violation(u1['id'], day);
-                                add_violation(u2['id'], day)
 
         print(f"[DM-Incr] Update abgeschlossen. Betroffene Zellen: {affected_cells}")
         return affected_cells
@@ -252,14 +317,16 @@ class ShiftPlanDataManager:
         # Neue Schicht inkrementieren
         if should_count_shift(new_shift):
             counts_today[new_shift] = counts_today.get(new_shift, 0) + 1
-        # Bereinigen, falls Tag leer ist
+
+        # Bereinigen, falls der Eintrag für den Tag jetzt leer ist
         if not counts_today and date_str in self.daily_counts: del self.daily_counts[date_str]
+
         print(f"[DM Counts] Neue Zählung für {date_str}: {self.daily_counts.get(date_str, {})}")
 
     def _preprocess_shift_times(self):
-        """ Konvertiert Schichtzeiten in Minuten für schnelle Überlappungsprüfung. """
+        """ Konvertiert Schichtzeiten in Minuten-Intervalle für schnelle Überlappungsprüfung. """
         self._preprocessed_shift_times.clear()
-        self._warned_missing_times.clear()  # Warnungen zurücksetzen
+        self._warned_missing_times.clear()
         if not self.app.shift_types_data:
             print("[WARNUNG] shift_types_data ist leer in _preprocess_shift_times.")
             return
@@ -270,167 +337,186 @@ class ShiftPlanDataManager:
             end_time_str = data.get('end_time')
             if not start_time_str or not end_time_str: continue
             try:
-                s = datetime.strptime(start_time_str, '%H:%M').time();
-                e = datetime.strptime(end_time_str, '%H:%M').time()
-                s_min = s.hour * 60 + s.minute;
-                e_min = e.hour * 60 + e.minute
-                if e_min <= s_min: e_min += 24 * 60  # Über Mitternacht
+                s_time = datetime.strptime(start_time_str, '%H:%M').time()
+                e_time = datetime.strptime(end_time_str, '%H:%M').time()
+                s_min = s_time.hour * 60 + s_time.minute
+                e_min = e_time.hour * 60 + e_time.minute
+                if e_min <= s_min: e_min += 24 * 60
                 self._preprocessed_shift_times[abbrev] = (s_min, e_min);
                 count += 1
             except ValueError:
-                print(f"[WARNUNG] Ungültiges Zeitformat für Schicht '{abbrev}'.")
+                print(f"[WARNUNG] Ungültiges Zeitformat für Schicht '{abbrev}' in shift_types_data.")
         print(f"[DM] {count} Schichtzeiten erfolgreich vorverarbeitet.")
 
     def _process_vacations(self, year, month, raw_vacations):
-        """ Verarbeitet Urlaubsanträge für den gegebenen Monat. """
-        processed = defaultdict(dict);
+        """ Verarbeitet Urlaubsanträge und erstellt eine Map für schnellen Zugriff. """
+        processed = defaultdict(dict);  # {user_id_str: {date_obj: status}}
         month_start = date(year, month, 1)
-        month_end = date(year, month, calendar.monthrange(year, month)[1])
+        _, last_day = calendar.monthrange(year, month)
+        month_end = date(year, month, last_day)
+
         for req in raw_vacations:
-            user_id_str = str(req['user_id'])
+            user_id_str = str(req.get('user_id'))
+            if not user_id_str: continue
             try:
-                start = datetime.strptime(req['start_date'], '%Y-%m-%d').date();
-                end = datetime.strptime(req['end_date'], '%Y-%m-%d').date()
-                current_date = max(start, month_start);
-                last_date_to_check = min(end, month_end)
-                while current_date <= last_date_to_check:
-                    processed[user_id_str][current_date] = req['status'];
+                start_date = datetime.strptime(req['start_date'], '%Y-%m-%d').date()
+                end_date = datetime.strptime(req['end_date'], '%Y-%m-%d').date()
+                status = req.get('status', 'Unbekannt')
+
+                current_date = start_date
+                while current_date <= end_date:
+                    if month_start <= current_date <= month_end:
+                        processed[user_id_str][current_date] = status;
                     current_date += timedelta(days=1)
-            except (ValueError, TypeError) as e:
-                print(f"[WARNUNG] Urlaub ID {req.get('id')} Fehler: {e}")
+            except (ValueError, TypeError, KeyError) as e:
+                print(f"[WARNUNG] Fehler beim Verarbeiten von Urlaub ID {req.get('id', 'N/A')}: {e}")
+
         return dict(processed)
 
     def get_min_staffing_for_date(self, current_date):
-        """ Ermittelt Mindestbesetzung für ein Datum. """
+        """ Ermittelt die Mindestbesetzungsregeln für ein spezifisches Datum. """
         rules = getattr(self.app, 'staffing_rules', {});
         min_staffing = {}
         min_staffing.update(rules.get('Daily', {}))
-        if current_date.weekday() >= 5:
+        weekday = current_date.weekday()
+        if weekday >= 5:
             min_staffing.update(rules.get('Sa-So', {}))
-        elif current_date.weekday() == 4:
+        elif weekday == 4:
             min_staffing.update(rules.get('Fr', {}))
         else:
             min_staffing.update(rules.get('Mo-Do', {}))
-        if hasattr(self.app, 'is_holiday') and self.app.is_holiday(current_date):
-            min_staffing.update(rules.get('Holiday', {}))
-
-        # --- HIER WAR DER FEHLER ---
-        # Es stand 'isinstancev,' statt 'isinstance(v,'
+        if hasattr(self.app, 'is_holiday') and self.app.is_holiday(current_date): min_staffing.update(
+            rules.get('Holiday', {}))
+        # Bereinigen: Nur gültige numerische Werte >= 0 zurückgeben
         return {k: int(v) for k, v in min_staffing.items() if
                 isinstance(v, (int, str)) and str(v).isdigit() and int(v) >= 0}
 
     def calculate_total_hours_for_user(self, user_id_str, year, month):
-        """ Berechnet Gesamtstunden für einen User im Monat. """
+        """ Berechnet die geschätzten Gesamtstunden für einen Benutzer im Monat. """
         total_hours = 0.0;
+        try:
+            user_id_int = int(user_id_str)
+        except ValueError:
+            print(f"[WARNUNG] Ungültige user_id_str in calculate_total_hours: {user_id_str}"); return 0.0
+
         days_in_month = calendar.monthrange(year, month)[1]
+
+        # Überhang von N.-Schicht aus Vormonat
         prev_month_last_day = date(year, month, 1) - timedelta(days=1)
         prev_shift = self._get_shift_helper(user_id_str, prev_month_last_day, year, month)
         if prev_shift == 'N.':
-            shift_info = self.app.shift_types_data.get('N.')
-            if shift_info and shift_info.get('end_time'):
+            shift_info_n = self.app.shift_types_data.get('N.')
+            hours_overlap = 6.0  # Fallback
+            if shift_info_n and shift_info_n.get('end_time'):
                 try:
-                    end_time = datetime.strptime(shift_info['end_time'],
-                                                 '%H:%M').time();
-                    total_hours += end_time.hour + end_time.minute / 60.0
+                    end_time_n = datetime.strptime(shift_info_n['end_time'], '%H:%M').time();
+                    hours_overlap = end_time_n.hour + end_time_n.minute / 60.0
                 except ValueError:
-                    total_hours += 6.0
-            else:
-                total_hours += 6.0
-        user_shifts = self.shift_schedule_data.get(user_id_str, {})
+                    pass  # Bei Fehler Fallback nutzen
+            total_hours += hours_overlap
+
+        # Tage des aktuellen Monats
+        user_shifts_this_month = self.shift_schedule_data.get(user_id_str, {})
         for day in range(1, days_in_month + 1):
             current_date = date(year, month, day);
             date_str = current_date.strftime('%Y-%m-%d')
-            shift = user_shifts.get(date_str, "");
+            shift = user_shifts_this_month.get(date_str, "");
             vacation_status = self.processed_vacations.get(user_id_str, {}).get(current_date)
-            request_info = self.wunschfrei_data.get(user_id_str, {}).get(date_str)
+            request_info = self.wunschfrei_data.get(user_id_str, {}).get(date_str)  # Tuple (status, shift)
+
             actual_shift_for_hours = shift
             if vacation_status == 'Genehmigt':
                 actual_shift_for_hours = 'U'
-            elif request_info and ("Akzeptiert" in request_info[0] or "Genehmigt" in request_info[0]) and request_info[
-                1] == 'WF':
+            elif request_info and request_info[1] == 'WF' and request_info[0] in ["Genehmigt", "Akzeptiert"]:
                 actual_shift_for_hours = 'X'
+
             if actual_shift_for_hours in self.app.shift_types_data:
-                hours = float(
-                    self.app.shift_types_data[actual_shift_for_hours].get('hours', 0.0))  # Konvertiere zu float
+                hours = float(self.app.shift_types_data[actual_shift_for_hours].get('hours', 0.0))
+                # Korrektur für N.-Schicht am Monatsende
                 if actual_shift_for_hours == 'N.' and day == days_in_month:
-                    shift_info = self.app.shift_types_data.get('N.')
-                    if shift_info and shift_info.get('start_time'):
+                    shift_info_n = self.app.shift_types_data.get('N.')
+                    hours = 6.0  # Fallback
+                    if shift_info_n and shift_info_n.get('start_time'):
                         try:
-                            start_time = datetime.strptime(shift_info['start_time'], '%H:%M').time();
-                            hours = 24.0 - (
-                                    start_time.hour + start_time.minute / 60.0)
+                            start_time_n = datetime.strptime(shift_info_n['start_time'], '%H:%M').time();
+                            hours = 24.0 - (start_time_n.hour + start_time_n.minute / 60.0)
                         except ValueError:
-                            hours = 6.0
-                    else:
-                        hours = 6.0
+                            pass  # Bei Fehler Fallback nutzen
                 total_hours += hours
+
         return round(total_hours, 2)
 
     def update_violation_set(self, year, month):
-        """ Prüft *gesamten* Monat auf Konflikte (nur bei initialem Laden). """
+        """ Prüft den *gesamten* Monat auf Konflikte (Ruhezeit, Hunde) und füllt self.violation_cells. """
         print(f"[DM-Full] Starte volle Konfliktprüfung für {year}-{month:02d}...")
         self.violation_cells.clear();
         days_in_month = calendar.monthrange(year, month)[1]
         current_user_order = self.cached_users_for_month
-        if not current_user_order: print("[WARNUNG] Benutzer-Cache leer!"); return
+        if not current_user_order: print("[WARNUNG] Benutzer-Cache leer in update_violation_set!"); return
 
-        # 1. Ruhezeit
+        # 1. Ruhezeitkonflikte (N -> T/6)
         for user in current_user_order:
-            user_id_str = str(user['id'])
-            current_check_date = date(year, month, 1) - timedelta(days=1)
+            user_id = user.get('id');
+            if user_id is None: continue;
+            user_id_str = str(user_id)
+            current_check_date = date(year, month, 1) - timedelta(days=1);
             end_check_date = date(year, month, days_in_month)
             while current_check_date < end_check_date:
                 next_day_date = current_check_date + timedelta(days=1)
-                shift1 = self._get_shift_helper(user_id_str, current_check_date, year, month)
+                shift1 = self._get_shift_helper(user_id_str, current_check_date, year, month);
                 shift2 = self._get_shift_helper(user_id_str, next_day_date, year, month)
-                if shift1 == 'N.' and shift2 not in ["", "N.", "U", "X", "EU"]:
-                    if current_check_date.month == month and current_check_date.year == year: self.violation_cells.add(
-                        (user['id'], current_check_date.day))
-                    if next_day_date.month == month and next_day_date.year == year: self.violation_cells.add(
-                        (user['id'], next_day_date.day))
+                # Direkter Konflikt N -> T/6
+                if shift1 == 'N.' and shift2 in ["T.", "6"]:
+                    if current_check_date.month == month and current_check_date.year == year:
+                        self.violation_cells.add((user_id, current_check_date.day))
+                    if next_day_date.month == month and next_day_date.year == year:
+                        self.violation_cells.add((user_id, next_day_date.day))
                 current_check_date += timedelta(days=1)
 
-        # 2. Hundekonflikt
+        # 2. Hundekonflikte (zeitliche Überlappung am selben Tag)
         for day in range(1, days_in_month + 1):
             current_date = date(year, month, day);
-            dog_schedule = defaultdict(list)
+            dog_schedule_today = defaultdict(list)
+            # Sammle alle Hundezuweisungen für diesen Tag
             for user in current_user_order:
                 dog = user.get('diensthund')
                 if dog and dog != '---':
-                    user_id_str = str(user['id'])
+                    user_id = user.get('id');
+                    if user_id is None: continue;
+                    user_id_str = str(user_id)
                     shift = self._get_shift_helper(user_id_str, current_date, year, month)
-                    if shift: dog_schedule[dog].append({'id': user['id'], 'shift': shift})
-            for dog, assignments in dog_schedule.items():
+                    if shift: dog_schedule_today[dog].append({'id': user_id, 'shift': shift})
+            # Prüfe jeden Hund auf Konflikte
+            for dog, assignments in dog_schedule_today.items():
                 if len(assignments) > 1:
                     for i in range(len(assignments)):
                         for j in range(i + 1, len(assignments)):
-                            u1, u2 = assignments[i], assignments[j]
+                            u1 = assignments[i];
+                            u2 = assignments[j]
                             if self._check_time_overlap_optimized(u1['shift'], u2['shift']):
                                 self.violation_cells.add((u1['id'], day));
                                 self.violation_cells.add((u2['id'], day))
+
         print(f"[DM-Full] Volle Konfliktprüfung abgeschlossen. Konflikte: {len(self.violation_cells)}")
 
     def _check_time_overlap_optimized(self, shift1_abbrev, shift2_abbrev):
-        """ Prüft Zeitüberlappung mit Cache. """
-        if shift1_abbrev in ['U', 'X', 'EU', 'WF', ''] or shift2_abbrev in ['U', 'X', 'EU', 'WF', '']: return False
+        """ Prüft Zeitüberlappung mit vorverarbeiteten Zeiten (Cache). """
+        # Explizite Prüfung statt free_shifts_indicators
+        if shift1_abbrev in ['U', 'X', 'EU', 'WF', '', 'FREI'] or shift2_abbrev in ['U', 'X', 'EU', 'WF', '',
+                                                                                    'FREI']: return False
+
         s1, e1 = self._preprocessed_shift_times.get(shift1_abbrev, (None, None))
         s2, e2 = self._preprocessed_shift_times.get(shift2_abbrev, (None, None))
+
         if s1 is None or s2 is None:
-            # --- KORREKTUR INDENTATION ---
-            # Diese Warnungen gehören *innerhalb* des if-Blocks
-            warned = False
+            # Gib Warnung aus, wenn Zeit fehlt (nur einmal pro Schichtkürzel)
             if s1 is None and shift1_abbrev not in self._warned_missing_times:
-                print(f"[WARNVNG] Zeit für Schicht '{shift1_abbrev}' fehlt im Cache (_check_time_overlap).")
+                print(f"[WARNUNG] Zeit für Schicht '{shift1_abbrev}' fehlt im Cache (_check_time_overlap).")
                 self._warned_missing_times.add(shift1_abbrev)
-                warned = True
             if s2 is None and shift2_abbrev not in self._warned_missing_times:
                 print(f"[WARNUNG] Zeit für Schicht '{shift2_abbrev}' fehlt im Cache (_check_time_overlap).")
                 self._warned_missing_times.add(shift2_abbrev)
-                warned = True
-            # --- ENDE KORREKTUR INDENTATION ---
-            return False  # Wichtig: Hier False zurückgeben, wenn Zeiten fehlen
-        # Korrekte Überlappungsprüfung
-        overlap = (s1 < e2) and (s2 < e1)
-        return overlap
+            return False  # Kein Konflikt feststellbar
 
-# Kein Code nach der Klassendefinition
+        # Korrekte Überlappungsprüfung
+        return (s1 < e2) and (s2 < e1)
