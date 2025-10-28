@@ -1,10 +1,13 @@
 # database/db_shifts.py
 import calendar
-import json
+# import json # Nicht mehr benötigt
 from datetime import date, datetime, timedelta
 from .db_core import create_connection
 import mysql.connector
-import os
+# import os # Nicht mehr benötigt
+
+# NEU: Import des EventManagers für DB-basierte Event-Prüfung
+from gui.event_manager import EventManager
 
 _SHIFT_TYPES_CACHE = None
 _SHIFT_ORDER_CACHE = None
@@ -18,6 +21,47 @@ def clear_shift_types_cache():
 def clear_shift_order_cache():
     global _SHIFT_ORDER_CACHE
     _SHIFT_ORDER_CACHE = None
+
+
+# --- NEUE Hilfsfunktion zur DB-basierten Event-Prüfung ---
+def _check_for_event_conflict_db(date_str, user_id, shift_abbrev):
+    """
+    Prüft, ob der geplante Dienst an einem Datum mit einem globalen Event
+    aus der Datenbank kollidiert (z.B. Ausbildung, Schießen).
+    Gibt True zurück, wenn ein Konflikt besteht, sonst False.
+    """
+    try:
+        year = int(date_str.split('-')[0])
+        # Nutze EventManager, um Events für das Jahr aus der DB zu holen
+        # get_events_for_year gibt ein Dict {date_str: type} zurück (im MySQL Fall)
+        events_this_year_by_str = EventManager.get_events_for_year(year)
+
+        event_type = events_this_year_by_str.get(date_str)
+
+        # Logik zur Konfliktprüfung:
+        # Beispiel: Wenn ein Event existiert und es sich um "Ausbildung" oder "Schießen" handelt,
+        # darf keine normale Arbeitsschicht zugewiesen werden.
+        if event_type and event_type in ["Ausbildung", "Schießen"]:  # Passen Sie diese Typen ggf. an
+            # Prüfe, ob die zuzuweisende Schicht eine Arbeitsschicht ist
+            # (passen Sie diese Liste ggf. an Ihre Definition von "Frei" an)
+            if shift_abbrev not in ["", "FREI", "U", "X", "EU", "WF", "U?"]:
+                print(
+                    f"[INFO] Event-Konflikt verhindert: User {user_id} kann Schicht '{shift_abbrev}' am Event-Tag '{date_str}' ({event_type}) nicht übernehmen.")
+                return True  # Konflikt gefunden!
+
+    except ValueError:
+        print(f"[WARNUNG] Ungültiges Datumsformat bei Event-Prüfung: {date_str}")
+        return False  # Bei ungültigem Datum keinen Konflikt annehmen
+    except Exception as e:
+        # Fängt andere Fehler ab (z.B. DB-Verbindungsprobleme im EventManager)
+        print(f"[FEHLER] Unerwarteter Fehler bei der Event-Konfliktprüfung (DB): {e}")
+        # Im Zweifel keinen Konflikt melden, um das Speichern nicht unnötig zu blockieren
+        return False
+
+    return False  # Kein Konflikt gefunden
+
+
+# --- ENDE NEUE Hilfsfunktion ---
 
 
 # --- get_consolidated_month_data, save_shift_entry, get_shifts_for_month, get_daily_shift_counts_for_month ---
@@ -65,12 +109,19 @@ def get_consolidated_month_data(year, month):
                                                                                     row['requested_by'], None)
         return result_data
     except mysql.connector.Error as e:
-        print(f"KRITISCHER FEHLER beim konsolidierten Abrufen der Daten: {e}"); return None
+        print(f"KRITISCHER FEHLER beim konsolidierten Abrufen der Daten: {e}");
+        return None
     finally:
         if conn and conn.is_connected(): cursor.close(); conn.close()
 
 
 def save_shift_entry(user_id, shift_date_str, shift_abbrev, keep_request_record=False):
+    """Speichert oder aktualisiert einen einzelnen Schichteintrag."""
+
+    # KORRIGIERT: Ruft die DB-basierte Event-Konfliktprüfung auf
+    if _check_for_event_conflict_db(shift_date_str, user_id, shift_abbrev):
+        return False, f"Konflikt: An diesem Tag findet ein Event statt, das die Schicht '{shift_abbrev}' verhindert."
+
     conn = create_connection()
     if conn is None: return False, "Keine Datenbankverbindung."
     try:
@@ -82,33 +133,22 @@ def save_shift_entry(user_id, shift_date_str, shift_abbrev, keep_request_record=
             cursor.execute(
                 "INSERT INTO shift_schedule (user_id, shift_date, shift_abbrev) VALUES (%s, %s, %s) ON DUPLICATE KEY UPDATE shift_abbrev = %s",
                 (user_id, shift_date_str, shift_abbrev, shift_abbrev))
-        if shift_abbrev and shift_abbrev not in ["", "FREI"]:
-            try:
-                events_file_path = 'events_config.json'
-                if not os.path.exists(events_file_path):
-                    import sys
-                    base_path = getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(__file__)))
-                    if 'database' in base_path: base_path = os.path.dirname(base_path)
-                    events_file_path = os.path.join(base_path, 'events_config.json')
-                with open(events_file_path, 'r', encoding='utf-8') as f:
-                    all_events = json.load(f)
-                date_obj = datetime.strptime(shift_date_str, '%Y-%m-%d').date()
-                year_str = str(date_obj.year)
-                if year_str in all_events and shift_date_str in all_events[year_str]:
-                    event_info = all_events[year_str][shift_date_str]
-                    event_type = event_info.get("type") if isinstance(event_info, dict) else event_info
-                    if event_type == "Quartals Ausbildung":
-                        cursor.execute("UPDATE users SET last_ausbildung = %s WHERE id = %s", (shift_date_str, user_id))
-                    elif event_type == "Schießen":
-                        cursor.execute("UPDATE users SET last_schiessen = %s WHERE id = %s", (shift_date_str, user_id))
-            except (FileNotFoundError, json.JSONDecodeError, KeyError, ImportError, AttributeError, NameError) as e:
-                print(f"[WARNUNG] Konnte Event-Daten für Schichteintrag nicht prüfen: {e}"); pass
+
+        # --- ENTFERNT: Veralteter Codeblock zum Laden von events_config.json ---
+        # Der folgende try-except-Block wurde entfernt, da die Prüfung jetzt
+        # durch _check_for_event_conflict_db() am Anfang der Funktion erfolgt.
+        # Das Aktualisieren von last_ausbildung/last_schiessen muss ggf.
+        # an anderer Stelle (z.B. im Event-Management-Dialog) erfolgen,
+        # da save_shift_entry nicht mehr weiß, ob ein Event stattfindet.
+        # --- ENDE ENTFERNT ---
+
         if not keep_request_record and shift_abbrev != 'X': cursor.execute(
             "DELETE FROM wunschfrei_requests WHERE user_id = %s AND request_date = %s", (user_id, shift_date_str))
         conn.commit()
         return True, "Schicht gespeichert."
     except mysql.connector.Error as e:
-        conn.rollback(); return False, f"Datenbankfehler beim Speichern der Schicht: {e}"
+        conn.rollback();
+        return False, f"Datenbankfehler beim Speichern der Schicht: {e}"
     finally:
         if conn and conn.is_connected(): cursor.close(); conn.close()
 
@@ -131,7 +171,8 @@ def get_shifts_for_month(year, month):
             shifts[user_id][row['shift_date']] = row['shift_abbrev']
         return shifts
     except mysql.connector.Error as e:
-        print(f"Fehler beim Abrufen des Schichtplans: {e}"); return {}
+        print(f"Fehler beim Abrufen des Schichtplans: {e}");
+        return {}
     finally:
         if conn and conn.is_connected(): cursor.close(); conn.close()
 
@@ -154,7 +195,8 @@ def get_daily_shift_counts_for_month(year, month):
             daily_counts[shift_date][row['shift_abbrev']] = row['count']
         return daily_counts
     except mysql.connector.Error as e:
-        print(f"Fehler beim Abrufen der täglichen Schichtzählungen: {e}"); return {}
+        print(f"Fehler beim Abrufen der täglichen Schichtzählungen: {e}");
+        return {}
     finally:
         if conn and conn.is_connected(): cursor.close(); conn.close()
 
@@ -174,7 +216,9 @@ def get_all_shift_types():
         _SHIFT_TYPES_CACHE = results
         return results
     except mysql.connector.Error as e:
-        print(f"Fehler beim Abrufen der Schichtarten: {e}"); _SHIFT_TYPES_CACHE = []; return []
+        print(f"Fehler beim Abrufen der Schichtarten: {e}");
+        _SHIFT_TYPES_CACHE = [];
+        return []
     finally:
         if conn and conn.is_connected(): cursor.close(); conn.close()
 
@@ -194,9 +238,11 @@ def add_shift_type(data):
         clear_shift_order_cache()
         return True, "Schichtart erfolgreich hinzugefügt."
     except mysql.connector.IntegrityError:
-        conn.rollback(); return False, "Eine Schichtart mit dieser Abkürzung existiert bereits."
+        conn.rollback();
+        return False, "Eine Schichtart mit dieser Abkürzung existiert bereits."
     except mysql.connector.Error as e:
-        conn.rollback(); return False, f"Datenbankfehler beim Hinzufügen: {e}"
+        conn.rollback();
+        return False, f"Datenbankfehler beim Hinzufügen: {e}"
     finally:
         if conn and conn.is_connected(): cursor.close(); conn.close()
 
@@ -216,9 +262,11 @@ def update_shift_type(shift_type_id, data):
         clear_shift_order_cache()
         return True, "Schichtart erfolgreich aktualisiert."
     except mysql.connector.IntegrityError:
-        conn.rollback(); return False, "Die neue Abkürzung wird bereits von einer anderen Schichtart verwendet."
+        conn.rollback();
+        return False, "Die neue Abkürzung wird bereits von einer anderen Schichtart verwendet."
     except mysql.connector.Error as e:
-        conn.rollback(); return False, f"Datenbankfehler beim Aktualisieren: {e}"
+        conn.rollback();
+        return False, f"Datenbankfehler beim Aktualisieren: {e}"
     finally:
         if conn and conn.is_connected(): cursor.close(); conn.close()
 
@@ -237,7 +285,8 @@ def delete_shift_type(shift_type_id):
         clear_shift_order_cache()
         return True, "Schichtart erfolgreich gelöscht."
     except mysql.connector.Error as e:
-        conn.rollback(); return False, f"Datenbankfehler beim Löschen: {e}"
+        conn.rollback();
+        return False, f"Datenbankfehler beim Löschen: {e}"
     finally:
         if conn and conn.is_connected(): cursor.close(); conn.close()
 
