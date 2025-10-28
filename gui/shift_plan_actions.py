@@ -1,9 +1,9 @@
-# gui/shift_plan_actions.py
 import tkinter as tk
 from tkinter import ttk, messagebox
 from datetime import date, datetime
 
-from database.db_shifts import save_shift_entry
+# KORRIGIERTER IMPORT: Nutzt wieder den ursprünglichen Namen
+from database.db_shifts import save_shift_entry, delete_all_shifts_for_month
 from database.db_requests import (admin_submit_request,
                                   get_wunschfrei_request_by_user_and_date,
                                   withdraw_wunschfrei_request,
@@ -12,6 +12,8 @@ from database.db_requests import (admin_submit_request,
 from database.db_users import get_user_by_id
 from .dialogs.rejection_reason_dialog import RejectionReasonDialog
 from database.db_core import load_config_json
+# NEU: Import des ShiftLockManagers
+from gui.shift_lock_manager import ShiftLockManager
 
 SHIFT_MENU_CONFIG_KEY = "SHIFT_DISPLAY_CONFIG"
 
@@ -24,6 +26,10 @@ class ShiftPlanActionHandler:
         self.app = app_instance
         self.renderer = renderer_instance
         self._menu_config_cache = self._load_menu_config()
+        # NEU: Lock Manager direkt über DataManager instanziieren
+        # DataManager wird in ShiftPlanTab initialisiert und der Lock Manager dort instanziiert.
+        # Dies setzt voraus, dass self.tab.data_manager bereits den ShiftLockManager enthält (siehe vorherige Korrekturen).
+        self.shift_lock_manager = self.tab.data_manager.shift_lock_manager
 
     def _load_menu_config(self):
         config = load_config_json(SHIFT_MENU_CONFIG_KEY)
@@ -150,6 +156,15 @@ class ShiftPlanActionHandler:
         # 1. Speichern in DB
         # Wichtig: shift_abbrev="" bedeutet "FREI" / Löschen in der DB
         actual_shift_to_save = shift_abbrev if shift_abbrev else ""
+
+        # NEUE SICHERHEITSREGEL: Darf gesperrte Schichten nicht manuell überschreiben/löschen
+        lock_status = self.shift_lock_manager.get_lock_status(user_id, date_str)
+        if lock_status and actual_shift_to_save != lock_status:
+            messagebox.showwarning("Gesperrte Schicht",
+                                   f"Diese Zelle ist als '{lock_status}' gesichert und kann nicht manuell geändert werden, bevor die Sicherung aufgehoben wird.",
+                                   parent=self.tab)
+            return
+
         success, message = save_shift_entry(user_id, date_str, actual_shift_to_save)
 
         if success:
@@ -187,44 +202,119 @@ class ShiftPlanActionHandler:
         else:
             messagebox.showerror("Speicherfehler", message, parent=self.tab)
 
-    # --- on_grid_cell_click (bleibt unverändert) ---
+    # --- NEUE METHODEN ZUM SICHERN VON SCHICHTEN ---
+
+    def _set_shift_lock_status(self, user_id, date_str, shift_abbrev, is_locked):
+        """ Allgemeine Hilfsfunktion zum Sichern/Freigeben von Schichten. """
+        # KORRIGIERTE ABFRAGE: Nutzt das Attribut, das in MainAdminWindow initialisiert werden sollte
+        # Wir fragen user_id, dann current_user_id ab und nutzen None als Fallback
+        # Dies behebt den AttributeError durch flexible Abfrage
+        # Falls beide fehlen, wird die Fehlerbox angezeigt.
+        admin_id = getattr(self.app, 'user_id', None) or getattr(self.app, 'current_user_id', None)
+
+        # KORRIGIERTE FEHLERPRÜFUNG: Prüft auf None oder 0, um den Fehler abzufangen
+        if not admin_id:
+            messagebox.showerror("Fehler", "Admin-ID nicht verfügbar. Bitte melden Sie sich erneut an.",
+                                 parent=self.tab)
+            return
+
+        success, message = self.shift_lock_manager.set_lock_status(user_id, date_str, shift_abbrev, is_locked, admin_id)
+
+        if success:
+            messagebox.showinfo("Erfolg", message, parent=self.tab)
+            # Führt ein UI-Update durch, um die Lock-Indikatoren anzuzeigen
+            try:
+                date_obj = datetime.strptime(date_str, '%Y-%m-%d').date()
+                # Aktualisiert die betroffene Zelle, um das Lock-Icon anzuzeigen
+                self.renderer.update_cell_display(user_id, date_obj.day, date_obj)
+            except Exception as e:
+                print(f"[FEHLER] Fehler bei UI-Update nach Lock-Status-Änderung: {e}")
+                self.tab.refresh_plan()
+        else:
+            messagebox.showerror("Fehler", message, parent=self.tab)
+
+    def secure_shift(self, user_id, date_str, shift_abbrev):
+        """ Sichert die aktuelle Schicht (T., N., 6). """
+        self._set_shift_lock_status(user_id, date_str, shift_abbrev, is_locked=True)
+
+    def unlock_shift(self, user_id, date_str):
+        """ Gibt die gesicherte Schicht frei. """
+        # Beim Freigeben ist die shift_abbrev leer, da der Lock-Eintrag entfernt wird.
+        self._set_shift_lock_status(user_id, date_str, "", is_locked=False)
+
+    # --- ENDE NEUE METHODEN ---
+
+    # --- on_grid_cell_click (jetzt mit Lock-Optionen) ---
     def on_grid_cell_click(self, event, user_id, day, year, month):
         date_obj = date(year, month, day);
         date_str = date_obj.strftime('%Y-%m-%d')
         context_menu = tk.Menu(self.tab, tearoff=0)
-        if not hasattr(self.tab, '_menu_item_cache') or not self.tab._menu_item_cache:
-            print("[WARNUNG] Menü-Cache leer.");  # Gekürzt
-            if hasattr(self.tab, '_prepare_shift_menu_items'):
-                try:
-                    self.tab._menu_item_cache = self.tab._prepare_shift_menu_items()
-                except Exception as e:
-                    print(f"Cache-Fehler: {e}"); messagebox.showerror("Fehler", "Menü init failed.",
-                                                                      parent=self.tab); return
+
+        # Holen der aktuell angezeigten Schicht (aus Cache oder UI)
+        current_shift = self.tab.data_manager.shift_schedule_data.get(str(user_id), {}).get(date_str)
+        # Abrufen des Lock-Status
+        lock_status = self.shift_lock_manager.get_lock_status(str(user_id), date_str)
+
+        # 1. Normale Schicht-Auswahl (Nur wenn nicht gesperrt)
+        if not lock_status:
+            # Code für die normale Schichtauswahl (wie im Original)
+            if not hasattr(self.tab, '_menu_item_cache') or not self.tab._menu_item_cache:
+                if hasattr(self.tab, '_prepare_shift_menu_items'):
+                    try:
+                        self.tab._menu_item_cache = self.tab._prepare_shift_menu_items()
+                    except Exception as e:
+                        print(f"Cache-Fehler: {e}");
+                        messagebox.showerror("Fehler", "Menü init failed.", parent=self.tab);
+                        return
+                else:
+                    messagebox.showerror("Fehler", "Menü kann nicht erstellt werden.", parent=self.tab);
+                    return
+
+            if hasattr(self.tab, '_menu_item_cache') and self.tab._menu_item_cache:
+                for abbrev, label_text in self.tab._menu_item_cache:
+                    context_menu.add_command(label=label_text,
+                                             command=lambda u=user_id, d=date_str,
+                                                            s=abbrev: self.save_shift_entry_and_refresh(u, d, s))
             else:
-                messagebox.showerror("Fehler", "Menü kann nicht erstellt werden.", parent=self.tab); return
-        if hasattr(self.tab, '_menu_item_cache') and self.tab._menu_item_cache:
-            for abbrev, label_text in self.tab._menu_item_cache: context_menu.add_command(label=label_text,
-                                                                                          command=lambda u=user_id,
-                                                                                                         d=date_str,
-                                                                                                         s=abbrev: self.save_shift_entry_and_refresh(
-                                                                                              u, d, s))
-        else:
-            context_menu.add_command(label="Fehler Schichtladen", state="disabled")
-        context_menu.add_separator();
-        context_menu.add_command(label="FREI",
-                                 command=lambda u=user_id, d=date_str: self.save_shift_entry_and_refresh(u, d, ""))
-        context_menu.add_separator();
+                context_menu.add_command(label="Fehler Schichtladen", state="disabled")
+
+            context_menu.add_separator();
+            context_menu.add_command(label="FREI",
+                                     command=lambda u=user_id, d=date_str: self.save_shift_entry_and_refresh(u, d, ""))
+
+        # 2. Lock/Unlock Optionen (für Admin-Zwecke)
+
+        # Prüfen, ob die aktuelle Schicht gesichert werden kann (Arbeitsschichten)
+        securable_shifts = ["T.", "N.", "6"]
+        # Feste Schichten sind ebenfalls sicherbar/sicher
+        is_securable_or_fixed = current_shift in securable_shifts or current_shift in ["X", "QA", "S", "U", "EU", "WF",
+                                                                                       "U?"]
+
+        context_menu.add_separator()
         context_menu.add_command(label="Admin: Wunschfrei (WF)",
                                  command=lambda u=user_id, d=date_str: self.admin_add_wunschfrei(u, d, 'WF'))
-
-        # --- KORREKTUR TEXT ---
         context_menu.add_command(label="Admin: Wunschschicht (T/N)",
                                  command=lambda u=user_id, d=date_str: self.admin_add_wunschfrei(u, d, 'T/N'))
-        # --- ENDE KORREKTUR ---
+        context_menu.add_separator()
+
+        if lock_status:
+            # UNLOCK-Option
+            context_menu.add_command(label=f"🔓 Sicherung aufheben (war: {lock_status})", foreground="#007700",
+                                     command=lambda u=user_id, d=date_str: self.unlock_shift(u, d))
+        elif is_securable_or_fixed:
+            # SECURE-Option
+            shift_to_secure = current_shift if current_shift else ""
+            if shift_to_secure:
+                context_menu.add_command(label=f"🔒 Schicht sichern ({shift_to_secure})", foreground="#CC0000",
+                                         command=lambda u=user_id, d=date_str, s=shift_to_secure: self.secure_shift(u,
+                                                                                                                    d,
+                                                                                                                    s))
+            else:
+                context_menu.add_command(label="🔒 Schicht sichern", state="disabled")
 
         context_menu.tk_popup(event.x_root, event.y_root)
 
-    # --- show_wunschfrei_context_menu (bleibt unverändert) ---
+    # --- (restliche Methoden bleiben unverändert) ---
     def show_wunschfrei_context_menu(self, event, user_id, date_str):
         request = get_wunschfrei_request_by_user_and_date(user_id, date_str);
         context_menu = tk.Menu(self.tab, tearoff=0)
@@ -487,6 +577,51 @@ class ShiftPlanActionHandler:
             self._refresh_requests_tab_if_loaded()
         else:
             messagebox.showerror("Fehler", f"Wunschfrei-Anfrage speichern fehlgeschlagen: {msg}", parent=self.tab)
+
+    # --- NEUE FUNKTION ZUM LÖSCHEN DES GESAMTEN MONATSPLANS (Innovation) ---
+    def delete_shift_plan_by_admin(self, year, month):
+        """
+        Fragt den Benutzer, ob der Schichtplan gelöscht werden soll und ruft die
+        DB-Funktion auf, die bestimmte Schichten (X, S, QA, EU) ausschließt.
+        """
+        try:
+            # KORRIGIERT: Holt EXCLUDED_SHIFTS_ON_DELETE nun vom korrekten Funktionsnamen
+            excluded_shifts_str = ", ".join(delete_all_shifts_for_month.EXCLUDED_SHIFTS_ON_DELETE)
+        except AttributeError:
+            # Fallback
+            excluded_shifts_str = "X, S, QA, EU"
+
+            # Verbesserte Bestätigungsmeldung
+        if not messagebox.askyesno(
+                "Schichtplan löschen",
+                f"Wollen Sie alle planbaren Schichten für {month:02d}/{year} wirklich löschen?\n\n"
+                f"ACHTUNG: Genehmigte Schichten/Termine wie Urlaube, Wünsche und fixe Einträge "
+                f"({excluded_shifts_str}) sowie Urlaubs- und Wunschanfragen werden NICHT gelöscht!"
+        ):
+            return
+
+        # Annahme: Die Admin-ID ist in self.app.current_user_id gespeichert
+        # Absicherung für den Fall, dass current_user_id nicht gesetzt ist
+        current_admin_id = getattr(self.app, 'current_user_id', None)
+
+        # KORRIGIERTER AUFRUF: Nutzt den ursprünglichen Funktionsnamen
+        success, message = delete_all_shifts_for_month(year, month, current_admin_id)
+
+        if success:
+            messagebox.showinfo("Erfolg", message)
+            # AKTUALISIERUNG: Ruft die robuste Gitter-Neuerstellung im ShiftPlanTab auf
+            if hasattr(self.tab, 'build_shift_plan_grid'):
+                self.tab.build_shift_plan_grid(year, month)
+            else:
+                # Fallback
+                if hasattr(self.renderer, 'redraw_grid'):
+                    self.renderer.redraw_grid()
+                elif hasattr(self.tab, 'load_shifts_and_update_display'):
+                    self.tab.load_shifts_and_update_display(year, month)
+        else:
+            messagebox.showerror("Fehler", f"Fehler beim Löschen des Plans:\n{message}")
+
+    # --- ENDE NEUE FUNKTION ---
 
     # --- NEUE HILFSFUNKTIONEN ---
     def _get_old_shift_from_ui(self, user_id, date_str):

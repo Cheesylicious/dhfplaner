@@ -45,15 +45,18 @@ class GeneratorScoring:
 
         prev_date_obj = check_date - timedelta(days=1)
         two_days_ago_obj = check_date - timedelta(days=2)
+
+        # Helferfunktionen verwenden
         prev_shift = self.gen.helpers.get_previous_shift(candidate_id_str, prev_date_obj)
         one_day_ago_raw_shift = self.gen.helpers.get_previous_raw_shift(candidate_id_str, prev_date_obj)
         two_days_ago_shift = self.gen.helpers.get_previous_shift(candidate_id_str, two_days_ago_obj)
 
-        # Hundekonflikt (braucht Info über andere Hunde an dem Tag -> komplexer hier, lassen wir erstmal weg für die Simulation)
-        # if user_dog ... : return True
-
         # N -> T/6
         if prev_shift == "N." and check_shift in ["T.", "6"]: return True
+
+        # NEUE HARD RULE: N. -> QA/S Block
+        if prev_shift == "N." and check_shift in ["QA", "S"]: return True
+
         # N-F-T
         if check_shift == "T." and one_day_ago_raw_shift in self.gen.free_shifts_indicators and two_days_ago_shift == "N.": return True
         # Schicht-Ausschluss
@@ -63,10 +66,10 @@ class GeneratorScoring:
         if consecutive_days >= self.gen.HARD_MAX_CONSECUTIVE_SHIFTS: return True
         # Mandatory Rest
         if self.gen.mandatory_rest_days > 0 and consecutive_days == 0 and not self.gen.helpers.check_mandatory_rest(
-            candidate_id_str, check_date): return True
+                candidate_id_str, check_date): return True
         # Max Stunden
         max_hours_check = max_hours_override if max_hours_override is not None else self.gen.MAX_MONTHLY_HOURS
-        if current_hours + hours_for_this_shift > max_hours_check: return True  # Annahme: Stundenlimit könnte relevant sein
+        if current_hours + hours_for_this_shift > max_hours_check: return True
 
         return False  # Keine Regelverletzung gefunden
 
@@ -75,13 +78,12 @@ class GeneratorScoring:
         """
         Simuliert die Zuweisung von 'assigned_shift_today' am 'current_date' und zählt,
         wie viele Schichten der Mitarbeiter in den nächsten CONFLICT_LOOKAHEAD_DAYS
-        aufgrund *neu entstehender* Regelverletzungen (N->T, N-F-T, MaxConsec, MandRest)
+        aufgrund *neu entstehender* Regelverletzungen (N->T, N-F-T, MaxConsec, MandRest, N->QA/S)
         nicht mehr machen könnte.
         """
         conflict_count = 0
 
         # Temporäre Simulation der heutigen Zuweisung im live_shifts_data
-        # WICHTIG: Nur eine Kopie modifizieren oder den Wert nach der Prüfung zurücksetzen!
         original_shift = self.gen.live_shifts_data.get(candidate_id_str, {}).get(current_date.strftime('%Y-%m-%d'))
         if candidate_id_str not in self.gen.live_shifts_data: self.gen.live_shifts_data[
             candidate_id_str] = {}  # Sicherstellen
@@ -95,33 +97,30 @@ class GeneratorScoring:
 
             # Iteriere durch mögliche Schichten an diesem zukünftigen Tag
             for future_shift in self.gen.shifts_to_plan:
-                # Wäre diese Schicht *ohne* die heutige Zuweisung möglich gewesen?
-                # (Dazu müssten wir den originalen Zustand wiederherstellen und prüfen - aufwendig)
-                # Einfacherer Ansatz: Prüfe, ob die Schicht *mit* der heutigen Zuweisung *nicht mehr* möglich ist.
 
                 # Prüfe harte Regeln mit dem *simulierten* heutigen Eintrag
                 if self._check_rule_violation_at_date(candidate_id_str, future_date, future_shift):
                     # Jetzt prüfen wir, ob die Regelverletzung *durch* die heutige Schicht verursacht wurde.
-                    # Das ist der knifflige Teil. Wir prüfen die spezifischen Regeln, die von der *Vortags*schicht abhängen.
 
                     # N->T/6 Konflikt durch heutige Zuweisung?
                     if i == 1 and assigned_shift_today == "N." and future_shift in ["T.", "6"]:
                         conflict_count += 1
-                        # print(f"    [ConflictCheck] User {candidate_id_str}: {assigned_shift_today} @ {current_date} blockiert {future_shift} @ {future_date} (N->T/6)") # DEBUG
                         continue  # Nächste Schicht prüfen
+
+                    # NEUER KONFLIKT: N. -> QA/S durch heutige Zuweisung?
+                    if i == 1 and assigned_shift_today == "N." and future_shift in ["QA", "S"]:
+                        conflict_count += 1
+                        continue
 
                     # N-F-T Konflikt durch heutige Zuweisung?
                     if i == 2 and assigned_shift_today == "N." and future_shift == "T.":
-                        intermediate_date = current_date + timedelta(days=1)
                         intermediate_shift_simulated = self.gen.helpers.get_previous_raw_shift(candidate_id_str,
                                                                                                future_date)  # Holt Schicht von Tag i=1
                         if intermediate_shift_simulated is None or intermediate_shift_simulated in self.gen.free_shifts_indicators:
                             conflict_count += 1
-                            # print(f"    [ConflictCheck] User {candidate_id_str}: {assigned_shift_today} @ {current_date} blockiert {future_shift} @ {future_date} (N-F-T)") # DEBUG
                             continue
 
                     # Max Consecutive / Mandatory Rest Konflikt durch heutige Zuweisung?
-                    # Prüfe, ob die *Verletzung* am future_date spezifisch durch die Verlängerung der Kette *heute* entsteht.
                     consecutive_days_at_future = self.gen.helpers.count_consecutive_shifts(candidate_id_str,
                                                                                            future_date)
                     if consecutive_days_at_future >= self.gen.HARD_MAX_CONSECUTIVE_SHIFTS:
@@ -131,7 +130,6 @@ class GeneratorScoring:
                         if consecutive_days_before_today < self.gen.HARD_MAX_CONSECUTIVE_SHIFTS:
                             # Ja, die heutige Schicht hat die Kette über das Limit gebracht
                             conflict_count += 1
-                            # print(f"    [ConflictCheck] User {candidate_id_str}: {assigned_shift_today} @ {current_date} blockiert {future_shift} @ {future_date} (MaxCons)") # DEBUG
                             continue
 
                     is_resting_violated = (self.gen.mandatory_rest_days > 0 and
@@ -139,7 +137,6 @@ class GeneratorScoring:
                                            self.gen.helpers.check_mandatory_rest(candidate_id_str, future_date))
                     if is_resting_violated:
                         # War die Ruhezeit *vor* heute schon verletzt oder erst durch die heutige Schicht?
-                        # Wenn heute eine Kette >= Limit beendet wurde...
                         consecutive_days_incl_today = self.gen.helpers.count_consecutive_shifts(candidate_id_str,
                                                                                                 current_date + timedelta(
                                                                                                     days=1))
@@ -148,7 +145,6 @@ class GeneratorScoring:
                             if days_since_today <= self.gen.mandatory_rest_days:
                                 # Die heutige Schicht hat die Ruhezeitverletzung verursacht
                                 conflict_count += 1
-                                # print(f"    [ConflictCheck] User {candidate_id_str}: {assigned_shift_today} @ {current_date} blockiert {future_shift} @ {future_date} (Rest)") # DEBUG
                                 continue
 
         # WICHTIG: Simulation zurücksetzen!
@@ -200,9 +196,11 @@ class GeneratorScoring:
         if candidate_id in self.gen.partner_priority_map:
             for prio, partner_id in self.gen.partner_priority_map[candidate_id]:
                 if partner_id in available_candidate_ids:
-                    scores['partner_score'] = prio; break
+                    scores['partner_score'] = prio;
+                    break
                 elif partner_id in assignments_today_by_shift.get(shift_abbrev, set()):
-                    scores['partner_score'] = 100 + prio; break
+                    scores['partner_score'] = 100 + prio;
+                    break
 
         # 4. Isolation Score
         scores['isolation_score'] = candidate.get('is_isolated', False) * self.gen.isolation_score_multiplier
@@ -232,13 +230,10 @@ class GeneratorScoring:
         # 6. NEU: Future Conflict Score
         # Nur berechnen, wenn nicht am Monatsende (da Lookahead sonst sinnlos)
         if (days_in_month - current_date_obj.day) >= 1:
+            # KORREKTUR: Übergibt shift_abbrev als assigned_shift_today
             scores['future_conflict_score'] = self._calculate_future_conflicts(
                 candidate_id_str, current_date_obj, shift_abbrev
             )
-            # Optional: Diesen Score noch gewichten? Z.B. * 10?
-            scores['future_conflict_score'] *= 10  # Beispielgewichtung
-
-        # Lookahead Penalty entfernt
-        # scores['lookahead_penalty'] = 0
+            scores['future_conflict_score'] *= 10
 
         return scores

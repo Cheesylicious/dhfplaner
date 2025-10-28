@@ -14,7 +14,7 @@ from gui.shift_plan_data_manager import ShiftPlanDataManager
 from gui.shift_plan_renderer import ShiftPlanRenderer
 from gui.shift_plan_actions import ShiftPlanActionHandler
 from database.db_shifts import get_ordered_shift_abbrevs, \
-    delete_all_shifts_for_month  # save_shift_entry wird nicht mehr direkt hier gebraucht
+    delete_all_shifts_for_month  # delete_all_shifts_for_month muss für abwärtskompatibilität bleiben, wird aber nicht direkt hier aufgerufen
 from ..dialogs.rejection_reason_dialog import RejectionReasonDialog
 from ..dialogs.generator_settings_window import \
     GeneratorSettingsWindow  # Import des Generator-Einstellungsfensters
@@ -257,24 +257,39 @@ class ShiftPlanTab(ttk.Frame):
             messagebox.showerror("Fehler", "Druckfunktion nicht bereit.", parent=self)
 
     def _on_delete_month(self):
-        # (unverändert)
-        year = self.app.current_display_date.year;
+        """
+        Löscht den Schichtplan nach doppelter Bestätigung.
+        DELEGIERUNG: Leitet den Löschvorgang an den ActionHandler weiter,
+        der die korrekten Argumente (inkl. user_id) an die DB-Funktion übergibt.
+        """
+        year = self.app.current_display_date.year
         month = self.app.current_display_date.month
         month_str = self.month_label_var.get()
-        msg1 = f"Möchten Sie wirklich **ALLE** Schichteinträge für\n\n{month_str}\n\nlöschen?\n\nDiese Aktion kann nicht rückgängig gemacht werden!"
-        if not messagebox.askyesno("WARNUNG: Schichtplan löschen", msg1, icon='warning', parent=self): return
+
+        # Die erste Warnung wird durch den ActionHandler überschrieben,
+        # da dieser die Details der selektiven Löschung kennt. Hier nur die erste Hürde:
+        msg1 = f"Möchten Sie wirklich **ALLE** planbaren Schichteinträge für\n\n{month_str}\n\nlöschen?\n\nDiese Aktion kann nicht rückgängig gemacht werden!"
+        if not messagebox.askyesno("WARNUNG: Schichtplan löschen", msg1, icon='warning', parent=self):
+            return
+
         prompt = f"Um den Löschvorgang für {month_str} zu bestätigen, geben Sie bitte 'LÖSCHEN' in das Feld ein und klicken Sie OK."
         confirmation_text = simpledialog.askstring("Endgültige Bestätigung", prompt, parent=self)
-        if confirmation_text != "LÖSCHEN": messagebox.showinfo("Abgebrochen",
-                                                               "Eingabe war ungültig. Der Löschvorgang wurde abgebrochen.",
-                                                               parent=self); return
+
+        if confirmation_text != "LÖSCHEN":
+            messagebox.showinfo("Abgebrochen",
+                                "Eingabe war ungültig. Der Löschvorgang wurde abgebrochen.",
+                                parent=self)
+            return
+
+        # KORRIGIERTER AUFRUF: Delegation an den ActionHandler
         try:
-            success, message = delete_all_shifts_for_month(year, month)
-            if success:
-                messagebox.showinfo("Erfolg", message, parent=self);
-                self.build_shift_plan_grid(year, month)
-            else:
-                messagebox.showerror("Fehler beim Löschen", message, parent=self)
+            # Der ActionHandler übernimmt nun die Verantwortung für den Aufruf von
+            # delete_all_shifts_for_month(year, month, current_user_id) und die UI-Aktualisierung
+            self.action_handler.delete_shift_plan_by_admin(year, month)
+
+            # Hinweis: Die build_shift_plan_grid(year, month) im Erfolgsfall wird vom ActionHandler
+            # ausgelöst, um Konsistenz zu wahren.
+
         except Exception as e:
             messagebox.showerror("Schwerer Fehler", f"Ein unerwarteter Fehler ist aufgetreten:\n{e}",
                                  parent=self);
@@ -395,8 +410,7 @@ class ShiftPlanTab(ttk.Frame):
             self.build_shift_plan_grid(year, month)
         else:
             messagebox.showerror("Fehler bei Generierung", error_message, parent=self)
-            # Lade den Plan trotzdem neu, um den ursprünglichen Zustand anzuzeigen?
-            # Vorerst: Plan neu laden, um Konsistenz zu wahren.
+            # Lade den Plan trotzdem neu, um Konsistenz zu wahren.
             self.build_shift_plan_grid(year, month)
 
     def build_shift_plan_grid(self, year, month):

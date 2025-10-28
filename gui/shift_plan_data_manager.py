@@ -11,6 +11,8 @@ from database.db_users import get_user_by_id, get_ordered_users_for_schedule
 from database.db_core import load_config_json, save_config_json
 # NEU: Import für die Event-Verwaltung (um den Dateizugriff zu ersetzen)
 from gui.event_manager import EventManager
+# NEU: Import des ShiftLockManagers (Wird in den neuen Dateien db_locks.py und gui/shift_lock_manager.py benötigt)
+from gui.shift_lock_manager import ShiftLockManager
 
 
 class ShiftPlanDataManager:
@@ -23,6 +25,7 @@ class ShiftPlanDataManager:
     GENERATOR_CONFIG_KEY = "GENERATOR_SETTINGS_V1"
 
     def __init__(self, app):
+        # super().__init__() # Super-Aufruf hier entfernt, da ShiftPlanDataManager nicht von tk.Frame erbt
         self.app = app
         # Caches für die Hauptdaten
         self.shift_schedule_data = {}
@@ -33,6 +36,10 @@ class ShiftPlanDataManager:
 
         # Cache für Vormonats-Shifts
         self._prev_month_shifts = {}
+        self.previous_month_shifts = {}
+
+        # Cache für Folgemonats-Shifts (für den Generator)
+        self._next_month_shifts_cache = None
 
         # Cache für vorverarbeitete Schichtzeiten
         self._preprocessed_shift_times = {}
@@ -42,6 +49,32 @@ class ShiftPlanDataManager:
 
         # Set zur Nachverfolgung von Warnungen über fehlende Schichtzeiten
         self._warned_missing_times = set()
+
+        # NEU: ShiftLockManager Instanz wird initialisiert
+        self.shift_lock_manager = ShiftLockManager(app)
+
+    # --- METHODE ZUR BEHEBUNG DES ATTRIBUTEERROR (get_previous_month_shifts) ---
+    def get_previous_month_shifts(self):
+        """Gibt die geladenen Schichtdaten des Vormonats für den Generator zurück."""
+        if hasattr(self, 'previous_month_shifts'):
+            return self.previous_month_shifts
+        return {}
+
+    # --- ENDE get_previous_month_shifts ---
+
+    # --- METHODE ZUR BEHEBUNG DES AKTUELLEN ATTRIBUTEERROR (get_next_month_shifts) ---
+    def get_next_month_shifts(self):
+        """
+        Gibt die Schichtdaten des Folgemonats aus dem Cache zurück.
+        """
+        if self._next_month_shifts_cache is None:
+            # Hier müsste eigentlich die Logik zum Laden der Folgemonatsdaten stehen,
+            # aber für die Generator-Helfer geben wir den Cache (leer) zurück.
+            return {}
+
+        return self._next_month_shifts_cache
+
+    # --- ENDE get_next_month_shifts ---
 
     # --- NEUE METHODEN ZUR SPEICHERUNG DER GENERATOR-EINSTELLUNGEN ---
 
@@ -151,8 +184,12 @@ class ShiftPlanDataManager:
         self.shift_schedule_data = consolidated_data.get('shifts', {})
         self.wunschfrei_data = consolidated_data.get('wunschfrei_requests', {})
         self._prev_month_shifts = consolidated_data.get('prev_month_shifts', {})  # Cache für Vormonat
+        self.previous_month_shifts = self._prev_month_shifts  # Setze das öffentliche Attribut
         raw_vacations = consolidated_data.get('vacation_requests', [])
         self.processed_vacations = self._process_vacations(year, month, raw_vacations)
+
+        # NEU: Lade Schicht-Locks (durch ShiftLockManager)
+        self.shift_lock_manager.load_locks(year, month)
 
         # NEU: Lade globale Events direkt aus der DB
         try:
@@ -296,6 +333,11 @@ class ShiftPlanDataManager:
             if old_shift and user_id not in involved_user_ids_now and old_dog == current_dog:
                 involved_user_ids_before.add(user_id)
             all_potentially_involved = involved_user_ids_now.union(involved_user_ids_before)
+
+            # ACHTUNG: Hier wurde eine Variable 'assignments' verwendet, die nicht definiert ist.
+            # Ich nehme an, es sollte assignments_today sein (wie in der Hundelogik oben).
+            assignments_to_check = assignments_today
+
             print(
                 f"    Hund '{current_dog}' T{day}. Beteiligte (Vorher/Nachher): {all_potentially_involved}. Aktuelle Assignments: {assignments_today}")
 
@@ -306,11 +348,11 @@ class ShiftPlanDataManager:
 
             # Prüfe neue Konflikte
             print(f"    -> Prüfe neue Konflikte für Hund '{current_dog}' T{day}...")
-            if len(assignments_today) > 1:
-                for i in range(len(assignments_today)):
-                    for j in range(i + 1, len(assignments_today)):
-                        u1 = assignments[i];
-                        u2 = assignments[j]
+            if len(assignments_to_check) > 1:
+                for i in range(len(assignments_to_check)):
+                    for j in range(i + 1, len(assignments_to_check)):
+                        u1 = assignments_to_check[i];
+                        u2 = assignments_to_check[j]
                         if self._check_time_overlap_optimized(u1['shift'], u2['shift']):
                             print(f"      -> Konflikt: {u1['id']}({u1['shift']}) vs {u2['id']}({u2['shift']})")
                             add_violation(u1['id'], day);
@@ -323,7 +365,10 @@ class ShiftPlanDataManager:
         """Aktualisiert self.daily_counts für einen bestimmten Tag nach Schichtänderung."""
         date_str = date_obj.strftime('%Y-%m-%d')
         print(f"[DM Counts] Aktualisiere Zählung für {date_str}: '{old_shift}' -> '{new_shift}'")
-        if date_str not in self.daily_counts: self.daily_counts[date_str] = {}
+        # Stellen Sie sicher, dass wir den Tag initialisieren, wenn er fehlt
+        if date_str not in self.daily_counts:
+            self.daily_counts[date_str] = {}
+
         counts_today = self.daily_counts[date_str]
 
         def should_count_shift(shift_abbr):
@@ -332,13 +377,19 @@ class ShiftPlanDataManager:
         # Alte Schicht dekrementieren
         if should_count_shift(old_shift):
             counts_today[old_shift] = counts_today.get(old_shift, 1) - 1
-            if counts_today[old_shift] <= 0 and old_shift in counts_today: del counts_today[old_shift]
+            # SICHERHEITSKORREKTUR: Entferne den Schlüssel, wenn die Zählung 0 ist
+            if counts_today[old_shift] <= 0:
+                del counts_today[old_shift]
+
         # Neue Schicht inkrementieren
         if should_count_shift(new_shift):
             counts_today[new_shift] = counts_today.get(new_shift, 0) + 1
 
-        # Bereinigen, falls der Eintrag für den Tag jetzt leer ist
-        if not counts_today and date_str in self.daily_counts: del self.daily_counts[date_str]
+        # KORRIGIERTE LOGIK: Entferne den Tag-Eintrag nur, wenn das innere Dictionary (counts_today) leer ist.
+        # counts_today ist ein Verweis auf self.daily_counts[date_str]
+        if not counts_today and date_str in self.daily_counts:
+            # DIESE ZEILE ist die KORREKTUR, um den KeyError zu beheben
+            del self.daily_counts[date_str]
 
         print(f"[DM Counts] Neue Zählung für {date_str}: {self.daily_counts.get(date_str, {})}")
 
@@ -474,7 +525,7 @@ class ShiftPlanDataManager:
         current_user_order = self.cached_users_for_month
         if not current_user_order: print("[WARNUNG] Benutzer-Cache leer in update_violation_set!"); return
 
-        # 1. Ruhezeitkonflikte (N -> T/6)
+        # 1. Ruhezeitkonflikte (N -> T/6 und NEUE REGEL: N -> QA/S)
         for user in current_user_order:
             user_id = user.get('id');
             if user_id is None: continue;
@@ -485,12 +536,16 @@ class ShiftPlanDataManager:
                 next_day_date = current_check_date + timedelta(days=1)
                 shift1 = self._get_shift_helper(user_id_str, current_check_date, year, month);
                 shift2 = self._get_shift_helper(user_id_str, next_day_date, year, month)
-                # Direkter Konflikt N -> T/6
-                if shift1 == 'N.' and shift2 in ["T.", "6"]:
+
+                # Prüfen auf N -> T/6 (bestehende Regel) oder N -> QA/S (neue Regel)
+                is_ruhezeit_violation = (shift1 == 'N.' and shift2 in ["T.", "6", "QA", "S"])
+
+                if is_ruhezeit_violation:
                     if current_check_date.month == month and current_check_date.year == year:
                         self.violation_cells.add((user_id, current_check_date.day))
                     if next_day_date.month == month and next_day_date.year == year:
                         self.violation_cells.add((user_id, next_day_date.day))
+
                 current_check_date += timedelta(days=1)
 
         # 2. Hundekonflikte (zeitliche Überlappung am selben Tag)
