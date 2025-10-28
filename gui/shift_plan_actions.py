@@ -214,6 +214,7 @@ class ShiftPlanActionHandler:
 
         # KORRIGIERTE FEHLERPRÜFUNG: Prüft auf None oder 0, um den Fehler abzufangen
         if not admin_id:
+            # Zeige diese Box weiterhin an, da dies ein kritischer Fehler ist
             messagebox.showerror("Fehler", "Admin-ID nicht verfügbar. Bitte melden Sie sich erneut an.",
                                  parent=self.tab)
             return
@@ -221,7 +222,10 @@ class ShiftPlanActionHandler:
         success, message = self.shift_lock_manager.set_lock_status(user_id, date_str, shift_abbrev, is_locked, admin_id)
 
         if success:
-            messagebox.showinfo("Erfolg", message, parent=self.tab)
+            # --- KORREKTUR: Pop-up entfernt ---
+            # messagebox.showinfo("Erfolg", message, parent=self.tab)
+            # --- ENDE KORREKTUR ---
+
             # Führt ein UI-Update durch, um die Lock-Indikatoren anzuzeigen
             try:
                 date_obj = datetime.strptime(date_str, '%Y-%m-%d').date()
@@ -231,7 +235,10 @@ class ShiftPlanActionHandler:
                 print(f"[FEHLER] Fehler bei UI-Update nach Lock-Status-Änderung: {e}")
                 self.tab.refresh_plan()
         else:
-            messagebox.showerror("Fehler", message, parent=self.tab)
+            # --- KORREKTUR: Pop-up durch Konsolen-Log ersetzt ---
+            # messagebox.showerror("Fehler", message, parent=self.tab)
+            print(f"[FEHLER] Schicht sichern/freigeben fehlgeschlagen: {message}")
+            # --- ENDE KORREKTUR ---
 
     def secure_shift(self, user_id, date_str, shift_abbrev):
         """ Sichert die aktuelle Schicht (T., N., 6). """

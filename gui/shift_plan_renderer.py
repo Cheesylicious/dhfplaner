@@ -1,7 +1,7 @@
 # gui/shift_plan_renderer.py
 import tkinter as tk
 from tkinter import ttk, messagebox
-from datetime import date, datetime
+from datetime import date, datetime  # datetime hinzugefügt
 import calendar
 import webbrowser
 import os
@@ -9,6 +9,14 @@ import tempfile
 
 from database.db_shifts import get_ordered_shift_abbrevs
 # get_ordered_users_for_schedule wird hier nicht mehr direkt benötigt
+
+# Import für ToolTip (falls es doch benötigt wird, auskommentiert lassen, wenn nicht)
+# from .tooltip import ToolTip
+
+# Import für ShiftLockManager (wird über data_manager übergeben)
+# (Import hier nicht unbedingt nötig, da die Instanz übergeben wird)
+# from gui.shift_lock_manager import ShiftLockManager
+
 
 class ShiftPlanRenderer:
     """
@@ -33,6 +41,10 @@ class ShiftPlanRenderer:
         self.month = 0
         # Referenz auf die aktuell gerenderte Benutzerliste
         self.users_to_render = []
+
+        # --- NEU: Lock Manager Referenz (wird vom DataManager geholt) ---
+        # Zugriff erfolgt über self.dm.shift_lock_manager
+        # --- ENDE NEU ---
 
 
     def set_plan_grid_frame(self, frame):
@@ -185,17 +197,31 @@ class ShiftPlanRenderer:
                          final_display_text = 'X'
                     # Wenn eine Schicht eingetragen ist, hat diese Vorrang vor alten Anfragen (außer Urlaub)
 
+                # --- KORREKTUR START: Lock-Symbol hinzufügen ---
+                lock_char = ""
+                # Zugriff auf den Lock Manager über den DataManager (self.dm)
+                if hasattr(self.dm, 'shift_lock_manager'):
+                     lock_status = self.dm.shift_lock_manager.get_lock_status(user_id_str, date_str)
+                     if lock_status is not None:
+                         lock_char = "🔒"
+                # Kombiniere Symbol und Text
+                text_with_lock = f"{lock_char}{final_display_text}".strip()
+                # --- KORREKTUR ENDE ---
+
+
                 # --- Widget Erstellung ---
                 frame = tk.Frame(self.plan_grid_frame, bd=1, relief="solid", bg="black") # Standard-Rahmen
                 frame.grid(row=current_row, column=day + 1, sticky="nsew")
-                label = tk.Label(frame, text=final_display_text, font=("Segoe UI", 10), anchor="center")
+                # Verwende text_with_lock statt final_display_text
+                label = tk.Label(frame, text=text_with_lock, font=("Segoe UI", 10), anchor="center")
                 label.pack(expand=True, fill="both", padx=1, pady=1)
 
-                # Farbe direkt anwenden
+                # Farbe direkt anwenden (nutzt final_display_text *ohne* Lock)
                 self.apply_cell_color(user_id, day, current_date_obj, frame, label, final_display_text)
 
                 # Bindings
                 is_admin_request_pending = request_info and request_info[2] == 'admin' and request_info[0] == 'Ausstehend'
+                # Prüfe final_display_text *ohne* Lock für Bindings
                 needs_context_menu = '?' in final_display_text or final_display_text == 'WF' or is_admin_request_pending
                 # Immer Linksklick binden
                 label.bind("<Button-1>", lambda e, uid=user_id, d=day, y=self.year, m=self.month: self.ah.on_grid_cell_click(e, uid, d, y, m))
@@ -303,10 +329,19 @@ class ShiftPlanRenderer:
             elif ("Akzeptiert" in status or "Genehmigt" in status) and requested_shift == 'WF' and not display_text_from_schedule:
                  final_display_text = 'X'
 
-        print(f"  -> Final Display Text: '{final_display_text}'")
-        label.config(text=final_display_text) # Setze den finalen Text (auch wenn leer!)
+        # --- KORREKTUR START: Lock-Symbol hinzufügen ---
+        lock_char = ""
+        if hasattr(self.dm, 'shift_lock_manager'):
+             lock_status = self.dm.shift_lock_manager.get_lock_status(user_id_str, date_str)
+             if lock_status is not None:
+                 lock_char = "🔒"
+        text_with_lock = f"{lock_char}{final_display_text}".strip()
+        # --- KORREKTUR ENDE ---
 
-        # 2. Bindings anpassen
+        print(f"  -> Final Display Text (with lock): '{text_with_lock}'")
+        label.config(text=text_with_lock) # Setze den finalen Text (auch wenn leer!)
+
+        # 2. Bindings anpassen (prüfe final_display_text *ohne* Lock)
         is_admin_request_pending = request_info and request_info[2] == 'admin' and request_info[0] == 'Ausstehend'
         needs_context_menu = '?' in final_display_text or final_display_text == 'WF' or is_admin_request_pending
         current_binding = label.bind("<Button-3>")
@@ -318,7 +353,7 @@ class ShiftPlanRenderer:
              print(f"  -> Binding Button-3 ENTFERNT für '{final_display_text}'")
              label.unbind("<Button-3>")
 
-        # 3. Farbe anwenden (nutzt final_display_text)
+        # 3. Farbe anwenden (nutzt final_display_text *ohne* Lock)
         self.apply_cell_color(user_id, day, date_obj, frame, label, final_display_text)
 
 
@@ -370,14 +405,17 @@ class ShiftPlanRenderer:
                     try:
                         date_obj = date(self.year, self.month, day)
                         # Hole den aktuellen Text aus dem Label für die Farbgebung
-                        current_text = cell_widgets['label'].cget("text")
-                        self.apply_cell_color(user_id, day, date_obj, cell_widgets['frame'], cell_widgets['label'], current_text)
+                        # --- KORREKTUR: Text ohne Lock für Farbgebung holen ---
+                        full_text = cell_widgets['label'].cget("text")
+                        current_text_no_lock = full_text.lstrip("🔒")
+                        # --- ENDE KORREKTUR ---
+                        self.apply_cell_color(user_id, day, date_obj, cell_widgets['frame'], cell_widgets['label'], current_text_no_lock)
                     except ValueError: print(f"[FEHLER] Ungültiges Datum bei Konflikt-Update: {self.year}-{self.month}-{day}")
 
 
     # --- Hilfsfunktionen zum Einfärben ---
-    def apply_cell_color(self, user_id, day, date_obj, frame, label, final_display_text):
-        """Wendet Farbe auf eine einzelne Zelle an, basierend auf dem finalen Text."""
+    def apply_cell_color(self, user_id, day, date_obj, frame, label, final_display_text_no_lock):
+        """Wendet Farbe auf eine einzelne Zelle an, basierend auf dem finalen Text *ohne* Lock-Symbol."""
         user_id_str = str(user_id)
         rules = self.app.staffing_rules.get('Colors', {})
         weekend_bg = rules.get('weekend_bg', "#EAF4FF"); holiday_bg = rules.get('holiday_bg', "#FFD700")
@@ -386,12 +424,8 @@ class ShiftPlanRenderer:
         is_weekend = date_obj.weekday() >= 5; is_holiday = self.app.is_holiday(date_obj)
         date_str = date_obj.strftime('%Y-%m-%d')
 
-        # Normalisiere den *finalen* Text für Schicht-Lookup und Farbfindung
-        # --- KORREKTUR 3 (von 4) ---
-        # .replace("T.", "T").replace("N.", "N") entfernt.
-        shift_abbrev = final_display_text.replace("?", "").replace(" (A)", "").replace("T./N.", "T/N").replace("WF", "X")
-        # --- KORREKTUR ENDE ---
-
+        # Normalisiere den Text *ohne Lock* für Schicht-Lookup und Farbfindung
+        shift_abbrev = final_display_text_no_lock.replace("?", "").replace(" (A)", "").replace("T./N.", "T/N").replace("WF", "X")
 
         shift_data = self.app.shift_types_data.get(shift_abbrev)
         # Statusinformationen aus DM holen (für Rahmen etc.)
@@ -408,11 +442,11 @@ class ShiftPlanRenderer:
             if shift_abbrev in ["U", "X", "EU"]: bg_color = shift_data['color'] # Immer Schichtfarbe
             elif not is_holiday and not is_weekend: bg_color = shift_data['color'] # Nur an normalen Tagen
 
-        # Statusfarben überschreiben (falls relevant für den finalen Text)
-        if final_display_text == "U?": bg_color = pending_color # Urlaub ausstehend
+        # Statusfarben überschreiben (falls relevant für den finalen Text *ohne* Lock)
+        if final_display_text_no_lock == "U?": bg_color = pending_color # Urlaub ausstehend
         elif request_info and request_info[0] == 'Ausstehend': # Wunsch ausstehend
-            # Prüfe, ob der finale Text die Anfrage anzeigt
-            if "?" in final_display_text or final_display_text == "WF":
+            # Prüfe, ob der finale Text *ohne Lock* die Anfrage anzeigt
+            if "?" in final_display_text_no_lock or final_display_text_no_lock == "WF":
                 bg_color = admin_pending_color if request_info[2] == 'admin' else pending_color
 
         # Konfliktprüfung
@@ -424,10 +458,10 @@ class ShiftPlanRenderer:
             bg_color = rules.get('violation_bg', "#FF5555")
             fg_color = "white"
             frame_border_color = "darkred"; frame_border_width = 2
-        # Rahmen nur für *sichtbare* ausstehende Anträge
-        elif final_display_text == "U?":
+        # Rahmen nur für *sichtbare* ausstehende Anträge (prüfe Text *ohne Lock*)
+        elif final_display_text_no_lock == "U?":
              frame_border_color = "orange"; frame_border_width = 2
-        elif request_info and request_info[0] == 'Ausstehend' and ("?" in final_display_text or final_display_text == "WF"):
+        elif request_info and request_info[0] == 'Ausstehend' and ("?" in final_display_text_no_lock or final_display_text_no_lock == "WF"):
              frame_border_color = "purple" if request_info[2] == 'admin' else "orange"; frame_border_width = 2
 
         # Stelle sicher, dass Widgets noch existieren
@@ -550,6 +584,17 @@ class ShiftPlanRenderer:
                      elif ("Akzeptiert" in status or "Genehmigt" in status) and requested_shift == 'WF' and display_text_from_schedule == "&nbsp;":
                           final_display_text = 'X'
 
+                # --- KORREKTUR: Lock-Symbol für Druck hinzufügen ---
+                lock_char_print = ""
+                if hasattr(self.dm, 'shift_lock_manager'):
+                    lock_status_print = self.dm.shift_lock_manager.get_lock_status(user_id_str, date_str)
+                    if lock_status_print is not None:
+                        lock_char_print = "&#128274;" # HTML-Code für Schloss
+                text_with_lock_print = f"{lock_char_print}{final_display_text}".replace("&nbsp;","").strip()
+                if not text_with_lock_print: text_with_lock_print = "&nbsp;" # Sorge dafür, dass leere Zellen &nbsp; bleiben
+                # --- ENDE KORREKTUR ---
+
+
                 # --- KORREKTUR 4 (von 4) ---
                 # .replace("T.", "T").replace("N.", "N") entfernt.
                 shift_abbrev_for_style = final_display_text.replace("&nbsp;", "").replace("?", "").replace("(A)", "").replace("T./N.", "T/N").replace("WF","X")
@@ -575,7 +620,8 @@ class ShiftPlanRenderer:
                          bg_color_style = f' style="background-color: {bg_color}; color: {fg_color};"'
                     if not bg_color_style and shift_abbrev_for_style in self.app.shift_types_data:
                          td_class += f" shift-{shift_abbrev_for_style}"
-                html += f'<td class="{td_class}"{bg_color_style}>{final_display_text}</td>'
+                # Verwende text_with_lock_print im HTML
+                html += f'<td class="{td_class}"{bg_color_style}>{text_with_lock_print}</td>'
             html += f'<td class="hours-col">{total_hours}</td></tr>'
         html += """</tbody></table></body></html>"""
 

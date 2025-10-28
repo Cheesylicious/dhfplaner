@@ -10,7 +10,7 @@ import math
 # Importiere die Helfer-Module
 from database.db_users import get_ordered_users_for_schedule
 from gui.request_lock_manager import RequestLockManager
-from gui.shift_plan_data_manager import ShiftPlanDataManager
+from gui.shift_plan_data_manager import ShiftPlanDataManager # DataManager importiert (war schon da)
 from gui.shift_plan_renderer import ShiftPlanRenderer
 from gui.shift_plan_actions import ShiftPlanActionHandler
 from database.db_shifts import get_ordered_shift_abbrevs, \
@@ -27,17 +27,21 @@ class ShiftPlanTab(ttk.Frame):
         super().__init__(master)
         self.app = app
         # Erstellt die DataManager Instanz, die später übergeben wird
-        self.data_manager = ShiftPlanDataManager(app)
+        self.data_manager = ShiftPlanDataManager(app) # DataManager hier initialisiert
         self.action_handler = ShiftPlanActionHandler(self, app, self, None)
         self.renderer = ShiftPlanRenderer(self, app, self.data_manager, self.action_handler)
         self.action_handler.renderer = self.renderer
         self.grid_widgets = self.renderer.grid_widgets
-        self.violation_cells = self.data_manager.violation_cells
+        # --- KORREKTUR: violation_cells vom DataManager holen ---
+        # self.violation_cells = self.data_manager.violation_cells # Wird jetzt direkt im Renderer geholt
+        # --- ENDE KORREKTUR ---
         self._menu_item_cache = self._prepare_shift_menu_items()
         self.progress_frame = None
         self.progress_bar = None
         self.status_label = None
-        self.generate_24h_var = tk.BooleanVar(value=False)
+        # --- KORREKTUR: generate_24h_var entfernt, da im Generator-Dialog ---
+        # self.generate_24h_var = tk.BooleanVar(value=False)
+        # --- ENDE KORREKTUR ---
         self.setup_ui()
         self.renderer.set_plan_grid_frame(self.plan_grid_frame)
         self.build_shift_plan_grid(self.app.current_display_date.year, self.app.current_display_date.month)
@@ -64,30 +68,43 @@ class ShiftPlanTab(ttk.Frame):
         return prepared_items
 
     def setup_ui(self):
-        # (angepasst: month_label wird klickbar gemacht)
+        # (angepasst: month_label wird klickbar gemacht + Button-Stile)
         main_view_container = ttk.Frame(self, padding="10");
         main_view_container.pack(fill="both", expand=True)
         nav_frame = ttk.Frame(main_view_container);
         nav_frame.pack(fill="x", pady=(0, 10))
         left_nav_frame = ttk.Frame(nav_frame);
         left_nav_frame.pack(side="left")
+
+        # --- Button-Stile definieren ---
+        style = ttk.Style(self)
+        # Rot für Löschen
+        style.configure("Delete.TButton", background="red", foreground="white", font=('Segoe UI', 9, 'bold'))
+        style.map("Delete.TButton", background=[('active', '#CC0000')])
+        # Grün für Generieren
+        style.configure("Generate.TButton", background="green", foreground="white", font=('Segoe UI', 9, 'bold'))
+        style.map("Generate.TButton", background=[('active', '#006400')])
+        # Gelb für Einstellungen (mit schwarzem Text für Lesbarkeit)
+        style.configure("SettingsWarn.TButton", background="gold", foreground="black", font=('Segoe UI', 9, 'bold'))
+        style.map("SettingsWarn.TButton", background=[('active', 'goldenrod')])
+        # --- Ende Stile ---
+
         ttk.Button(left_nav_frame, text="< Voriger Monat", command=self.show_previous_month).pack(side="left")
         ttk.Button(left_nav_frame, text="📄 Drucken", command=self.print_shift_plan).pack(side="left", padx=(20, 5))
-        ttk.Button(left_nav_frame, text="Schichtplan Löschen !!!", command=self._on_delete_month).pack(side="left",
-                                                                                                       padx=5)
+        # Button "Schichtplan Löschen !!!" mit rotem Stil
+        ttk.Button(left_nav_frame, text="Schichtplan Löschen !!!", command=self._on_delete_month, style="Delete.TButton").pack(side="left", padx=5) # Stil hinzugefügt
         ttk.Separator(left_nav_frame, orient='vertical').pack(side='left', fill='y', padx=(10, 5))
 
-        # Schichtplan generieren Button
-        ttk.Button(left_nav_frame, text="Schichtplan generieren", command=self._on_generate_plan).pack(side="left",
-                                                                                                       padx=5)
+        # Button "Schichtplan generieren" mit grünem Stil
+        ttk.Button(left_nav_frame, text="Schichtplan generieren", command=self._on_generate_plan, style="Generate.TButton").pack(side="left", padx=5) # Stil hinzugefügt
 
-        # Planungsassistent-Einstellungen Button
-        ttk.Button(left_nav_frame, text="Planungsassistent-Einstellungen", command=self._open_generator_settings).pack(
-            side="left", padx=5)
+        # Button "Planungsassistent-Einstellungen" mit gelbem Stil
+        ttk.Button(left_nav_frame, text="Planungsassistent-Einstellungen", command=self._open_generator_settings, style="SettingsWarn.TButton").pack(side="left", padx=5) # Stil hinzugefügt
 
-        # 24er Checkbox (besteht weiterhin an dieser Stelle)
-        ttk.Checkbutton(left_nav_frame, text="24er?", variable=self.generate_24h_var, state="disabled").pack(
-            side="left")
+        # --- KORREKTUR: 24er Checkbox entfernt ---
+        # ttk.Checkbutton(left_nav_frame, text="24er?", variable=self.generate_24h_var, state="disabled").pack(
+        #     side="left")
+        # --- ENDE KORREKTUR ---
 
         self.month_label_var = tk.StringVar()
         month_label_frame = ttk.Frame(nav_frame);

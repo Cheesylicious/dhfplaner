@@ -74,6 +74,13 @@ class MainAdminWindow(tk.Toplevel):
         self.app = app  # Die Haupt-Applikationsinstanz
         self.user_data = user_data # HIER WIRD ES GESPEICHERT
 
+        # --- KORREKTUR: Setze die user_id als direktes Attribut ---
+        # Andere Module (z.B. ShiftPlanActionHandler)
+        # erwarten self.app.user_id oder self.app.current_user_id.
+        self.user_id = user_data.get('id')
+        self.current_user_id = user_data.get('id')
+        # --- ENDE KORREKTUR ---
+
         full_name = f"{self.user_data['vorname']} {self.user_data['name']}".strip()
         self.title(f"Planer - Angemeldet als {full_name} (Admin)")
         self.attributes('-fullscreen', True)

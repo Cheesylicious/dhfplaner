@@ -142,7 +142,9 @@ class ShiftPlanDataManager:
 
         if shift is None and is_previous_month:
             # Vormonat-Cache nutzen
+            # --- KORREKTUR: Zugriff auf _prev_month_shifts statt previous_month_shifts ---
             shift = self._prev_month_shifts.get(user_id_str, {}).get(date_str, "")
+            # --- ENDE KORREKTUR ---
         elif shift is None:
             # Kein Eintrag für das Datum gefunden (weder aktuell noch Vormonat)
             shift = ""
@@ -169,7 +171,18 @@ class ShiftPlanDataManager:
         print(
             f"[DM Load] {len(self.cached_users_for_month)} Benutzer für {year}-{month} geladen (Stichtag: {current_date_for_archive_check}).")
 
-        update_progress(10, "Lade alle Monatsdaten in einem Durchgang (DB-Optimierung)...")
+        # --- KORREKTUR: Locks *hier* laden (war schon in der vorherigen Version drin, bleibt) ---
+        update_progress(10, "Lade Schichtsicherungen...")
+        try:
+            # Rufe load_locks im ShiftLockManager auf, um den Cache zu aktualisieren
+            self.shift_lock_manager.load_locks(year, month)
+            print("[DM] Schichtsicherungen (Locks) geladen/aktualisiert.")
+        except Exception as e:
+            print(f"[FEHLER][DM] Laden der Schichtsicherungen fehlgeschlagen: {e}")
+            # Optional: Hier Fehler behandeln oder weitermachen
+        # --- ENDE KORREKTUR ---
+
+        update_progress(15, "Lade alle Monatsdaten in einem Durchgang (DB-Optimierung)...") # Prozent angepasst
         # Konsolidierte Daten aus der DB holen
         consolidated_data = get_consolidated_month_data(year, month)
         if consolidated_data is None:
@@ -188,20 +201,21 @@ class ShiftPlanDataManager:
         raw_vacations = consolidated_data.get('vacation_requests', [])
         self.processed_vacations = self._process_vacations(year, month, raw_vacations)
 
-        # NEU: Lade Schicht-Locks (durch ShiftLockManager)
-        self.shift_lock_manager.load_locks(year, month)
-
         # NEU: Lade globale Events direkt aus der DB
         try:
             # Stellt sicher, dass die App die Events für das Jahr geladen hat.
+            # --- KORREKTUR: Zugriff über self.app ---
             self.app.global_events_data = EventManager.get_events_for_year(year)
+            # --- ENDE KORREKTUR ---
             print(f"[DM Load] Globale Events für {year} aus Datenbank geladen.")
         except Exception as e:
             print(f"[FEHLER] Fehler beim Laden der globalen Events aus DB: {e}")
             # Wichtig: Fülle mit Leer-Dict, um Folgefehler in der App-Logik zu vermeiden
+            # --- KORREKTUR: Zugriff über self.app ---
             self.app.global_events_data = {}
+            # --- ENDE KORREKTUR ---
 
-            # Neuberechnung der Tageszählungen (daily_counts) aus den gerade geladenen Schichtdaten
+        # Neuberechnung der Tageszählungen (daily_counts) aus den gerade geladenen Schichtdaten
         print("[DM Load] Neuberechnung der Tageszählungen (daily_counts) aus Schichtdaten...")
         self.daily_counts.clear()  # Alte Zählungen löschen
 
