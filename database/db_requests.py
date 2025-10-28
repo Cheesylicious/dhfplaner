@@ -251,10 +251,10 @@ def approve_vacation_request(request_id, admin_id):
         while current_date <= end_date_obj:
             date_str = current_date.strftime('%Y-%m-%d')
             cursor.execute("""
-                INSERT INTO shift_schedule (user_id, date, shift_abbreviation)
+                INSERT INTO shift_schedule (user_id, shift_date, shift_abbrev)
                 VALUES (%s, %s, 'U')
-                ON DUPLICATE KEY UPDATE shift_abbreviation = 'U'
-            """, (user_id, date_str)) # `date` statt `shift_date`
+                ON DUPLICATE KEY UPDATE shift_abbrev = 'U'
+            """, (user_id, date_str)) # Korrigiert: shift_date und shift_abbrev für shift_schedule
             current_date += timedelta(days=1)
 
         # Logging im Stil der Originaldatei
@@ -312,7 +312,7 @@ def cancel_vacation_request(request_id, admin_id):
         # 'U'-Einträge im Schichtplan löschen
         current_date = start_date_obj
         while current_date <= end_date_obj:
-            cursor.execute("DELETE FROM shift_schedule WHERE user_id = %s AND date = %s AND shift_abbreviation = 'U'", # `date` statt `shift_date`
+            cursor.execute("DELETE FROM shift_schedule WHERE user_id = %s AND shift_date = %s AND shift_abbrev = 'U'", # Korrigiert: shift_date und shift_abbrev
                            (user_id, current_date.strftime('%Y-%m-%d')))
             current_date += timedelta(days=1)
 
@@ -461,21 +461,21 @@ def submit_user_request(user_id, request_date_str, requested_shift=None):
         shift_to_store = "WF" if requested_shift is None else requested_shift
 
         # ON DUPLICATE KEY UPDATE Logik aus Original übernommen
+        # KORREKTUR: Entferne 'timestamp' aus INSERT und UPDATE
         query = """
-            INSERT INTO wunschfrei_requests (user_id, request_date, requested_shift, status, notified, rejection_reason, requested_by, timestamp)
-            VALUES (%s, %s, %s, 'Ausstehend', 0, NULL, 'user', %s)
+            INSERT INTO wunschfrei_requests (user_id, request_date, requested_shift, status, notified, rejection_reason, requested_by)
+            VALUES (%s, %s, %s, 'Ausstehend', 0, NULL, 'user')
             ON DUPLICATE KEY UPDATE
                 requested_shift = VALUES(requested_shift),
                 status = 'Ausstehend',
                 notified = 0,
                 rejection_reason = NULL,
-                requested_by = 'user',
-                timestamp = VALUES(timestamp)
+                requested_by = 'user'
         """
-        current_timestamp = datetime.now()
-        cursor.execute(query, (user_id, request_date_str, shift_to_store, current_timestamp))
+        # Parameter: (user_id, request_date_str, shift_to_store)
+        cursor.execute(query, (user_id, request_date_str, shift_to_store))
         conn.commit()
-        # Logging (Admin Benachrichtigung im Original anscheinend nicht hier?)
+        # Logging
         _log_activity(cursor, user_id, "WUNSCHFREI_EINGEREICHT", f"User {user_id} hat Wunsch '{shift_to_store}' für {request_date_str} eingereicht/aktualisiert.")
         return True, "Anfrage erfolgreich gestellt oder aktualisiert."
     except mysql.connector.Error as e:
@@ -496,19 +496,19 @@ def admin_submit_request(user_id, request_date_str, requested_shift):
     try:
         cursor = conn.cursor()
         # ON DUPLICATE KEY UPDATE Logik aus Original übernommen
+        # KORREKTUR: Entferne 'timestamp' aus INSERT und UPDATE
         query = """
-            INSERT INTO wunschfrei_requests (user_id, request_date, requested_shift, status, requested_by, notified, rejection_reason, timestamp)
-            VALUES (%s, %s, %s, 'Ausstehend', 'admin', 0, NULL, %s)
+            INSERT INTO wunschfrei_requests (user_id, request_date, requested_shift, status, requested_by, notified, rejection_reason)
+            VALUES (%s, %s, %s, 'Ausstehend', 'admin', 0, NULL)
             ON DUPLICATE KEY UPDATE
                 requested_shift = VALUES(requested_shift),
                 status = 'Ausstehend',
                 requested_by = 'admin',
                 notified = 0,
-                rejection_reason = NULL,
-                timestamp = VALUES(timestamp)
+                rejection_reason = NULL
         """
-        current_timestamp = datetime.now()
-        cursor.execute(query, (user_id, request_date_str, requested_shift, current_timestamp))
+        # Parameter: (user_id, request_date_str, requested_shift)
+        cursor.execute(query, (user_id, request_date_str, requested_shift))
         conn.commit()
         # Logging
         _log_activity(cursor, None, "ADMIN_WUNSCHFREI_GESENDET", f"Admin hat Wunsch '{requested_shift}' für User {user_id} am {request_date_str} gesendet/aktualisiert.")
@@ -603,17 +603,16 @@ def withdraw_wunschfrei_request(request_id, user_id):
 
         # Wenn genehmigt/akzeptiert, auch aus Schichtplan löschen
         shift_to_delete = None
-        if request_data['status'] == 'Akzeptiert von Admin' or request_data['status'] == 'Akzeptiert von Benutzer':
-            shift_to_delete = 'X' # Annahme: WF wurde als X eingetragen
-        elif request_data['status'] == 'Genehmigt': # Sollte nicht vorkommen? Aber zur Sicherheit
-             shift_to_delete = request_data['requested_shift']
+        if request_data['status'] == 'Akzeptiert von Admin' or request_data['status'] == 'Akzeptiert von Benutzer' or request_data['status'] == 'Genehmigt':
+            shift_to_delete = 'X' if request_data['requested_shift'] == 'WF' else request_data['requested_shift']
 
         if shift_to_delete:
-            cursor.execute("DELETE FROM shift_schedule WHERE user_id = %s AND date = %s AND shift_abbreviation = %s", # `date` statt `shift_date`
+            # Korrigiert: Nutze korrekte Spaltennamen für shift_schedule
+            cursor.execute("DELETE FROM shift_schedule WHERE user_id = %s AND shift_date = %s AND shift_abbrev = %s",
                            (user_id, date_sql_format, shift_to_delete))
             details = f"Benutzer '{user_name}' hat akzeptierten/genehmigten Antrag (ID: {request_id}, Schicht: {shift_to_delete}) für {date_formatted} zurückgezogen. Schicht entfernt."
             _log_activity(cursor, user_id, "ANTRAG_AKZEPTIERT_ZURÜCKGEZOGEN", details)
-            _create_admin_notification(cursor, details) # Admin informieren
+            _create_admin_notification(details) # Admin informieren
             msg = "Akzeptierter/Genehmigter Antrag wurde zurückgezogen und Schicht entfernt."
         else:
             # Antrag war 'Ausstehend' oder 'Abgelehnt' etc.

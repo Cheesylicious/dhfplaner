@@ -1,7 +1,8 @@
 # database/db_admin.py
 from datetime import datetime
 # --- ANGEPASSTE IMPORTE ---
-from .db_core import create_connection, hash_password, _create_admin_notification, get_vacation_days_for_tenure
+from .db_core import create_connection, hash_password, _create_admin_notification, get_vacation_days_for_tenure, \
+    _log_activity
 # --- ENDE ANPASSUNG ---
 import mysql.connector
 
@@ -69,18 +70,28 @@ def is_month_locked(year, month):
             conn.close()
 
 
-def admin_reset_password(user_id, new_password):
+def admin_reset_password(user_id, new_password, admin_id):
     conn = create_connection()
     if conn is None: return False, "Keine Datenbankverbindung."
     try:
         cursor = conn.cursor()
+
+        cursor.execute("SELECT vorname, name FROM users WHERE id = %s", (user_id,))
+        user_data = cursor.fetchone()
+        user_fullname = f"{user_data[0]} {user_data[1]}" if user_data else f"ID {user_id}"
+
         cursor.execute(
             "UPDATE users SET password_hash = %s, password_changed = 0 WHERE id = %s",
             (hash_password(new_password), user_id)
         )
+
+        _log_activity(cursor, admin_id, 'USER_PASSWORD_RESET',
+                      f'Passwort von Benutzer {user_fullname} (ID: {user_id}) wurde durch Admin {admin_id} zurückgesetzt.')
+
         conn.commit()
-        return True, "Passwort wurde zurückgesetzt. Der Benutzer muss es beim nächsten Login ändern."
+        return True, f"Passwort für {user_fullname} wurde zurückgesetzt. Der Benutzer muss es beim nächsten Login ändern."
     except mysql.connector.Error as e:
+        conn.rollback()
         return False, f"Datenbankfehler: {e}"
     finally:
         if conn and conn.is_connected():
@@ -118,44 +129,58 @@ def mark_admin_notifications_as_read(notification_ids):
             conn.close()
 
 
-# --- HIER IST DIE KORREKTUR ---
-def create_user_by_admin(data):
-    """Erstellt einen neuen Benutzer durch einen Admin und gibt (Erfolg, Nachricht) zurück."""
+# --- HIER IST DIE KORRIGIERTE FUNKTION ---
+def create_user_by_admin(data, admin_id):
+    """
+    Erstellt einen neuen Benutzer durch einen Admin, setzt is_approved=1 und
+    führt die Urlaubsanspruchsberechnung durch.
+    """
     conn = create_connection()
     if conn is None:
         return False, "Keine Datenbankverbindung."
     try:
         cursor = conn.cursor()
 
-        # --- NEUE LOGIK FÜR URLAUBSBERECHNUNG ---
+        # --- URLAUBSBERECHNUNG ---
         entry_date_str = data.get('entry_date')
-
-        # Rufe die Standard-Urlaubstage (Basiswert, z.B. 30) ODER den berechneten Wert
-        # data.get('urlaub_gesamt') wird nur als Fallback verwendet, falls manuell eingegeben,
-        # aber die Logik sollte jetzt die Regeln verwenden.
         default_days = 30
         try:
-            # Versuche, den manuell eingegebenen Wert zu verwenden, falls vorhanden
             default_days = int(data.get('urlaub_gesamt', 30))
         except (ValueError, TypeError):
-            default_days = 30  # Fallback
+            default_days = 30
 
-        # Berechne die Tage basierend auf dem Eintrittsdatum und den Regeln
-        # Die Funktion get_vacation_days_for_tenure nutzt default_days als Fallback
         urlaub_gesamt = get_vacation_days_for_tenure(entry_date_str, default_days)
-        # --- ENDE NEUE LOGIK ---
+        # --- ENDE URLAUBSBERECHNUNG ---
 
+        user_fullname = f"{data['vorname']} {data['name']}"
+
+        # Erweitertes INSERT-Statement zur Aufnahme aller benötigten Felder inkl. Status-Flags
         cursor.execute(
-            "INSERT INTO users (vorname, name, password_hash, role, geburtstag, telefon, diensthund, urlaub_gesamt, urlaub_rest, entry_date) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
-            (data['vorname'], data['name'], hash_password(data['password']), data['role'], data.get('geburtstag', ''),
-             data.get('telefon', ''), data.get('diensthund', ''), urlaub_gesamt, urlaub_gesamt,
-             # urlaub_rest = urlaub_gesamt
-             entry_date_str))
+            """INSERT INTO users (vorname, name, password_hash, role, geburtstag, telefon, diensthund,
+                                  urlaub_gesamt, urlaub_rest, entry_date, is_approved, is_archived,
+                                  password_changed, has_seen_tutorial)
+               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+            (data['vorname'], data['name'], hash_password(data['password']), data['role'],
+             data.get('geburtstag', None), data.get('telefon', None), data.get('diensthund', None),
+             urlaub_gesamt, urlaub_gesamt, entry_date_str,
+             1, 0,  # is_approved=1, is_archived=0 (Benutzer ist freigeschaltet und aktiv)
+             data.get('password_changed', 0),  # Aus GUI-Daten
+             data.get('has_seen_tutorial', 0))  # Aus GUI-Daten
+        )
+
+        user_id = cursor.lastrowid
+
+        _log_activity(cursor, admin_id, 'USER_CREATION',
+                      f'Benutzer {user_fullname} (ID: {user_id}) wurde durch Admin {admin_id} erstellt.')
+        _create_admin_notification(cursor, f"Neuer Benutzer {user_fullname} wurde durch Admin {admin_id} angelegt.")
+
         conn.commit()
-        return True, "Mitarbeiter erfolgreich hinzugefügt."
+        return True, f"Mitarbeiter {user_fullname} erfolgreich hinzugefügt und freigeschaltet."
     except mysql.connector.IntegrityError:
+        conn.rollback()
         return False, "Ein Mitarbeiter mit diesem Namen existiert bereits."
     except Exception as e:
+        conn.rollback()
         print(f"Error in create_user_by_admin: {e}")
         return False, f"Ein unerwarteter Datenbankfehler ist aufgetreten: {e}"
     finally:

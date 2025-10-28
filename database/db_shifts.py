@@ -2,7 +2,8 @@
 import calendar
 # import json # Nicht mehr benötigt
 from datetime import date, datetime, timedelta
-from .db_core import create_connection
+# ANPASSUNG: _log_activity zu Imports hinzugefügt
+from .db_core import create_connection, _log_activity
 import mysql.connector
 # import os # Nicht mehr benötigt
 
@@ -11,6 +12,9 @@ from gui.event_manager import EventManager
 
 _SHIFT_TYPES_CACHE = None
 _SHIFT_ORDER_CACHE = None
+
+# NEU: Konstante für auszuschließende Schichten bei einer Planlöschung
+EXCLUDED_SHIFTS_ON_DELETE = ["X", "S", "QA", "EU", "WF"]
 
 
 def clear_shift_types_cache():
@@ -39,11 +43,8 @@ def _check_for_event_conflict_db(date_str, user_id, shift_abbrev):
         event_type = events_this_year_by_str.get(date_str)
 
         # Logik zur Konfliktprüfung:
-        # Beispiel: Wenn ein Event existiert und es sich um "Ausbildung" oder "Schießen" handelt,
-        # darf keine normale Arbeitsschicht zugewiesen werden.
-        if event_type and event_type in ["Ausbildung", "Schießen"]:  # Passen Sie diese Typen ggf. an
+        if event_type and event_type in ["Ausbildung", "Schießen"]:
             # Prüfe, ob die zuzuweisende Schicht eine Arbeitsschicht ist
-            # (passen Sie diese Liste ggf. an Ihre Definition von "Frei" an)
             if shift_abbrev not in ["", "FREI", "U", "X", "EU", "WF", "U?"]:
                 print(
                     f"[INFO] Event-Konflikt verhindert: User {user_id} kann Schicht '{shift_abbrev}' am Event-Tag '{date_str}' ({event_type}) nicht übernehmen.")
@@ -51,21 +52,18 @@ def _check_for_event_conflict_db(date_str, user_id, shift_abbrev):
 
     except ValueError:
         print(f"[WARNUNG] Ungültiges Datumsformat bei Event-Prüfung: {date_str}")
-        return False  # Bei ungültigem Datum keinen Konflikt annehmen
+        return False
     except Exception as e:
-        # Fängt andere Fehler ab (z.B. DB-Verbindungsprobleme im EventManager)
         print(f"[FEHLER] Unerwarteter Fehler bei der Event-Konfliktprüfung (DB): {e}")
-        # Im Zweifel keinen Konflikt melden, um das Speichern nicht unnötig zu blockieren
         return False
 
-    return False  # Kein Konflikt gefunden
+    return False
 
 
 # --- ENDE NEUE Hilfsfunktion ---
 
 
-# --- get_consolidated_month_data, save_shift_entry, get_shifts_for_month, get_daily_shift_counts_for_month ---
-# --- bleiben unverändert ---
+# --- get_consolidated_month_data ---
 def get_consolidated_month_data(year, month):
     conn = create_connection()
     if conn is None: return None
@@ -118,7 +116,6 @@ def get_consolidated_month_data(year, month):
 def save_shift_entry(user_id, shift_date_str, shift_abbrev, keep_request_record=False):
     """Speichert oder aktualisiert einen einzelnen Schichteintrag."""
 
-    # KORRIGIERT: Ruft die DB-basierte Event-Konfliktprüfung auf
     if _check_for_event_conflict_db(shift_date_str, user_id, shift_abbrev):
         return False, f"Konflikt: An diesem Tag findet ein Event statt, das die Schicht '{shift_abbrev}' verhindert."
 
@@ -134,14 +131,6 @@ def save_shift_entry(user_id, shift_date_str, shift_abbrev, keep_request_record=
                 "INSERT INTO shift_schedule (user_id, shift_date, shift_abbrev) VALUES (%s, %s, %s) ON DUPLICATE KEY UPDATE shift_abbrev = %s",
                 (user_id, shift_date_str, shift_abbrev, shift_abbrev))
 
-        # --- ENTFERNT: Veralteter Codeblock zum Laden von events_config.json ---
-        # Der folgende try-except-Block wurde entfernt, da die Prüfung jetzt
-        # durch _check_for_event_conflict_db() am Anfang der Funktion erfolgt.
-        # Das Aktualisieren von last_ausbildung/last_schiessen muss ggf.
-        # an anderer Stelle (z.B. im Event-Management-Dialog) erfolgen,
-        # da save_shift_entry nicht mehr weiß, ob ein Event stattfindet.
-        # --- ENDE ENTFERNT ---
-
         if not keep_request_record and shift_abbrev != 'X': cursor.execute(
             "DELETE FROM wunschfrei_requests WHERE user_id = %s AND request_date = %s", (user_id, shift_date_str))
         conn.commit()
@@ -154,7 +143,6 @@ def save_shift_entry(user_id, shift_date_str, shift_abbrev, keep_request_record=
 
 
 def get_shifts_for_month(year, month):
-    # (Code unverändert)
     conn = create_connection()
     if conn is None: return {}
     try:
@@ -178,7 +166,6 @@ def get_shifts_for_month(year, month):
 
 
 def get_daily_shift_counts_for_month(year, month):
-    # (Code unverändert)
     conn = create_connection()
     if conn is None: return {}
     try:
@@ -201,8 +188,6 @@ def get_daily_shift_counts_for_month(year, month):
         if conn and conn.is_connected(): cursor.close(); conn.close()
 
 
-# --- get_all_shift_types, add_shift_type, update_shift_type, delete_shift_type ---
-# --- bleiben unverändert ---
 def get_all_shift_types():
     global _SHIFT_TYPES_CACHE
     if _SHIFT_TYPES_CACHE is not None: return _SHIFT_TYPES_CACHE
@@ -316,9 +301,7 @@ def get_ordered_shift_abbrevs(include_hidden=False):
         else:
             all_shift_types_map = {st['abbreviation']: st for st in all_shift_types_list}
 
-        # --- KORREKTUR: check_for_understaffing NICHT mehr aus shift_order holen ---
         cursor.execute("SELECT abbreviation, sort_order, is_visible FROM shift_order")
-        # --- ENDE KORREKTUR ---
         order_map = {row['abbreviation']: row for row in cursor.fetchall()}
 
         ordered_list = []
@@ -343,12 +326,10 @@ def get_ordered_shift_abbrevs(include_hidden=False):
                 # Nur sort_order und is_visible aus shift_order übernehmen
                 item['sort_order'] = order_data.get('sort_order', 999999)
                 item['is_visible'] = order_data.get('is_visible', 1)
-                # --- KORREKTUR: check_for_understaffing wird NICHT mehr überschrieben ---
             else:
                 # Nicht in shift_order, setze Defaults
                 item['sort_order'] = 999999
                 item['is_visible'] = 1
-                # check_for_understaffing bleibt der Wert aus shift_types (oder 0 falls harte Regel)
 
             # Korrigiere Name für harte Regeln
             if abbrev in ['T.', '6', 'N.', '24'] and item['name'] == f"({abbrev})":
@@ -389,24 +370,20 @@ def save_shift_order(order_data_list):
         if order_data_list:
             processed_list = []
             for item_tuple in order_data_list:
-                # --- KORREKTUR: Erwartet jetzt 3 Elemente ---
                 if len(item_tuple) == 3:
                     abbrev, sort_order, is_visible = item_tuple
                     is_visible_int = 1 if is_visible else 0
-                    # --- KORREKTUR: Tupel für Query hat nur noch 3 Elemente ---
                     processed_list.append((abbrev, sort_order, is_visible_int))
                 else:
                     print(
                         f"[WARNUNG] Ungültiges Tupel in save_shift_order ignoriert (erwartet 3 Elemente): {item_tuple}")
 
             if processed_list:
-                # --- KORREKTUR: Query angepasst (ohne check_for_understaffing) ---
                 query = """
                         INSERT INTO shift_order (abbreviation, sort_order, is_visible)
                         VALUES (%s, %s, %s) \
                         """
                 cursor.executemany(query, processed_list)
-            # --- ENDE KORREKTUREN ---
 
         conn.commit()
         clear_shift_order_cache()
@@ -425,10 +402,11 @@ def save_shift_order(order_data_list):
             conn.close()
 
 
-# --- NEUE FUNKTION ---
-def delete_all_shifts_for_month(year, month):
+# --- KORRIGIERTE UND ZURÜCKBENANNTE FUNKTION ---
+def delete_all_shifts_for_month(year, month, current_user_id):
     """
-    Löscht alle Einträge aus 'shift_schedule' für einen bestimmten Monat und ein bestimmtes Jahr.
+    Löscht alle planbaren Schicht-Einträge aus 'shift_schedule' für einen Monat und ein Jahr,
+    schließt jedoch bestimmte genehmigte Kürzel (X, S, QA, EU) aus.
     """
     conn = create_connection()
     if conn is None:
@@ -437,17 +415,33 @@ def delete_all_shifts_for_month(year, month):
     try:
         cursor = conn.cursor()
 
-        # SQL-Anweisung zum Löschen
-        query = "DELETE FROM shift_schedule WHERE YEAR(shift_date) = %s AND MONTH(shift_date) = %s"
-        cursor.execute(query, (year, month))
+        # INNOVATIV: Verwendung von Platzhaltern für die dynamische Liste
+        placeholders = ', '.join(['%s'] * len(EXCLUDED_SHIFTS_ON_DELETE))
+
+        # SQL-Anweisung zum Löschen, die die ausgeschlossenen Kürzel ignoriert
+        query = f"""
+            DELETE FROM shift_schedule 
+            WHERE YEAR(shift_date) = %s 
+              AND MONTH(shift_date) = %s
+              AND shift_abbrev NOT IN ({placeholders})
+        """
+
+        # Die Werte für die Query: (year, month, 'X', 'S', 'QA', 'EU')
+        query_values = (year, month,) + tuple(EXCLUDED_SHIFTS_ON_DELETE)
+
+        cursor.execute(query, query_values)
 
         deleted_rows = cursor.rowcount
-        conn.commit()
 
         month_str = f"{year:04d}-{month:02d}"
-        print(f"Schichtplan für {month_str} gelöscht. {deleted_rows} Einträge entfernt.")
 
-        return True, f"Schichtplan für {month_str} erfolgreich gelöscht. {deleted_rows} Einträge entfernt."
+        # Protokollierung mit Admin-ID
+        log_msg = f'Plan für {month_str} (ohne {", ".join(EXCLUDED_SHIFTS_ON_DELETE)}) gelöscht. {deleted_rows} Zeilen entfernt.'
+        _log_activity(cursor, current_user_id, 'SHIFTPLAN_DELETE', log_msg)
+
+        conn.commit()
+
+        return True, f"Schichtplan für {month_str} erfolgreich gelöscht. {deleted_rows} Einträge wurden entfernt (Ausgenommen: {', '.join(EXCLUDED_SHIFTS_ON_DELETE)})."
 
     except mysql.connector.Error as e:
         conn.rollback()
@@ -456,9 +450,9 @@ def delete_all_shifts_for_month(year, month):
     except Exception as e:
         conn.rollback()
         print(f"Allgemeiner Fehler beim Löschen des Schichtplans für {year}-{month}: {e}")
-        return False, f"Allgemeiner Fehler: {e}"
+        return False, f"Unerwarteter Fehler beim Löschen: {e}"
     finally:
         if conn and conn.is_connected():
             cursor.close()
             conn.close()
-# --- ENDE NEUE FUNKTION ---
+# --- ENDE KORRIGIERTE FUNKTION ---
