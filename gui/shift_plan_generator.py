@@ -41,6 +41,9 @@ DEFAULT_WUNSCHFREI_RESPECT = 75
 DEFAULT_GENERATOR_FILL_ROUNDS = 3
 LOOKAHEAD_PENALTY_SCORE = 500
 
+# NEU: Strafe für die Zuweisung mit einem Konflikt-Partner
+AVOID_PARTNER_PENALTY_SCORE = 10000
+
 
 class ShiftPlanGenerator:
     """
@@ -86,6 +89,9 @@ class ShiftPlanGenerator:
         self.CRITICAL_LOOKAHEAD_DAYS = CRITICAL_LOOKAHEAD_DAYS
         self.CRITICAL_BUFFER = CRITICAL_BUFFER
         self.LOOKAHEAD_PENALTY_SCORE = LOOKAHEAD_PENALTY_SCORE
+
+        # NEU: Strafe als Attribut
+        self.AVOID_PARTNER_PENALTY_SCORE = AVOID_PARTNER_PENALTY_SCORE
 
         # Generator-Konfiguration laden
         self.generator_config = {}
@@ -136,6 +142,21 @@ class ShiftPlanGenerator:
             except (ValueError, KeyError, TypeError):
                 continue
         for user_id in self.partner_priority_map: self.partner_priority_map[user_id].sort(key=lambda x: x[0])
+
+        # NEU: Zu vermeidende Partner
+        self.avoid_partners_list = self.generator_config.get('avoid_partners_prioritized', [])
+        self.avoid_priority_map = defaultdict(list)
+        for entry in self.avoid_partners_list:
+            try:
+                id_a, id_b, prio = int(entry['id_a']), int(entry['id_b']), int(entry['priority']);
+                # Prio 1 = Höchste Vermeidung
+                self.avoid_priority_map[id_a].append((prio, id_b));
+                self.avoid_priority_map[id_b].append(
+                    (prio, id_a))
+            except (ValueError, KeyError, TypeError):
+                continue
+        for user_id in self.avoid_priority_map: self.avoid_priority_map[user_id].sort(key=lambda x: x[0])
+        # ENDE NEU
 
         # Instanzen der ausgelagerten Logik
         self.helpers = GeneratorHelpers(self)
@@ -385,11 +406,26 @@ class ShiftPlanGenerator:
                         user_id_str, critical_date_obj): skip_reason = "Rest"
                 max_hours_check = max_hours_override if max_hours_override is not None else self.MAX_MONTHLY_HOURS
                 if not skip_reason and current_hours + hours_for_this_shift > max_hours_check: skip_reason = "MaxHrs"
+
+                # NEU: Harte Prüfung auf Vermeidungs-Partner (wird im Scoring behandelt,
+                # aber sicherheitshalber auch hier, falls Prio 1 = Harte Regel sein soll)
+                if not skip_reason and user_id_int in self.avoid_priority_map:
+                    for prio, avoid_id in self.avoid_priority_map[user_id_int]:
+                        if prio == 1 and avoid_id in assignments_on_critical_date.get(critical_shift_abbrev, set()):
+                            skip_reason = "Avoid-Hard"
+                            break
+
                 if skip_reason: continue
                 possible_candidates.append(
                     {'id': user_id_int, 'id_str': user_id_str, 'dog': user_dog, 'hours': current_hours})
             if not possible_candidates: print(
                 f"      [Pre-Plan] Keine Kandidaten in Versuch {search_attempts} für {critical_shift_abbrev} am {date_str}."); break
+
+            # Hier müsste man ggf. auch das Avoid-Scoring anwenden,
+            # aber Pre-Planung nimmt nur den mit den wenigsten Stunden.
+            # Wir verlassen uns darauf, dass das Scoring in der Hauptrunde greift.
+            # Für die Vorplanung fügen wir *keine* volle Score-Berechnung hinzu.
+
             possible_candidates.sort(key=lambda x: x['hours']);
             chosen_user = possible_candidates[0]
             success, msg = save_shift_entry(chosen_user['id'], date_str, critical_shift_abbrev)  # Speichern
@@ -406,6 +442,7 @@ class ShiftPlanGenerator:
                 if critical_shift_abbrev in ['T.', '6']: live_shift_counts_ratio[user_id_int]['T_OR_6'] += 1;
                 if critical_shift_abbrev == 'N.': live_shift_counts_ratio[user_id_int]['N_DOT'] += 1;
                 live_shift_counts[user_id_int][critical_shift_abbrev] += 1;
+                assignments_on_critical_date[critical_shift_abbrev].add(user_id_int)  # NEU: Update für nächsten Loop
                 print(
                     f"      [Pre-Plan] OK: User {user_id_int} -> {critical_shift_abbrev} @ {date_str}. (Hrs: {live_user_hours[user_id_int]:.1f})")
                 if user_dog and user_dog != '---': dogs_assigned_on_critical_date[user_dog].append(

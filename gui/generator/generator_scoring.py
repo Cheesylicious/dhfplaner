@@ -171,6 +171,7 @@ class GeneratorScoring:
             'min_hours_score': 0,
             'fairness_score': 0,
             'partner_score': 1000,
+            'avoid_score': 0, # NEU: Score für zu vermeidende Partner
             'isolation_score': 0,
             'ratio_pref_score': 0,
             'future_conflict_score': 0  # NEUER Score
@@ -202,10 +203,24 @@ class GeneratorScoring:
                     scores['partner_score'] = 100 + prio;
                     break
 
-        # 4. Isolation Score
+        # 4. NEU: Avoid Score (Konflikt-Partner)
+        if candidate_id in self.gen.avoid_priority_map:
+            # Hole das Set der bereits für diese Schicht eingeteilten Mitarbeiter
+            assigned_to_this_shift = assignments_today_by_shift.get(shift_abbrev, set())
+            if assigned_to_this_shift: # Nur prüfen, wenn schon jemand da ist
+                for prio, avoid_id in self.gen.avoid_priority_map[candidate_id]:
+                    if avoid_id in assigned_to_this_shift:
+                        # Konflikt gefunden! Strafe basierend auf Priorität.
+                        # Prio 1 = höchste Strafe.
+                        # Wir verwenden eine hohe Basisstrafe, die durch die Prio moduliert wird.
+                        # (Niedrigere Prio-Zahl = Schlimmerer Konflikt)
+                        scores['avoid_score'] = self.gen.AVOID_PARTNER_PENALTY_SCORE / max(1, prio)
+                        break # Ein Konflikt reicht
+
+        # 5. Isolation Score
         scores['isolation_score'] = candidate.get('is_isolated', False) * self.gen.isolation_score_multiplier
 
-        # 5. Ratio Preference Score (T/N)
+        # 6. Ratio Preference Score (T/N)
         scale_pref = candidate['user_pref'].get('ratio_preference_scale', 50)
         if scale_pref != 50:
             t_or_6_count = live_shift_counts_ratio[candidate_id].get('T_OR_6', 0);
@@ -227,7 +242,7 @@ class GeneratorScoring:
                 elif target_ratio_t > 0.5 and ratio_deviation < 0:
                     scores['ratio_pref_score'] = (abs(ratio_deviation) * 2) * day_factor
 
-        # 6. NEU: Future Conflict Score
+        # 7. NEU: Future Conflict Score
         # Nur berechnen, wenn nicht am Monatsende (da Lookahead sonst sinnlos)
         if (days_in_month - current_date_obj.day) >= 1:
             # KORREKTUR: Übergibt shift_abbrev als assigned_shift_today

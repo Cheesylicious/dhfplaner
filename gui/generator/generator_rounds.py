@@ -77,7 +77,7 @@ class GeneratorRounds:
                 consecutive_days = self.helpers.count_consecutive_shifts(user_id_str, current_date_obj)
                 if not skip_reason and consecutive_days >= self.gen.SOFT_MAX_CONSECUTIVE_SHIFTS: skip_reason = f"MaxConsS({consecutive_days})"
                 if not skip_reason and self.gen.mandatory_rest_days > 0 and consecutive_days == 0 and not self.helpers.check_mandatory_rest(
-                    user_id_str, current_date_obj): skip_reason = f"Rest({self.gen.mandatory_rest_days}d)"
+                        user_id_str, current_date_obj): skip_reason = f"Rest({self.gen.mandatory_rest_days}d)"
                 if not skip_reason and date_str in self.gen.wunschfrei_requests.get(user_id_str, {}):
                     wf_entry = self.gen.wunschfrei_requests[user_id_str][date_str]
                     wf_status, wf_shift = None, None
@@ -93,11 +93,11 @@ class GeneratorRounds:
                 max_hours_check = max_hours_override if max_hours_override is not None else self.gen.MAX_MONTHLY_HOURS
                 if not skip_reason and current_hours + hours_for_this_shift > max_hours_check: skip_reason = f"MaxHrs({current_hours:.1f}+{hours_for_this_shift:.1f}>{max_hours_check})"
                 is_isolated = (
-                                          one_day_ago_raw_shift in self.gen.free_shifts_indicators and self.helpers.get_previous_raw_shift(
-                                      user_id_str,
-                                      two_days_ago_obj) in self.gen.free_shifts_indicators and next_raw_shift in self.gen.free_shifts_indicators) or \
+                                      one_day_ago_raw_shift in self.gen.free_shifts_indicators and self.helpers.get_previous_raw_shift(
+                                  user_id_str,
+                                  two_days_ago_obj) in self.gen.free_shifts_indicators and next_raw_shift in self.gen.free_shifts_indicators) or \
                               (
-                                          one_day_ago_raw_shift in self.gen.free_shifts_indicators and next_raw_shift in self.gen.free_shifts_indicators and after_next_raw_shift in self.gen.free_shifts_indicators)
+                                      one_day_ago_raw_shift in self.gen.free_shifts_indicators and next_raw_shift in self.gen.free_shifts_indicators and after_next_raw_shift in self.gen.free_shifts_indicators)
 
                 if skip_reason: skipped_reasons[skip_reason] += 1; continue
 
@@ -122,27 +122,32 @@ class GeneratorRounds:
                     assignments_today_by_shift,
                     current_date_obj, days_in_month  # Ohne critical_shifts
                 )
-                candidate.update(scores)
+                candidate.update(scores)  # HIER WIRD 'avoid_score' hinzugefügt
 
             # Schritt 1.3: Kandidaten sortieren
+            # NEU: 'avoid_score' zur Sortierung hinzugefügt (höchste Priorität, da Strafe)
             possible_candidates.sort(
                 key=lambda x: (
-                    x.get('partner_score', 1000),
-                    x.get('future_conflict_score', 0),  # Nach Partner, vor Fairness etc.
-                    -x.get('min_hours_score', 0),
-                    -x.get('fairness_score', 0),
-                    x.get('ratio_pref_score', 0),
-                    x.get('isolation_score', 0),
-                    0 if x['prev_shift'] == shift_abbrev else 1,
+                    x.get('avoid_score', 0),  # NEU: Strafe (niedriger=besser)
+                    x.get('partner_score', 1000),  # Partner (niedriger=besser)
+                    x.get('future_conflict_score', 0),  # Strafe (niedriger=besser)
+                    -x.get('min_hours_score', 0),  # Bonus (höher=besser)
+                    -x.get('fairness_score', 0),  # Bonus (höher=besser)
+                    x.get('ratio_pref_score', 0),  # Strafe (näher an 0=besser)
+                    x.get('isolation_score', 0),  # Strafe (niedriger=besser)
+                    0 if x['prev_shift'] == shift_abbrev else 1,  # Bonus für gleiche Schicht
                     -x['hours']  # Mitarbeiter mit MEHR Stunden bevorzugen
                 )
             )
 
             # Schritt 1.4: Besten Kandidaten auswählen und zuweisen
             chosen_user = possible_candidates[0]
+
+            # NEU: 'Avoid' zum Log-Ausdruck hinzugefügt
             print(
                 f"      -> Trying User {chosen_user['id']} "
-                f"(Partner={chosen_user.get('partner_score', 1000)}, "
+                f"(Avoid={chosen_user.get('avoid_score', 0)}, "
+                f"Partner={chosen_user.get('partner_score', 1000)}, "
                 f"FutConf={chosen_user.get('future_conflict_score', 0)}, "
                 f"MinHrs={chosen_user.get('min_hours_score', 0):.2f}, "
                 f"Fair={chosen_user.get('fairness_score', 0):.2f}, "
@@ -210,8 +215,8 @@ class GeneratorRounds:
 
                 # --- Hard Rules Prüfung (mit Lockerungen je Runde) ---
                 if user_dog and user_dog != '---' and user_dog in existing_dog_assignments and any(
-                    self.helpers.check_time_overlap_optimized(shift_abbrev, a['shift']) for a in
-                    existing_dog_assignments[user_dog]): skip_reason = "Dog"
+                        self.helpers.check_time_overlap_optimized(shift_abbrev, a['shift']) for a in
+                        existing_dog_assignments[user_dog]): skip_reason = "Dog"
 
                 # N->T/6 Block
                 if not skip_reason and prev_shift == "N." and shift_abbrev in ["T.", "6"]: skip_reason = "N->T/6"
@@ -230,7 +235,7 @@ class GeneratorRounds:
                         skip_reason = f"MaxCons({consecutive_days}) Limit({limit})"
 
                 if round_num <= 3 and not skip_reason and self.gen.mandatory_rest_days > 0 and consecutive_days == 0 and not self.helpers.check_mandatory_rest(
-                    user_id_str, current_date_obj): skip_reason = "Rest(Hard)"
+                        user_id_str, current_date_obj): skip_reason = "Rest(Hard)"
                 max_hours_check = max_hours_override if max_hours_override is not None else self.gen.MAX_MONTHLY_HOURS
                 if not skip_reason and current_hours + hours_for_this_shift > max_hours_check: skip_reason = f"MaxHrs({current_hours:.1f}+{hours_for_this_shift:.1f}>{max_hours_check})"
 
@@ -241,6 +246,8 @@ class GeneratorRounds:
             if not possible_fill_candidates: print(
                 f"         -> No fill candidates found in Runde {round_num}, search {search_attempts}."); break
 
+            # HINWEIS: Runde 2-4 ignoriert absichtlich Partner/Avoid Scores.
+            # Es geht nur darum, die Lücken mit den am wenigsten belasteten Leuten zu füllen.
             possible_fill_candidates.sort(key=lambda x: x['hours']);
             chosen_user = possible_fill_candidates[0]
             success, msg = save_shift_entry(chosen_user['id'], date_str, shift_abbrev)
@@ -266,6 +273,7 @@ class GeneratorRounds:
                     f"         -> Fill OK (Runde {round_num}): User {chosen_user['id']} -> {shift_abbrev}. H:{live_user_hours[user_id_int]:.1f}")
             else:
                 print(
-                    f"         -> Fill DB ERROR (Runde {round_num}) User {chosen_user['id']}: {msg}"); users_unavailable_today.add(
+                    f"         -> Fill DB ERROR (Runde {round_num}) User {chosen_user['id']}: {msg}");
+                users_unavailable_today.add(
                     chosen_user['id_str'])
         return assigned_count

@@ -2,11 +2,24 @@
 import tkinter as tk
 from tkinter import ttk, messagebox
 
+# NEU: Import der Tooltip-Klasse für eine sauberere Oberfläche
+try:
+    from gui.tooltip import ToolTip
+except ImportError:
+    print("[WARNUNG] Tooltip-Klasse konnte nicht importiert werden.")
+
+
+    # Fallback, falls ToolTip nicht gefunden wird
+    class ToolTip:
+        def __init__(self, widget, text):
+            pass  # Tut nichts, verhindert aber Absturz
+
 
 class UserPreferencesTab(ttk.Frame):
     """
     Dieser Frame kapselt alle UI-Elemente und die Logik für den
-    "Benutzer-Sonderfaktoren"-Tab des GeneratorSettingsWindow.
+    "Mitarbeiter-Präferenzen"-Tab des GeneratorSettingsWindow.
+    (Überarbeitete, innovativere Version mit Tooltips und besserer Struktur)
     """
 
     def __init__(self, parent, dialog):
@@ -18,7 +31,7 @@ class UserPreferencesTab(ttk.Frame):
             dialog: Die Instanz des Hauptdialogs (GeneratorSettingsWindow),
                     um auf geteilte Daten (Variablen, Konfigs, Methoden) zuzugreifen.
         """
-        super().__init__(parent)
+        super().__init__(parent, padding=10)
         self.dialog = dialog
         self.app = dialog.app
 
@@ -30,120 +43,123 @@ class UserPreferencesTab(ttk.Frame):
         self._create_widgets()
 
     def _create_widgets(self):
-        """ Erstellt den Inhalt des "Benutzer-Sonderfaktoren"-Tabs. """
+        """ Erstellt den Inhalt des "Mitarbeiter-Präferenzen"-Tabs. """
         tab = self  # Wir fügen die Widgets direkt zu diesem Frame hinzu
 
-        # Frame für Mitarbeiter-Auswahl & Eingabe (oben)
+        # --- Frame für Mitarbeiter-Auswahl & Eingabe (oben) ---
         input_controls_frame = ttk.LabelFrame(tab, text="Mitarbeiter-Präferenzen bearbeiten")
-        input_controls_frame.pack(padx=10, pady=5, fill="x")
+        input_controls_frame.pack(padx=5, pady=5, fill="x")
 
         # Auswahl des Mitarbeiters (Combobox)
         select_frame = ttk.Frame(input_controls_frame)
-        select_frame.pack(fill='x', padx=5, pady=5)
-        ttk.Label(select_frame, text="Mitarbeiter auswählen (für NEU/Edit oder Auswahl leeren):").grid(row=0, column=0,
-                                                                                                       padx=5, pady=5,
-                                                                                                       sticky='w')
+        select_frame.pack(fill='x', padx=10, pady=(10, 5))
+        ttk.Label(select_frame, text="Mitarbeiter:").grid(row=0, column=0, padx=(0, 5), pady=5, sticky='w')
+
         # Greift auf user_options im Hauptdialog zu
         self.user_pref_combo = ttk.Combobox(select_frame, values=self.dialog.user_options, state="readonly", width=30)
         self.user_pref_combo.grid(row=0, column=1, padx=5, pady=5, sticky='ew')
         # Bindet an lokale Methoden
         self.user_pref_combo.bind("<<ComboboxSelected>>", self._load_selected_user_pref_from_combobox)
-        ttk.Button(select_frame, text="Eingaben leeren", command=self._clear_input_fields).grid(row=0, column=2, padx=5,
-                                                                                                pady=5, sticky='w')
-        select_frame.columnconfigure(1, weight=1)
 
-        # Einstellungsfelder
+        ttk.Button(select_frame, text="Eingaben leeren", command=self._clear_input_fields).grid(row=0, column=2, padx=5,
+                                                                                                pady=5, sticky='e')
+        select_frame.columnconfigure(1, weight=1)  # Combobox dehnt sich
+        select_frame.columnconfigure(2, weight=0)
+
+        # --- Einstellungsfelder (Neu strukturiert in 2 Spalten) ---
         settings_frame = ttk.Frame(input_controls_frame)
         settings_frame.pack(fill="x", padx=5, pady=5)
+        settings_frame.columnconfigure(0, weight=1, uniform="group1")
+        settings_frame.columnconfigure(1, weight=1, uniform="group1")
 
-        row_idx = 0
+        # Linke Spalte: Stunden
+        col_left_frame = ttk.Frame(settings_frame, padding=5)
+        col_left_frame.grid(row=0, column=0, sticky='nsew', padx=5)
 
         # Min. Monatsstunden
-        ttk.Label(settings_frame, text="Min. Monatsstunden (Zahl):").grid(row=row_idx, column=0, padx=5, pady=2,
-                                                                          sticky='w')
-        # Greift auf Variablen im Hauptdialog zu
-        self.min_hours_entry = ttk.Entry(settings_frame, textvariable=self.dialog.min_hours_var, width=10)
-        self.min_hours_entry.grid(row=row_idx, column=1, padx=5, pady=2, sticky='w')
-        ttk.Label(settings_frame, text="* Soft Limit (Erhöht Zuweisungs-Score bei Unterschreitung)").grid(row=row_idx,
-                                                                                                          column=2,
-                                                                                                          padx=5,
-                                                                                                          pady=2,
-                                                                                                          sticky='w')
-        row_idx += 1
+        ttk.Label(col_left_frame, text="Min. Monatsstunden (Soft Limit):").pack(fill='x', anchor='w')
+        self.min_hours_entry = ttk.Entry(col_left_frame, textvariable=self.dialog.min_hours_var, width=15)
+        self.min_hours_entry.pack(fill='x', anchor='w', pady=(2, 10))
+        ToolTip(self.min_hours_entry,
+                text="Soft Limit: Erhöht den Zuweisungs-Score,\n"
+                     "wenn die Stundenzahl des Mitarbeiters\n"
+                     "diesen Wert unterschreitet. (Leer = Ignorieren)")
 
         # Max. Monatsstunden
-        ttk.Label(settings_frame, text="Max. Monatsstunden (Zahl):").grid(row=row_idx, column=0, padx=5, pady=2,
-                                                                          sticky='w')
-        self.max_hours_entry = ttk.Entry(settings_frame, textvariable=self.dialog.max_hours_var, width=10)
-        self.max_hours_entry.grid(row=row_idx, column=1, padx=5, pady=2, sticky='w')
-        ttk.Label(settings_frame, text="* Hard Rule Override (Überschreibt 228h nur nach unten)").grid(row=row_idx,
-                                                                                                       column=2, padx=5,
-                                                                                                       pady=2,
-                                                                                                       sticky='w')
-        row_idx += 1
+        ttk.Label(col_left_frame, text="Max. Monatsstunden (Hard Limit):").pack(fill='x', anchor='w')
+        self.max_hours_entry = ttk.Entry(col_left_frame, textvariable=self.dialog.max_hours_var, width=15)
+        self.max_hours_entry.pack(fill='x', anchor='w', pady=(2, 10))
+        ToolTip(self.max_hours_entry,
+                text="Hard Limit: Überschreibt das globale Maximum\n"
+                     "(z.B. 228h) nur nach unten. (Leer = Ignorieren)")
 
         # Max. gleiche Schichten nacheinander Override (Soft Limit)
-        ttk.Label(settings_frame, text="Max. gleiche Schichten nacheinander (Override):").grid(row=row_idx, column=0,
-                                                                                               padx=5, pady=2,
-                                                                                               sticky='w')
-        self.max_same_shift_override_entry = ttk.Entry(settings_frame,
+        ttk.Label(col_left_frame, text="Max. gleiche Schichten (Soft Limit):").pack(fill='x', anchor='w')
+        self.max_same_shift_override_entry = ttk.Entry(col_left_frame,
                                                        textvariable=self.dialog.max_same_shift_override_var,
-                                                       width=10)
-        self.max_same_shift_override_entry.grid(row=row_idx, column=1, padx=5, pady=2, sticky='w')
-        ttk.Label(settings_frame, text="* Überschreibt globalen Soft Limit").grid(row=row_idx, column=2, padx=5, pady=2,
-                                                                                  sticky='w')
-        row_idx += 1
+                                                       width=15)
+        self.max_same_shift_override_entry.pack(fill='x', anchor='w', pady=(2, 10))
+        ToolTip(self.max_same_shift_override_entry,
+                text="Soft Limit: Überschreibt den globalen Wert\n"
+                     "für 'Max. gleiche Schichten nacheinander'.\n"
+                     "(Leer = Ignorieren)")
+
+        # Rechte Spalte: Präferenzen
+        col_right_frame = ttk.Frame(settings_frame, padding=5)
+        col_right_frame.grid(row=0, column=1, sticky='nsew', padx=5)
 
         # Verhältnis-Präferenz (T. vs N.)
-        ttk.Label(settings_frame, text="Tages-/Nacht-Verhältnis-Präferenz (0=Nacht, 100=Tag):").grid(row=row_idx,
-                                                                                                     column=0, padx=5,
-                                                                                                     pady=2, sticky='w')
+        ttk.Label(col_right_frame, text="Tages-/Nacht-Bias (0=Nacht, 100=Tag):").pack(fill='x', anchor='w')
+        ratio_frame = ttk.Frame(col_right_frame)
+        ratio_frame.pack(fill='x', pady=(2, 0))
 
-        ratio_frame = ttk.Frame(settings_frame)
-        ratio_frame.grid(row=row_idx, column=1, padx=5, pady=2, sticky='ew')
-        ttk.Scale(ratio_frame, from_=0, to=100, variable=self.dialog.ratio_pref_scale_var,
-                  orient=tk.HORIZONTAL, command=self._update_ratio_label).pack(side=tk.LEFT, fill='x', expand=True)
+        scale = ttk.Scale(ratio_frame, from_=0, to=100, variable=self.dialog.ratio_pref_scale_var,
+                          orient=tk.HORIZONTAL, command=self._update_ratio_label)
+        scale.pack(side=tk.LEFT, fill='x', expand=True, padx=(0, 5))
+        ToolTip(scale,
+                text="Beeinflusst die Zuweisung von T. und N. Schichten.\n"
+                     "50 = Neutral (Standard)\n"
+                     "< 50 = Bevorzugt N.\n"
+                     "> 50 = Bevorzugt T.")
 
-        ttk.Label(settings_frame, textvariable=self.dialog.ratio_pref_label_var, width=25).grid(row=row_idx, column=2,
-                                                                                                padx=5,
-                                                                                                pady=2, sticky='w')
-        self._update_ratio_label(self.dialog.ratio_pref_scale_var.get())
-        row_idx += 1
+        ratio_label = ttk.Label(ratio_frame, textvariable=self.dialog.ratio_pref_label_var, width=18, anchor='e')
+        ratio_label.pack(side=tk.RIGHT)
+        self._update_ratio_label(self.dialog.ratio_pref_scale_var.get())  # Initiales Label
 
         # Schicht-Ausschlüsse (Hard Limit)
-        ttk.Label(settings_frame, text="Schicht-Ausschlüsse (Kürzel, kommasepariert):").grid(row=row_idx, column=0,
-                                                                                             padx=5, pady=2, sticky='w')
-        self.shift_exclusions_entry = ttk.Entry(settings_frame, textvariable=self.dialog.shift_exclusions_list_var,
+        ttk.Label(col_right_frame, text="Schicht-Ausschlüsse (Hard Limit):").pack(fill='x', anchor='w', pady=(10, 0))
+        self.shift_exclusions_entry = ttk.Entry(col_right_frame, textvariable=self.dialog.shift_exclusions_list_var,
                                                 width=20)
-        self.shift_exclusions_entry.grid(row=row_idx, column=1, padx=5, pady=2, sticky='w')
-        ttk.Label(settings_frame, text=f"* Harte Sperre (z.B. 6, N.)").grid(row=row_idx, column=2, padx=5, pady=2,
-                                                                            sticky='w')
-        row_idx += 1
+        self.shift_exclusions_entry.pack(fill='x', anchor='w', pady=(2, 10))
+        ToolTip(self.shift_exclusions_entry,
+                text="Harte Sperre: Dieser Mitarbeiter wird niemals\n"
+                     "für die hier eingetragenen Schichten geplant.\n"
+                     "Format: T.,N.,6 (kommasepariert)")
 
-        # Buttons
+        # --- Buttons ---
         btn_frame = ttk.Frame(input_controls_frame)
-        btn_frame.pack(fill='x', padx=5, pady=(10, 5))
+        btn_frame.pack(fill='x', padx=10, pady=(5, 10))
         ttk.Button(btn_frame, text="Präferenzen SPEICHERN", command=self._save_user_preferences).pack(side='left',
                                                                                                       padx=(0, 5))
         ttk.Button(btn_frame, text="Präferenzen LÖSCHEN", command=self._delete_user_preferences).pack(side='left')
 
         # --- Übersicht (Treeview) ---
         overview_frame = ttk.LabelFrame(tab, text="Gespeicherte Sonderfaktoren (Doppelklick/Auswahl zum Bearbeiten)")
-        overview_frame.pack(padx=10, pady=5, fill="both", expand=True)
+        overview_frame.pack(padx=5, pady=5, fill="both", expand=True)
 
         columns = ("#User", "MinHrs", "MaxHrs", "Excl", "RatioPref", "MaxSameOverride")
         self.treeview_prefs = ttk.Treeview(overview_frame, columns=columns, show="headings", height=8)
 
-        # Spalten-Konfiguration
+        # Spalten-Konfiguration (Überschriften leicht angepasst)
         self.treeview_prefs.heading("#User", text="Mitarbeiter", anchor=tk.W)
         self.treeview_prefs.heading("MinHrs", text="Min. Std", anchor=tk.CENTER)
         self.treeview_prefs.heading("MaxHrs", text="Max. Std", anchor=tk.CENTER)
         self.treeview_prefs.heading("Excl", text="Ausgeschl. Schichten", anchor=tk.W)
-        self.treeview_prefs.heading("RatioPref", text="T./N. Präf.", anchor=tk.CENTER)
+        self.treeview_prefs.heading("RatioPref", text="T/N-Bias", anchor=tk.CENTER)  # Angepasst
         self.treeview_prefs.heading("MaxSameOverride", text="Max. Gleiche", anchor=tk.CENTER)
 
         # Spaltenbreiten
-        self.treeview_prefs.column("#User", width=150, stretch=tk.NO)
+        self.treeview_prefs.column("#User", width=160, stretch=tk.NO)
         self.treeview_prefs.column("MinHrs", width=70, anchor=tk.CENTER, stretch=tk.NO)
         self.treeview_prefs.column("MaxHrs", width=70, anchor=tk.CENTER, stretch=tk.NO)
         self.treeview_prefs.column("Excl", width=150, anchor=tk.W, stretch=tk.YES)
@@ -173,16 +189,16 @@ class UserPreferencesTab(ttk.Frame):
         if scale_val == 50:
             text = "Neutral (0% Bias)"
         elif scale_val < 50:
-            bias_perc = 50 - scale_val
-            text = f"Nachtdienst Bias ({bias_perc * 2}%)"
+            bias_perc = (50 - scale_val) * 2
+            text = f"Nacht Bias ({bias_perc}%)"
         else:
-            bias_perc = scale_val - 50
-            text = f"Tagesdienst Bias ({bias_perc * 2}%)"
+            bias_perc = (scale_val - 50) * 2
+            text = f"Tag Bias ({bias_perc}%)"
 
         # Greift auf Variable im Hauptdialog zu
         self.dialog.ratio_pref_label_var.set(text)
 
-    # --- Methoden für User-Präferenzen ---
+    # --- Methoden für User-Präferenzen (Logik unverändert) ---
     def _clear_input_fields(self):
         """ Setzt die Eingabefelder für Präferenzen zurück. """
         # Greift auf Variablen im Hauptdialog zu
@@ -243,9 +259,6 @@ class UserPreferencesTab(ttk.Frame):
         try:
             selected_item = self.treeview_prefs.focus()
             if not selected_item:
-                # De-Selektion im Treeview soll nicht automatisch die Felder leeren,
-                # damit man einen User auswählen und dann in der Combobox "leeren" kann.
-                # self._clear_input_fields()
                 return
 
             user_id_str = selected_item
@@ -297,7 +310,8 @@ class UserPreferencesTab(ttk.Frame):
 
         # Greift auf Daten und Methoden im Hauptdialog zu
         sorted_user_ids = sorted(self.dialog.user_preferences.keys(),
-                                 key=lambda uid_str: self.dialog.user_map.get(int(uid_str), {}).get('lastname', 'Z' * 20))
+                                 key=lambda uid_str: self.dialog.user_map.get(int(uid_str), {}).get('lastname',
+                                                                                                    'Z' * 20))
 
         for user_id_str in sorted_user_ids:
             prefs = self.dialog.user_preferences[user_id_str]
@@ -316,15 +330,16 @@ class UserPreferencesTab(ttk.Frame):
             exclusions_display = ", ".join(prefs['shift_exclusions'])
 
             scale_val = prefs.get('ratio_preference_scale', 50)
-            ratio_pref_display = ""
+
+            # Angepasste Anzeige-Logik für T/N-Bias
             if scale_val == 50:
-                ratio_pref_display = "Neutral (50)"
+                ratio_pref_display = "Neutral (0%)"
             elif scale_val < 50:
-                bias_perc = 50 - scale_val
-                ratio_pref_display = f"Nacht (+{bias_perc * 2}%)"
+                bias_perc = (50 - scale_val) * 2
+                ratio_pref_display = f"Nacht ({bias_perc}%)"
             else:
-                bias_perc = scale_val - 50
-                ratio_pref_display = f"Tag (+{bias_perc * 2}%)"
+                bias_perc = (scale_val - 50) * 2
+                ratio_pref_display = f"Tag ({bias_perc}%)"
 
             max_same_display = str(prefs['max_consecutive_same_shift_override']) if prefs[
                                                                                         'max_consecutive_same_shift_override'] is not None else ""
