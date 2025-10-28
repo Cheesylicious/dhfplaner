@@ -6,6 +6,9 @@ import traceback  # Import für detailliertere Fehlermeldungen
 
 # DB Imports
 from database.db_shifts import get_consolidated_month_data
+# --- ANPASSUNG: Zusätzliche Importe für Vormonats-Anträge ---
+from database.db_requests import get_wunschfrei_requests_for_month, get_all_vacation_requests_for_month
+# --- ENDE ANPASSUNG ---
 from database.db_users import get_user_by_id, get_ordered_users_for_schedule
 # NEU: Import der Konfigurationsfunktionen für die Persistenz
 from database.db_core import load_config_json, save_config_json
@@ -37,6 +40,11 @@ class ShiftPlanDataManager:
         # Cache für Vormonats-Shifts
         self._prev_month_shifts = {}
         self.previous_month_shifts = {}
+
+        # --- ANPASSUNG: Caches für Vormonats-Anträge ---
+        self.processed_vacations_prev = {}
+        self.wunschfrei_data_prev = {}
+        # --- ENDE ANPASSUNG ---
 
         # Cache für Folgemonats-Shifts (für den Generator)
         self._next_month_shifts_cache = None
@@ -182,7 +190,7 @@ class ShiftPlanDataManager:
             # Optional: Hier Fehler behandeln oder weitermachen
         # --- ENDE KORREKTUR ---
 
-        update_progress(15, "Lade alle Monatsdaten in einem Durchgang (DB-Optimierung)...") # Prozent angepasst
+        update_progress(15, "Lade alle Monatsdaten in einem Durchgang (DB-Optimierung)...")  # Prozent angepasst
         # Konsolidierte Daten aus der DB holen
         consolidated_data = get_consolidated_month_data(year, month)
         if consolidated_data is None:
@@ -191,6 +199,23 @@ class ShiftPlanDataManager:
             self.shift_schedule_data, self.daily_counts, self.wunschfrei_data, self._prev_month_shifts, self.processed_vacations = {}, {}, {}, {}, {}
             self.violation_cells.clear()
             raise Exception("Fehler beim Abrufen der Kerndaten aus der Datenbank.")
+
+        # --- ANPASSUNG: Lade Vormonats-Anträge für die "Ü"-Spalte ---
+        try:
+            prev_month_last_day = date(year, month, 1) - timedelta(days=1)
+            prev_year, prev_month = prev_month_last_day.year, prev_month_last_day.month
+            update_progress(50, "Lade Vormonats-Anträge...")
+            # Importe müssen oben in der Datei sein:
+            # from database.db_requests import get_wunschfrei_requests_for_month, get_all_vacation_requests_for_month
+            raw_vacations_prev = get_all_vacation_requests_for_month(prev_year, prev_month)
+            self.processed_vacations_prev = self._process_vacations(prev_year, prev_month, raw_vacations_prev)
+            self.wunschfrei_data_prev = get_wunschfrei_requests_for_month(prev_year, prev_month)
+            print(f"[DM Load] Vormonats-Anträge ({prev_year}-{prev_month}) geladen.")
+        except Exception as e:
+            print(f"[WARNUNG] Fehler beim Laden der Vormonats-Anträge: {e}")
+            self.processed_vacations_prev = {}
+            self.wunschfrei_data_prev = {}
+        # --- ENDE ANPASSUNG ---
 
         update_progress(60, "Verarbeite Schicht- und Antragsdaten...")
         # Daten in die Caches des DataManagers laden
