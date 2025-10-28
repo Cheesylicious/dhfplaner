@@ -265,6 +265,22 @@ def initialize_db():
         execute_create_table_if_not_exists(
             "CREATE TABLE IF NOT EXISTS `user_order` (user_id INT PRIMARY KEY, sort_order INT NOT NULL, is_visible TINYINT(1) DEFAULT 1, FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE);") # Beispiel
 
+        # --- NEU: Fehlende Tabelle shift_locks hinzufügen ---
+        # Diese Tabelle wird von db_locks.py und gui/shift_lock_manager.py benötigt
+        execute_create_table_if_not_exists("""
+            CREATE TABLE IF NOT EXISTS `shift_locks` (
+              `user_id` INT NOT NULL,
+              `shift_date` DATE NOT NULL,
+              `shift_abbrev` VARCHAR(10) NOT NULL,
+              `secured_by_admin_id` INT DEFAULT NULL,
+              `timestamp` DATETIME DEFAULT CURRENT_TIMESTAMP,
+              PRIMARY KEY (`user_id`, `shift_date`),
+              FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON DELETE CASCADE,
+              FOREIGN KEY (`secured_by_admin_id`) REFERENCES `users`(`id`) ON DELETE SET NULL
+            );
+        """)
+        # --- ENDE NEU ---
+
         # --- Index hinzufügen ---
         _add_index_if_not_exists(cursor, "shift_schedule", "idx_shift_date_user", "`shift_date`, `user_id`")
 

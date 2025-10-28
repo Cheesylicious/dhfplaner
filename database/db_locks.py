@@ -1,7 +1,13 @@
 # database/db_locks.py
 from datetime import date, datetime
+# --- KORREKTUR: Fehlenden Import hinzugefügt ---
+import calendar
+# --- ENDE KORREKTUR ---
 from .db_core import create_connection, _log_activity
 import mysql.connector
+# --- KORREKTUR: Import für defaultdict hinzugefügt (wird in get_locked_shifts_for_month verwendet) ---
+from collections import defaultdict
+# --- ENDE KORREKTUR ---
 
 
 def set_shift_lock_status(user_id, date_str, shift_abbrev, is_locked, admin_id):
@@ -67,19 +73,29 @@ def get_locked_shifts_for_month(year, month):
         cursor = conn.cursor(dictionary=True)
         # Berechne Monatsgrenzen
         start_date = date(year, month, 1).strftime('%Y-%m-%d')
+        # --- HIER WIRD calendar BENÖTIGT ---
         _, last_day = calendar.monthrange(year, month)
+        # --- ENDE ---
         end_date = date(year, month, last_day).strftime('%Y-%m-%d')
 
         query = "SELECT user_id, shift_date, shift_abbrev FROM shift_locks WHERE shift_date BETWEEN %s AND %s"
         cursor.execute(query, (start_date, end_date))
 
+        # --- defaultdict verwenden ---
         locked_shifts = defaultdict(dict)
         for row in cursor.fetchall():
             user_id_str = str(row['user_id'])
-            date_str = row['shift_date'].strftime('%Y-%m-%d')  # Sicherstellen, dass es ein String ist
-            locked_shifts[user_id_str][date_str] = row['shift_abbrev']
+            # --- Sicherstellen, dass row['shift_date'] ein date/datetime Objekt ist ---
+            db_date = row['shift_date']
+            if isinstance(db_date, (date, datetime)):
+                 date_str = db_date.strftime('%Y-%m-%d') # Sicherstellen, dass es ein String ist
+                 locked_shifts[user_id_str][date_str] = row['shift_abbrev']
+            else:
+                 print(f"[WARNUNG] Ungültiger Datumstyp aus DB in get_locked_shifts_for_month: {type(db_date)}")
+            # --- ENDE ---
 
-        return dict(locked_shifts)
+
+        return dict(locked_shifts) # Zurück als normales Dict
 
     except Exception as e:
         print(f"DB Fehler in get_locked_shifts_for_month: {e}")

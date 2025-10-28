@@ -406,7 +406,8 @@ def save_shift_order(order_data_list):
 def delete_all_shifts_for_month(year, month, current_user_id):
     """
     Löscht alle planbaren Schicht-Einträge aus 'shift_schedule' für einen Monat und ein Jahr,
-    schließt jedoch bestimmte genehmigte Kürzel (X, S, QA, EU) aus.
+    schließt jedoch bestimmte genehmigte Kürzel (X, S, QA, EU) UND gesicherte Schichten
+    (aus shift_locks) aus.
     """
     conn = create_connection()
     if conn is None:
@@ -418,15 +419,23 @@ def delete_all_shifts_for_month(year, month, current_user_id):
         # INNOVATIV: Verwendung von Platzhaltern für die dynamische Liste
         placeholders = ', '.join(['%s'] * len(EXCLUDED_SHIFTS_ON_DELETE))
 
-        # SQL-Anweisung zum Löschen, die die ausgeschlossenen Kürzel ignoriert
+        # --- KORREKTUR: SQL-Anweisung ---
+        # Fügt eine "NOT EXISTS" Klausel hinzu, um Einträge zu schützen,
+        # die in 'shift_locks' vorhanden sind.
         query = f"""
             DELETE FROM shift_schedule 
             WHERE YEAR(shift_date) = %s 
               AND MONTH(shift_date) = %s
               AND shift_abbrev NOT IN ({placeholders})
+              AND NOT EXISTS (
+                  SELECT 1 FROM shift_locks sl
+                  WHERE sl.user_id = shift_schedule.user_id
+                    AND sl.shift_date = shift_schedule.shift_date
+              )
         """
+        # --- ENDE KORREKTUR ---
 
-        # Die Werte für die Query: (year, month, 'X', 'S', 'QA', 'EU')
+        # Die Werte für die Query: (year, month, 'X', 'S', 'QA', 'EU', 'WF')
         query_values = (year, month,) + tuple(EXCLUDED_SHIFTS_ON_DELETE)
 
         cursor.execute(query, query_values)
@@ -436,12 +445,12 @@ def delete_all_shifts_for_month(year, month, current_user_id):
         month_str = f"{year:04d}-{month:02d}"
 
         # Protokollierung mit Admin-ID
-        log_msg = f'Plan für {month_str} (ohne {", ".join(EXCLUDED_SHIFTS_ON_DELETE)}) gelöscht. {deleted_rows} Zeilen entfernt.'
+        log_msg = f'Plan für {month_str} (ohne {", ".join(EXCLUDED_SHIFTS_ON_DELETE)} u. Locks) gelöscht. {deleted_rows} Zeilen entfernt.'
         _log_activity(cursor, current_user_id, 'SHIFTPLAN_DELETE', log_msg)
 
         conn.commit()
 
-        return True, f"Schichtplan für {month_str} erfolgreich gelöscht. {deleted_rows} Einträge wurden entfernt (Ausgenommen: {', '.join(EXCLUDED_SHIFTS_ON_DELETE)})."
+        return True, f"Schichtplan für {month_str} erfolgreich gelöscht. {deleted_rows} Einträge wurden entfernt (Ausgenommen: {', '.join(EXCLUDED_SHIFTS_ON_DELETE)} und gesicherte Schichten)."
 
     except mysql.connector.Error as e:
         conn.rollback()
