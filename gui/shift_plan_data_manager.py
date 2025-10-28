@@ -9,6 +9,8 @@ from database.db_shifts import get_consolidated_month_data
 from database.db_users import get_user_by_id, get_ordered_users_for_schedule
 # NEU: Import der Konfigurationsfunktionen für die Persistenz
 from database.db_core import load_config_json, save_config_json
+# NEU: Import für die Event-Verwaltung (um den Dateizugriff zu ersetzen)
+from gui.event_manager import EventManager
 
 
 class ShiftPlanDataManager:
@@ -69,28 +71,33 @@ class ShiftPlanDataManager:
                     except (ValueError, TypeError):
                         pass  # Ignoriere fehlerhafte alte Einträge
             loaded['preferred_partners_prioritized'] = migrated_partners
-            # Optional: Alten Schlüssel entfernen, um Daten sauber zu halten
-            # if 'preferred_partners' in loaded: del loaded['preferred_partners']
-            # Optional: Migrierte Daten sofort speichern? Könnte man machen, aber Laden reicht erstmal.
-            # self.save_generator_config(loaded)
 
-        return loaded or default  # Gibt geladene oder Standard-Config zurück
+        # Standardwerte für neue Scores/Multiplikatoren hinzufügen
+        default.update({
+            'mandatory_rest_days_after_max_shifts': 2,
+            'avoid_understaffing_hard': True,
+            'ensure_one_weekend_off': False,
+            'wunschfrei_respect_level': 75,
+            'fairness_threshold_hours': 10.0,
+            'min_hours_fairness_threshold': 20.0,
+            'min_hours_score_multiplier': 5.0,
+            'fairness_score_multiplier': 1.0,
+            'isolation_score_multiplier': 30.0  # Standardwert muss hier übernommen werden
+        })
+
+        # Füllt die geladenen Daten mit den fehlenden Standardwerten
+        final_config = default.copy()
+        if loaded:
+            final_config.update(loaded)
+
+        return final_config  # Gibt geladene oder Standard-Config zurück
 
     def save_generator_config(self, config_data):
         """Speichert die Einstellungen des Schichtplan-Generators in die Datenbank."""
-        # --- KORREKTUR: Gibt das Tupel (success, message) zurück ---
         # save_config_json gibt (True/False, message) zurück
         return save_config_json(self.GENERATOR_CONFIG_KEY, config_data)
-        # --- ENDE KORREKTUR ---
 
     # --- ENDE NEUE METHODEN ---
-
-    # --- Originalmethoden aus der hochgeladenen Datei (teilweise leicht angepasst) ---
-
-    def get_user_data_map(self):
-        """ Gibt eine Map {user_id: user_dict} der aktuell geladenen Benutzer zurück. """
-        # Stellt sicher, dass die Liste existiert und gibt sie als Dict zurück
-        return {user['id']: user for user in self.cached_users_for_month if 'id' in user}
 
     def _get_shift_helper(self, user_id_str, date_obj, current_year, current_month):
         """ Holt die *Arbeits*-Schicht für einen User an einem Datum, berücksichtigt Vormonat-Cache. """
@@ -147,7 +154,17 @@ class ShiftPlanDataManager:
         raw_vacations = consolidated_data.get('vacation_requests', [])
         self.processed_vacations = self._process_vacations(year, month, raw_vacations)
 
-        # Neuberechnung der Tageszählungen (daily_counts) aus den gerade geladenen Schichtdaten
+        # NEU: Lade globale Events direkt aus der DB
+        try:
+            # Stellt sicher, dass die App die Events für das Jahr geladen hat.
+            self.app.global_events_data = EventManager.get_events_for_year(year)
+            print(f"[DM Load] Globale Events für {year} aus Datenbank geladen.")
+        except Exception as e:
+            print(f"[FEHLER] Fehler beim Laden der globalen Events aus DB: {e}")
+            # Wichtig: Fülle mit Leer-Dict, um Folgefehler in der App-Logik zu vermeiden
+            self.app.global_events_data = {}
+
+            # Neuberechnung der Tageszählungen (daily_counts) aus den gerade geladenen Schichtdaten
         print("[DM Load] Neuberechnung der Tageszählungen (daily_counts) aus Schichtdaten...")
         self.daily_counts.clear()  # Alte Zählungen löschen
 
@@ -192,14 +209,14 @@ class ShiftPlanDataManager:
         # Hilfsfunktionen zum Hinzufügen/Entfernen von Violations
         def add_violation(uid, d):
             cell = (uid, d)
-            if cell not in self.violation_cells: # Korrekte Einrückung
+            if cell not in self.violation_cells:  # Korrekte Einrückung
                 print(f"    -> ADD V: U{uid}, D{d}")
                 self.violation_cells.add(cell)
                 affected_cells.add(cell)
 
         def remove_violation(uid, d):
             cell = (uid, d)
-            if cell in self.violation_cells: # Korrekte Einrückung
+            if cell in self.violation_cells:  # Korrekte Einrückung
                 print(f"    -> REMOVE V: U{uid}, D{d}")
                 self.violation_cells.discard(cell)
                 affected_cells.add(cell)
@@ -246,7 +263,7 @@ class ShiftPlanDataManager:
         involved_dogs = set()  # Hunde, deren Konflikte neu bewertet werden müssen
         if dog: involved_dogs.add(dog)
         if old_dog and old_dog != dog: involved_dogs.add(old_dog)
-        if old_shift and not new_shift and old_dog: involved_dogs.add(old_dog) # User hat Dienst entfernt
+        if old_shift and not new_shift and old_dog: involved_dogs.add(old_dog)  # User hat Dienst entfernt
         # Fallback
         if not involved_dogs and old_shift:
             for other_user in self.cached_users_for_month:
@@ -268,8 +285,9 @@ class ShiftPlanDataManager:
                 if other_user.get('diensthund') == current_dog:
                     other_user_id = other_user.get('id')
                     if other_user_id is None: continue
-                    current_shift_for_other = new_shift if other_user_id == user_id else self._get_shift_helper(str(other_user_id), date_obj, year, month)
-                    if current_shift_for_other: # Nur hinzufügen, wenn der User eine *Arbeits*-Schicht hat
+                    current_shift_for_other = new_shift if other_user_id == user_id else self._get_shift_helper(
+                        str(other_user_id), date_obj, year, month)
+                    if current_shift_for_other:  # Nur hinzufügen, wenn der User eine *Arbeits*-Schicht hat
                         assignments_today.append({'id': other_user_id, 'shift': current_shift_for_other})
 
             # User, die vorher/jetzt beteiligt waren/sind
@@ -278,7 +296,8 @@ class ShiftPlanDataManager:
             if old_shift and user_id not in involved_user_ids_now and old_dog == current_dog:
                 involved_user_ids_before.add(user_id)
             all_potentially_involved = involved_user_ids_now.union(involved_user_ids_before)
-            print(f"    Hund '{current_dog}' T{day}. Beteiligte (Vorher/Nachher): {all_potentially_involved}. Aktuelle Assignments: {assignments_today}")
+            print(
+                f"    Hund '{current_dog}' T{day}. Beteiligte (Vorher/Nachher): {all_potentially_involved}. Aktuelle Assignments: {assignments_today}")
 
             # Entferne alte Konflikte
             print(f"    -> Entferne alte Konflikte für Hund '{current_dog}' T{day}...")
@@ -290,8 +309,8 @@ class ShiftPlanDataManager:
             if len(assignments_today) > 1:
                 for i in range(len(assignments_today)):
                     for j in range(i + 1, len(assignments_today)):
-                        u1 = assignments_today[i];
-                        u2 = assignments_today[j]
+                        u1 = assignments[i];
+                        u2 = assignments[j]
                         if self._check_time_overlap_optimized(u1['shift'], u2['shift']):
                             print(f"      -> Konflikt: {u1['id']}({u1['shift']}) vs {u2['id']}({u2['shift']})")
                             add_violation(u1['id'], day);
@@ -397,7 +416,8 @@ class ShiftPlanDataManager:
         try:
             user_id_int = int(user_id_str)
         except ValueError:
-            print(f"[WARNUNG] Ungültige user_id_str in calculate_total_hours: {user_id_str}"); return 0.0
+            print(f"[WARNUNG] Ungültige user_id_str in calculate_total_hours: {user_id_str}");
+            return 0.0
 
         days_in_month = calendar.monthrange(year, month)[1]
 
