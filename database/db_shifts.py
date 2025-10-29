@@ -305,7 +305,8 @@ def get_ordered_shift_abbrevs(include_hidden=False):
         order_map = {row['abbreviation']: row for row in cursor.fetchall()}
 
         ordered_list = []
-        all_known_abbrevs = set(all_shift_types_map.keys()) | set(order_map.keys()) | {'T.', '6', 'N.', '24'}
+        # --- KORREKTUR: 'QA' zur hardcodierten Liste hinzugefügt, falls es nicht in shift_types ist ---
+        all_known_abbrevs = set(all_shift_types_map.keys()) | set(order_map.keys()) | {'T.', '6', 'N.', '24', 'QA'}
 
         for abbrev in sorted(list(all_known_abbrevs)):
             if abbrev in all_shift_types_map:
@@ -315,10 +316,16 @@ def get_ordered_shift_abbrevs(include_hidden=False):
                 item['check_for_understaffing'] = item.get('check_for_understaffing', 0)
             else:
                 # Harte Regel oder nur in shift_order vorhanden
+                # --- KORREKTUR: 'start_time' und 'end_time' als None hinzufügen ---
+                # Dies behebt die [WARNUNG] in _check_time_overlap, da die Keys existieren.
                 item = {'abbreviation': abbrev,
                         'name': f"({abbrev})", 'hours': 0,
                         'description': "", 'color': '#FFFFFF',
-                        'check_for_understaffing': 0}  # Default 0
+                        'check_for_understaffing': 0,
+                        'start_time': None, # NEU
+                        'end_time': None    # NEU
+                        }
+                # --- ENDE KORREKTUR ---
 
             order_data = order_map.get(abbrev)
 
@@ -332,7 +339,8 @@ def get_ordered_shift_abbrevs(include_hidden=False):
                 item['is_visible'] = 1
 
             # Korrigiere Name für harte Regeln
-            if abbrev in ['T.', '6', 'N.', '24'] and item['name'] == f"({abbrev})":
+            if abbrev in ['T.', '6', 'N.', '24', 'QA'] and item['name'] == f"({abbrev})":
+                # 'QA' hier hinzugefügt für Konsistenz
                 item['name'] = abbrev
 
             if include_hidden or item.get('is_visible', 1) == 1:
@@ -406,7 +414,7 @@ def save_shift_order(order_data_list):
 def delete_all_shifts_for_month(year, month, current_user_id):
     """
     Löscht alle planbaren Schicht-Einträge aus 'shift_schedule' für einen Monat und ein Jahr,
-    schließt jedoch bestimmte genehmigte Kürzel (X, S, QA, EU) UND gesicherte Schichten
+    schließt jedoch bestimmte genehmigte Kürzel (X, S, QA, EU, WF) UND gesicherte Schichten
     (aus shift_locks) aus.
     """
     conn = create_connection()

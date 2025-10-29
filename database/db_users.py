@@ -298,33 +298,44 @@ def get_ordered_users_for_schedule(include_hidden=False, for_date=None):
 
         # Bedingung für Archivierung und Aktivierung hinzufügen
         if for_date:
-            # 'for_date' ist der *Start des aktuellen Monats* (z.B. 2025-10-01 00:00:00)
-            date_str = for_date.strftime('%Y-%m-%d %H:%M:%S')
+            # --- KORREKTUR: 'for_date' MUSS als Monatsgrenze interpretiert werden ---
+            # (Diese Logik war bereits im letzten Schritt korrekt, bleibt zur Sicherheit hier)
+            start_of_month = for_date.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
 
-            # Ende des Monats berechnen (für Aktivierungs-Check)
             days_in_month = calendar.monthrange(for_date.year, for_date.month)[1]
             end_of_month_date = for_date.replace(day=days_in_month, hour=23, minute=59, second=59)
+
+            # String-Repräsentationen für SQL
+            start_of_month_str = start_of_month.strftime('%Y-%m-%d %H:%M:%S')
             end_of_month_date_str = end_of_month_date.strftime('%Y-%m-%d %H:%M:%S')
 
-            # LOGIK ARCHIVIERUNG (unverändert):
+            # --- KORREKTUR DER DATUMSVERGLEICHSLOGIK (Hier war der Fehler) ---
+
+            # LOGIK ARCHIVIERUNG:
             # Zeige Benutzer, die (nicht archiviert sind)
             # ODER (deren Archivierungsdatum *NACH* dem Start des Monats liegt)
-            query += f" AND (u.is_archived = 0 OR (u.is_archived = 1 AND u.archived_date > '{date_str}'))"
+            # Beispiel Jan 2026: '2026-01-01 00:00:01' > '2026-01-01 00:00:00' (wird angezeigt)
+            # '2026-01-01 00:00:00' > '2026-01-01 00:00:00' (wird NICHT angezeigt)
+            query += f" AND (u.is_archived = 0 OR (u.is_archived = 1 AND u.archived_date > '{start_of_month_str}'))"
 
-            # LOGIK AKTIVIERUNG (NEU):
+            # LOGIK AKTIVIERUNG:
             # Zeige Benutzer, die (kein Aktivierungsdatum haben)
             # ODER (deren Aktivierungsdatum *VOR* dem Ende des Monats liegt)
+            # Beispiel Jan 2026: '2026-01-01 00:00:00' <= '2026-01-31 23:59:59' (wird angezeigt)
+            # '2026-02-01 00:00:00' <= '2026-01-31 23:59:59' (wird NICHT angezeigt)
             query += f" AND (u.activation_date IS NULL OR u.activation_date <= '{end_of_month_date_str}')"
 
+            # --- ENDE KORREKTUR ---
+
         else:
-            # Wenn kein Datum angegeben ist (für allgemeine Listen wie UserOrderWindow):
+            # Wenn kein Datum angegeben ist (z.B. für UserManagementTab):
             # Zeige nur *aktuell* aktive Benutzer an
             now_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
             # (Archivierung: nicht archiviert ODER Archivierung in Zukunft)
             query += f" AND (u.is_archived = 0 OR (u.is_archived = 1 AND u.archived_date > '{now_str}'))"
 
-            # (Aktivierung: kein Datum ODER Datum in Vergangenheit) (NEU)
+            # (Aktivierung: kein Datum ODER Datum in Vergangenheit)
             query += f" AND (u.activation_date IS NULL OR u.activation_date <= '{now_str}')"
 
         # Sortierung anhängen
@@ -650,7 +661,9 @@ def update_last_event_date(user_id, event_type, date_str):
         print(f"Fehler beim Aktualisieren des Ereignisdatums: {e}")
         conn.rollback()
     finally:
-        if conn and conn.is_connected(): cursor.close(); conn.close()
+        if conn and conn.is_connected():
+            cursor.close()
+            conn.close()
 
 
 # ==============================================================================
