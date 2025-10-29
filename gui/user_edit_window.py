@@ -12,18 +12,18 @@ class UserEditWindow(tk.Toplevel):
     # KORREKTUR: 'admin_user_id' als 7. Argument hinzugefügt
     def __init__(self, master, user_id, user_data, callback, is_new, allowed_roles, admin_user_id):
         super().__init__(master)
-        self.user_id = user_id # ID des Users, der bearbeitet wird
+        self.user_id = user_id  # ID des Users, der bearbeitet wird
         # Stelle sicher, dass user_data ein Dictionary ist, auch wenn None übergeben wird
         self.user_data = user_data if user_data is not None else {}
         self.callback = callback
         self.is_new = is_new
         self.allowed_roles = allowed_roles
-        self.admin_user_id = admin_user_id # ID des Admins, der die Bearbeitung vornimmt
+        self.admin_user_id = admin_user_id  # ID des Admins, der die Bearbeitung vornimmt
 
         title = "Neuen Benutzer anlegen" if self.is_new else f"Benutzer bearbeiten: {self.user_data.get('vorname', '')} {self.user_data.get('name', '')}"
         self.title(title)
 
-        self.geometry("480x650")
+        self.geometry("480x680")  # Höhe angepasst für neues Feld
         self.transient(master)
         self.grab_set()
 
@@ -43,7 +43,9 @@ class UserEditWindow(tk.Toplevel):
 
         field_order = [
             ('vorname', 'Vorname'), ('name', 'Nachname'), ('geburtstag', 'Geburtstag'),
-            ('telefon', 'Telefon'), ('entry_date', 'Eintrittsdatum'), ('urlaub_gesamt', 'Urlaub Gesamt'),
+            ('telefon', 'Telefon'), ('entry_date', 'Eintrittsdatum'),
+            ('activation_date', 'Aktiv ab Datum'),  # NEUES FELD
+            ('urlaub_gesamt', 'Urlaub Gesamt'),
             ('urlaub_rest', 'Urlaub Rest'), ('diensthund', 'Diensthund'), ('role', 'Rolle'),
             ('password_hash', 'Passwort Hash'), ('has_seen_tutorial', 'Tutorial gesehen'),
             ('password_changed', 'Passwort geändert')
@@ -56,15 +58,47 @@ class UserEditWindow(tk.Toplevel):
             ttk.Label(main_frame, text=f"{display_name}:").grid(row=row_index, column=0, sticky="w", pady=5,
                                                                 padx=(0, 10))
 
-            if key in ["geburtstag", "entry_date"]:
+            # --- ANPASSUNG FÜR DATUMS-WIDGETS ---
+            if key in ["geburtstag", "entry_date", "activation_date"]:
+
+                # 1. Widget IMMER ohne Datum initialisieren
+                widget = DateEntry(main_frame, date_pattern='dd.mm.yyyy',
+                                   # Wichtig: locale='de_DE' für korrekte Anzeige
+                                   locale='de_DE',
+                                   # Setze 'None' als Wert, wenn das Feld leer ist
+                                   selectmode='day', date=None)
+
                 date_val = None
-                if self.user_data.get(key):
-                    try:
-                        date_val = datetime.strptime(str(self.user_data.get(key)), '%Y-%m-%d').date()
-                    except (ValueError, TypeError):
-                        pass
-                widget = DateEntry(main_frame, date_pattern='dd.mm.yyyy', date=date_val)
+                # 2. Rohdaten holen (kann None, str, date, datetime sein)
+                db_value = self.user_data.get(key)
+
+                # 3. Rohdaten in date_val (datetime.date) umwandeln
+                if db_value:
+                    date_str = str(db_value)  # In String umwandeln für Konsistenz
+                    if date_str != 'None' and not date_str.startswith('0000-00-00'):
+                        try:
+                            # Versuche, DATETIME oder DATE zu parsen
+                            if ' ' in date_str:
+                                # Zuerst als datetime parsen
+                                date_obj = datetime.strptime(date_str, '%Y-%m-%d %H:%M:%S')
+                                date_val = date_obj.date()  # Nur das Datum extrahieren
+                            else:
+                                # Als date parsen
+                                date_obj = datetime.strptime(date_str, '%Y-%m-%d')
+                                date_val = date_obj.date()
+                        except (ValueError, TypeError):
+                            pass  # date_val bleibt None
+
+                # 4. Wert im Widget setzen
+                if date_val:
+                    widget.set_date(date_val)
+                else:
+                    # Explizit den Text löschen, falls set_date(None) das heutige Datum setzt
+                    widget.set_date(None)
+                    widget.delete(0, 'end')
+
                 self.widgets[key] = widget
+            # --- ENDE ANPASSUNG DATUM ---
 
             elif key == 'diensthund':
                 self.vars[key] = tk.StringVar(value=self.user_data.get(key, 'Kein'))
@@ -132,12 +166,36 @@ class UserEditWindow(tk.Toplevel):
     def save(self):
         updated_data = {key: var.get().strip() for key, var in self.vars.items()}
 
+        # --- LOGIK FÜR DATUMS-WIDGETS (um None/NULL zu erlauben) ---
+        # (Diese Logik war bereits korrekt und bleibt unverändert)
         for key, widget in self.widgets.items():
-            try:
-                date_obj = widget.get_date()
-                updated_data[key] = date_obj.strftime('%Y-%m-%d')
-            except (ValueError, TypeError):
-                updated_data[key] = ""
+            date_str = widget.get()  # Hole den Text-Wert (z.B. "29.10.2025" oder "")
+
+            if not date_str:
+                # Wenn Feld leer ist
+                if key == 'entry_date':
+                    # Entry date darf NICHT leer sein
+                    messagebox.showwarning("Eingabe fehlt", "Das Eintrittsdatum darf nicht leer sein.", parent=self)
+                    return
+                else:
+                    # Geburtstag, Activation Date DÜRFEN leer sein (None -> NULL)
+                    updated_data[key] = None
+            else:
+                # Wenn Feld nicht leer ist, versuche zu parsen
+                try:
+                    # get_date() parst den Text (dd.mm.yyyy) zu einem datetime.date Objekt
+                    date_obj = widget.get_date()
+                    updated_data[key] = date_obj.strftime('%Y-%m-%d')
+                except (ValueError, TypeError):
+                    # Wenn Parsen fehlschlägt (z.B. ungültige Eingabe wie "test")
+                    if key == 'entry_date':
+                        messagebox.showwarning("Eingabe ungültig", f"Das Eintrittsdatum ('{date_str}') ist ungültig.",
+                                               parent=self)
+                        return
+                    else:
+                        # Optionale Felder bei Fehler auf NULL setzen
+                        updated_data[key] = None
+        # --- ENDE DATUMS-LOGIK ---
 
         if not updated_data.get("vorname") or not updated_data.get("name"):
             messagebox.showwarning("Eingabe fehlt", "Vorname und Name dürfen nicht leer sein.", parent=self)
@@ -149,7 +207,7 @@ class UserEditWindow(tk.Toplevel):
             return
 
         if updated_data.get('diensthund') == "Kein":
-            updated_data['diensthund'] = ""
+            updated_data['diensthund'] = ""  # In DB als Leerstring statt 'Kein' speichern
 
         updated_data['has_seen_tutorial'] = 1 if updated_data.get('has_seen_tutorial') == 'Ja' else 0
         updated_data['password_changed'] = 1 if updated_data.get('password_changed') == 'Ja' else 0

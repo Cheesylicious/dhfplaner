@@ -1,170 +1,238 @@
+# gui/dialogs/user_order_window.py
 import tkinter as tk
 from tkinter import ttk, messagebox
+# NEU: datetime wird benötigt, falls for_date=None als Fallback genutzt wird
+from datetime import datetime
 from database.db_users import get_ordered_users_for_schedule, save_user_order
 
 
 class UserOrderWindow(tk.Toplevel):
-    def __init__(self, parent, callback=None):
-        super().__init__(parent)
+    """
+    Fenster zur Verwaltung der globalen Benutzerreihenfolge und Sichtbarkeit
+    im Schichtplan.
+    """
+
+    # --- ÄNDERUNG: 'for_date' als Argument hinzugefügt ---
+    def __init__(self, master, callback, for_date):
+        super().__init__(master)
+        self.master = master
         self.callback = callback
-        self.title("Mitarbeiter-Reihenfolge und Sichtbarkeit")
-        self.transient(parent)
+
+        # NEU: Das Datum speichern, für das die Sortierung gilt.
+        # 'for_date' sollte der Start des Monats sein.
+        self.for_date = for_date
+
+        if self.for_date is None:
+            # Fallback, falls None übergeben wird (sollte nicht passieren)
+            self.for_date = datetime.now()
+
+        self.users = []
+        self.user_vars = {}
+        self.drag_data = {"index": 0, "y": 0}
+
+        self.title("Mitarbeiter-Sortierung & Sichtbarkeit")
+        self.geometry("500x700")
+        self.transient(master)
         self.grab_set()
 
-        self.users_data = []
-
-        self.create_widgets()
+        self.setup_ui()
         self.load_users()
 
-        # --- Fenstergröße dynamisch anpassen und zentrieren ---
-        self.update_idletasks()
-
-        header_height = 30
-        row_height = 28  # Feste Annahme für die Zeilenhöhe
-        button_frame_height = 60
-        label_height = 40
-
-        total_height = header_height + (len(self.users_data) * row_height) + button_frame_height + label_height
-
-        max_height = int(parent.winfo_height() * 0.8)
-        total_height = min(total_height, max_height)
-
-        # --- KORREKTUR: Mindestbreite erhöht ---
-        min_width = 700
-
-        parent_x = parent.winfo_x()
-        parent_y = parent.winfo_y()
-        parent_width = parent.winfo_width()
-        parent_height = parent.winfo_height()
-
-        position_x = parent_x + (parent_width // 2) - (min_width // 2)
-        position_y = parent_y + (parent_height // 2) - (total_height // 2)
-
-        self.geometry(f"{min_width}x{total_height}+{position_x}+{position_y}")
-        self.minsize(min_width, 300)
-
-    def create_widgets(self):
+    def setup_ui(self):
         main_frame = ttk.Frame(self, padding="10")
         main_frame.pack(fill="both", expand=True)
+        main_frame.rowconfigure(1, weight=1)
+        main_frame.columnconfigure(0, weight=1)
 
         ttk.Label(main_frame,
-                  text="Sortieren per Drag & Drop oder mit den Buttons. Doppelklick zum Ein-/Ausblenden.").pack(
-            anchor="w", pady=(0, 10))
+                  text="Sortieren (Drag & Drop) und Sichtbarkeit im Plan festlegen.\n"
+                       "Unsichtbare Mitarbeiter erscheinen nicht im Schichtplan.",
+                  justify="center").grid(row=0, column=0, columnspan=2, pady=(5, 10))
 
-        list_frame = ttk.Frame(main_frame)
-        list_frame.pack(fill="both", expand=True)
-        list_frame.columnconfigure(0, weight=1)
-        list_frame.rowconfigure(0, weight=1)
+        # Canvas und Scrollbar für die ListBox
+        canvas_frame = ttk.Frame(main_frame)
+        canvas_frame.grid(row=1, column=0, sticky="nsew", columnspan=2)
+        canvas_frame.rowconfigure(0, weight=1)
+        canvas_frame.columnconfigure(0, weight=1)
 
-        self.tree = ttk.Treeview(list_frame, columns=("name", "role", "visible"), show="headings", selectmode="browse")
-        self.tree.grid(row=0, column=0, sticky="nsew")
+        self.canvas = tk.Canvas(canvas_frame, highlightthickness=0)
+        self.canvas.grid(row=0, column=0, sticky="nsew")
 
-        self.tree.heading("name", text="Name")
-        self.tree.heading("role", text="Rolle")
-        self.tree.heading("visible", text="Sichtbar im Plan")
-
-        # --- KORREKTUR: "name"-Spalte dehnbar gemacht ---
-        self.tree.column("name", minwidth=300, stretch=tk.YES)
-        self.tree.column("role", width=150, stretch=tk.NO)
-        self.tree.column("visible", width=150, anchor="center", stretch=tk.NO)
-
-        scrollbar = ttk.Scrollbar(list_frame, orient="vertical", command=self.tree.yview)
-        self.tree.configure(yscrollcommand=scrollbar.set)
+        scrollbar = ttk.Scrollbar(canvas_frame, orient="vertical", command=self.canvas.yview)
         scrollbar.grid(row=0, column=1, sticky="ns")
 
-        button_subframe = ttk.Frame(list_frame)
-        button_subframe.grid(row=0, column=2, sticky="ns", padx=(10, 0))
+        self.canvas.configure(yscrollcommand=scrollbar.set)
 
-        up_button = ttk.Button(button_subframe, text="▲", command=lambda: self.move_entry(-1))
-        up_button.pack(pady=5)
+        # Frame IN die Canvas, das die ListBox enthält
+        self.list_frame = ttk.Frame(self.canvas)
+        self.canvas.create_window((0, 0), window=self.list_frame, anchor="nw")
 
-        down_button = ttk.Button(button_subframe, text="▼", command=lambda: self.move_entry(1))
-        down_button.pack(pady=5)
+        self.list_frame.bind("<Configure>", lambda e: self.canvas.configure(scrollregion=self.canvas.bbox("all")))
 
-        self.tree.bind("<Double-1>", self.toggle_visibility)
-        self.tree.bind("<B1-Motion>", self.move_item_dnd)
-        self.tree.bind("<ButtonRelease-1>", self.on_dnd_release)
+        # Die ListBox (als tk.Listbox für Drag & Drop und Farbkontrolle)
+        self.list_box = tk.Listbox(self.list_frame, font=("Segoe UI", 11), selectmode="single", width=40, height=20)
+        self.list_box.pack(side=tk.LEFT, fill=tk.Y, expand=True)
 
-        bottom_frame = ttk.Frame(main_frame)
-        bottom_frame.pack(fill="x", pady=(10, 0))
+        # Frame für die Checkboxen
+        self.check_frame = ttk.Frame(self.list_frame)
+        self.check_frame.pack(side=tk.LEFT, fill=tk.Y, padx=10)
 
-        save_button = ttk.Button(bottom_frame, text="Speichern & Schließen", command=self.save_order)
-        save_button.pack(side="right")
+        # Buttons
+        btn_frame = ttk.Frame(main_frame)
+        btn_frame.grid(row=2, column=0, columnspan=2, pady=10, sticky="ew")
+        btn_frame.columnconfigure((0, 1), weight=1)
 
-        cancel_button = ttk.Button(bottom_frame, text="Abbrechen", command=self.destroy)
-        cancel_button.pack(side="right", padx=10)
+        ttk.Button(btn_frame, text="Speichern", command=self.save_order, style="Success.TButton").grid(row=0, column=0,
+                                                                                                       padx=5,
+                                                                                                       sticky="ew")
+        ttk.Button(btn_frame, text="Abbrechen", command=self.destroy).grid(row=0, column=1, padx=5, sticky="ew")
+
+        # Drag & Drop Bindings
+        self.list_box.bind("<Button-1>", self.on_press)
+        self.list_box.bind("<B1-Motion>", self.on_drag)
+        self.list_box.bind("<ButtonRelease-1>", self.on_release)
 
     def load_users(self):
-        self.users_data = get_ordered_users_for_schedule(include_hidden=True)
-        self.populate_tree()
+        """Lädt die Benutzerliste basierend auf dem `self.for_date`."""
+        # Alte Checkboxen zerstören, falls vorhanden
+        for widget in self.check_frame.winfo_children():
+            widget.destroy()
 
-    def populate_tree(self):
-        for i in self.tree.get_children():
-            self.tree.delete(i)
+        self.list_box.delete(0, tk.END)
 
-        for user in self.users_data:
-            visibility_text = "Ja" if user.get('is_visible', 1) else "Nein"
-            tags = ()
-            if not user.get('is_visible', 1):
-                tags = ('hidden',)
-            self.tree.tag_configure('hidden', foreground='gray')
-            self.tree.insert("", "end", iid=user['id'],
-                             values=(f"{user['name']}, {user['vorname']}", user['role'], visibility_text),
-                             tags=tags)
-
-    def move_item_dnd(self, event):
-        item_id = self.tree.identify_row(event.y)
-        if item_id:
-            self.tree.move(item_id, "", self.tree.index(item_id))
-
-    def on_dnd_release(self, event):
-        ordered_ids = self.tree.get_children()
-        id_map = {str(u['id']): u for u in self.users_data}
-        self.users_data = [id_map[str(uid)] for uid in ordered_ids if str(uid) in id_map]
-
-    def move_entry(self, direction):
-        selected_items = self.tree.selection()
-        if not selected_items:
-            return
-        item_id = selected_items[0]
-        current_index = self.tree.index(item_id)
-
-        self.tree.move(item_id, '', current_index + direction)
-
-        self.on_dnd_release(None)
-
-    def toggle_visibility(self, event):
-        item_id = self.tree.identify_row(event.y)
-        if not item_id:
+        try:
+            # --- HIER IST DIE WICHTIGE ÄNDERUNG ---
+            # Ruft die Benutzer ab, die für den spezifischen Monat (self.for_date)
+            # relevant sind (aktiviert und noch nicht archiviert).
+            # include_hidden=True, damit wir auch die "unsichtbaren" sehen und bearbeiten können.
+            users = get_ordered_users_for_schedule(include_hidden=True, for_date=self.for_date)
+            # --- ENDE ÄNDERUNG ---
+        except Exception as e:
+            messagebox.showerror("Fehler", f"Fehler beim Laden der Benutzer: {e}", parent=self)
             return
 
-        for user in self.users_data:
-            if str(user['id']) == str(item_id):
-                user['is_visible'] = 1 - user.get('is_visible', 1)
-                break
+        self.users = users
+        self.user_vars = {}
 
-        self.populate_tree()
-        self.tree.selection_set(item_id)
-        self.tree.focus(item_id)
+        if not self.users:
+            ttk.Label(self.check_frame, text="Keine Benutzer für diesen Zeitraum gefunden.").pack()
+            return
+
+        for user in self.users:
+            name = f"{user['vorname']} {user['name']}"
+            self.list_box.insert(tk.END, name)
+
+            # Sichtbarkeits-Status
+            is_visible = user.get('is_visible', 1) == 1
+            var = tk.BooleanVar(value=is_visible)
+            self.user_vars[user['id']] = var
+
+            # Checkbox erstellen
+            cb = ttk.Checkbutton(self.check_frame, text="Sichtbar", variable=var,
+                                 style="Switch.TCheckbutton")
+            cb.pack(anchor="w", pady=5, ipady=1)
+
+            # Mitarbeiter ausgrauen, die nicht sichtbar sind
+            if not is_visible:
+                self.list_box.itemconfig(tk.END, {'fg': 'grey'})
 
     def save_order(self):
-        ordered_ids = self.tree.get_children()
+        """Speichert die neue Reihenfolge UND den Sichtbarkeitsstatus."""
+        # Erstellt eine Liste von Dictionaries im Format, das save_user_order erwartet
+        ordered_user_info = []
 
-        user_map = {str(u['id']): u for u in self.users_data}
+        # self.users muss die sortierte Liste sein (wird durch Drag & Drop aktualisiert)
+        for user in self.users:
+            user_id = user['id']
+            is_visible = self.user_vars[user_id].get()
 
-        final_order_list = []
-        for index, user_id in enumerate(ordered_ids):
-            if user_id in user_map:
-                user_data = user_map[user_id]
-                user_data['order_index'] = index
-                final_order_list.append(user_data)
+            ordered_user_info.append({
+                'id': user_id,
+                'is_visible': 1 if is_visible else 0
+            })
 
-        success, message = save_user_order(final_order_list)
+        success, message = save_user_order(ordered_user_info)
 
         if success:
-            messagebox.showinfo("Erfolg", message, parent=self)
+            messagebox.showinfo("Gespeichert", message, parent=self)
             if self.callback:
-                self.callback()
+                self.callback()  # Ruft den spezifischen Reload-Callback auf
             self.destroy()
         else:
             messagebox.showerror("Fehler", message, parent=self)
+
+    # --- Drag & Drop Methoden (on_press, on_drag, on_release) ---
+    # (Diese bleiben unverändert, da sie nur die lokale 'self.users' Liste manipulieren)
+
+    def on_press(self, event):
+        try:
+            index = self.list_box.nearest(event.y)
+            self.list_box.selection_clear(0, tk.END)
+            self.list_box.selection_set(index)
+            self.list_box.activate(index)
+            self.drag_data["index"] = index
+            self.drag_data["y"] = event.y
+        except Exception as e:
+            print(f"Fehler bei on_press: {e}")
+
+    def on_drag(self, event):
+        try:
+            new_index = self.list_box.nearest(event.y)
+            if new_index != self.drag_data["index"]:
+                # Bewege das Item in der Listbox
+                item_text = self.list_box.get(self.drag_data["index"])
+                self.list_box.delete(self.drag_data["index"])
+                self.list_box.insert(new_index, item_text)
+
+                # Aktualisiere die selection und den active state
+                self.list_box.selection_clear(0, tk.END)
+                self.list_box.selection_set(new_index)
+                self.list_box.activate(new_index)
+
+                # Aktualisiere die zugrundeliegende self.users Liste
+                moved_user = self.users.pop(self.drag_data["index"])
+                self.users.insert(new_index, moved_user)
+
+                # Aktualisiere die Checkboxen (langsamer, aber notwendig)
+                self.update_checkbox_order()
+
+                self.drag_data["index"] = new_index
+        except Exception as e:
+            print(f"Fehler bei on_drag: {e}")
+
+    def on_release(self, event):
+        self.drag_data = {"index": 0, "y": 0}
+        # Aktualisiere die Farben basierend auf der neuen Checkbox-Reihenfolge
+        self.update_listbox_colors()
+
+    def update_checkbox_order(self):
+        """Ordnet die Checkboxen entsprechend der self.users Liste neu an."""
+        # Alle Checkboxen aus dem Frame entfernen
+        for widget in self.check_frame.winfo_children():
+            widget.pack_forget()
+
+        # Checkboxen in der neuen Reihenfolge (basierend auf self.users) wieder hinzufügen
+        for user in self.users:
+            user_id = user['id']
+            var = self.user_vars[user_id]
+
+            # Finde die Checkbox, die zu dieser Variable gehört
+            # (Dieser Weg ist robust, falls die Widgets nicht einfach neu erstellt werden)
+            for child in self.check_frame.winfo_children():
+                if child.cget("variable") == str(var):
+                    child.pack(anchor="w", pady=5, ipady=1)
+                    break
+            else:
+                # Fallback: Widget neu erstellen (sollte nicht passieren, wenn load_users korrekt war)
+                cb = ttk.Checkbutton(self.check_frame, text="Sichtbar", variable=var,
+                                     style="Switch.TCheckbutton")
+                cb.pack(anchor="w", pady=5, ipady=1)
+
+    def update_listbox_colors(self):
+        """Aktualisiert die Listbox-Farben basierend auf dem Sichtbarkeitsstatus."""
+        for i, user in enumerate(self.users):
+            user_id = user['id']
+            if not self.user_vars[user_id].get():
+                self.list_box.itemconfig(i, {'fg': 'grey'})
+            else:
+                self.list_box.itemconfig(i, {'fg': 'black'})

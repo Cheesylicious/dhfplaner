@@ -4,7 +4,8 @@ from tkinter import ttk, messagebox, simpledialog
 # --- NEUE IMPORTE ---
 from database.db_core import (
     run_db_update_v1, run_db_update_is_approved,
-    load_config_json, save_config_json, VACATION_RULES_CONFIG_KEY
+    load_config_json, save_config_json, VACATION_RULES_CONFIG_KEY,
+    run_db_update_activation_date  # NEUER IMPORT
 )
 from database.db_users import admin_batch_update_vacation_entitlements
 
@@ -40,10 +41,21 @@ class SettingsTab(ttk.Frame):
                    command=self.run_update_is_approved,
                    style='Danger.TButton').pack(fill='x', padx=5, pady=5)
 
+        # --- 2. NEU: Update für 'activation_date' Spalte ---
+        ttk.Label(general_frame,
+                  text="Funktion für zukünftige Mitarbeiter-Aktivierung hinzufügen:",
+                  font=('Segoe UI', 10, 'bold')).pack(anchor='w', pady=(10, 5))
+
+        ttk.Button(general_frame,
+                   text="DB Update: 'Aktivierungsdatum' Spalte hinzufügen",
+                   command=self.run_update_activation_date,  # NEUE FUNKTION
+                   style='Danger.TButton').pack(fill='x', padx=5, pady=5)
+        # --- ENDE NEU ---
+
         # Separator
         ttk.Separator(general_frame, orient='horizontal').pack(fill='x', pady=15)
 
-        # --- 2. Update für Chat (Bestehende Funktion) ---
+        # --- 3. Update für Chat (Bestehende Funktion) ---
         ttk.Label(general_frame,
                   text="Datenbank-Update für die Chat-Funktion (last_seen und chat_messages):",
                   font=('Segoe UI', 10, 'bold')).pack(anchor='w', pady=(10, 5))
@@ -53,7 +65,7 @@ class SettingsTab(ttk.Frame):
                    command=self.run_chat_update,
                    style='Success.TButton').pack(fill='x', padx=5, pady=5)
 
-        # --- 3. NEU: FRAME FÜR URLAUBSREGELN ---
+        # --- 4. NEU: FRAME FÜR URLAUBSREGELN ---
         vacation_frame = ttk.LabelFrame(self, text="📅 Urlaubsanspruch nach Dienstjahren", padding=(20, 10))
         vacation_frame.pack(fill="both", expand=True, padx=20, pady=(0, 20))
 
@@ -98,6 +110,22 @@ class SettingsTab(ttk.Frame):
             messagebox.showinfo("Erfolg", message, parent=self)
         else:
             messagebox.showerror("Fehler", f"Update fehlgeschlagen: {message}", parent=self)
+
+    # --- NEUE HANDLER-METHODE ---
+    def run_update_activation_date(self):
+        """Löst das Update für die activation_date Spalte aus."""
+        if not messagebox.askyesno("Update bestätigen",
+                                   "Sind Sie sicher, dass Sie die 'activation_date' Spalte hinzufügen möchten? Dies wird für zukünftig startende Mitarbeiter benötigt.",
+                                   parent=self):
+            return
+
+        success, message = run_db_update_activation_date()
+        if success:
+            messagebox.showinfo("Erfolg", message, parent=self)
+        else:
+            messagebox.showerror("Fehler", f"Update fehlgeschlagen: {message}", parent=self)
+
+    # --- ENDE NEU ---
 
     def run_chat_update(self):
         """Löst das Update für die Chat-Funktion aus."""
