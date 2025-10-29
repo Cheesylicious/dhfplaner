@@ -578,3 +578,31 @@ def run_db_update_add_archived_date():
     except Exception as e: conn.rollback(); print(f"Fehler: {e}"); return False, f"Fehler: {e}"
     finally:
         if conn and conn.is_connected(): cursor.close(); conn.close()
+
+def run_db_update_activation_date():
+    """
+    Fügt die Spalte 'activation_date' zur 'users'-Tabelle hinzu,
+    um zukünftige Aktivierungen zu steuern.
+    """
+    conn = create_connection()
+    if conn is None:
+        return False, "Keine Datenbankverbindung."
+    try:
+        cursor = conn.cursor()
+        cursor.execute("ALTER TABLE users ADD activation_date DATETIME NULL DEFAULT NULL AFTER entry_date")
+        conn.commit()
+        return True, "Datenbank-Update für 'activation_date' erfolgreich durchgeführt."
+    except mysql.connector.Error as e:
+        conn.rollback()
+        if e.errno == 1060:  # Duplicate column name
+            return True, "Spalte 'activation_date' existiert bereits. Keine Aktion erforderlich."
+        print(f"Fehler beim Hinzufügen von activation_date: {e}")
+        return False, f"Fehler beim Update: {e}"
+    except Exception as e:
+        conn.rollback()
+        print(f"Allgemeiner Fehler beim Hinzufügen von activation_date: {e}")
+        return False, f"Allgemeiner Fehler: {e}"
+    finally:
+        if conn and conn.is_connected():
+            cursor.close()
+            conn.close()

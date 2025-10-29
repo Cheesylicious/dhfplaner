@@ -3,6 +3,7 @@
 from database.db_core import create_connection, hash_password, _log_activity, _create_admin_notification, \
     get_vacation_days_for_tenure
 from datetime import datetime
+import calendar  # NEUER IMPORT
 # --- ENDE ANPASSUNG ---
 import mysql.connector
 
@@ -124,10 +125,11 @@ def register_user(vorname, name, password, role="Benutzer"):
         # --- ENDE NEUE LOGIK ---
 
         # is_archived standardmäßig 0, archived_date ist NULL
+        # activation_date standardmäßig NULL (NEU)
         # urlaub_gesamt und urlaub_rest werden jetzt dynamisch gesetzt
         cursor.execute(
-            "INSERT INTO users (vorname, name, password_hash, role, entry_date, is_approved, is_archived, archived_date, urlaub_gesamt, urlaub_rest) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
-            (vorname, name, password_hash, role, entry_date, 0, 0, None, urlaub_gesamt, urlaub_gesamt)
+            "INSERT INTO users (vorname, name, password_hash, role, entry_date, is_approved, is_archived, archived_date, urlaub_gesamt, urlaub_rest, activation_date) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+            (vorname, name, password_hash, role, entry_date, 0, 0, None, urlaub_gesamt, urlaub_gesamt, None)
         )
         _log_activity(cursor, None, 'USER_REGISTRATION',
                       f'Benutzer {vorname} {name} hat sich registriert und wartet auf Freischaltung.')
@@ -149,7 +151,7 @@ def register_user(vorname, name, password, role="Benutzer"):
 
 
 def authenticate_user(vorname, name, password):
-    # ... (unverändert, prüft bereits is_approved=1 und is_archived=0) ...
+    # ... (verändert, prüft jetzt auch activation_date) ...
     conn = create_connection()
     if conn is None:
         return None
@@ -174,21 +176,34 @@ def authenticate_user(vorname, name, password):
                     return None
                 return user
             return None
+
         cursor.execute(
             "SELECT * FROM users WHERE vorname = %s AND name = %s AND password_hash = %s",
             (vorname, name, password_hash)
         )
         user = cursor.fetchone()
         if user:
+            # 1. Check Freischaltung
             if user.get('is_approved') == 0:
                 return None
+
+            # 2. Check Archivierung
             if user.get('is_archived', 0) == 1:
                 # Prüfe, ob das Archivierungsdatum in der Zukunft liegt
                 archived_date = user.get('archived_date')
                 if archived_date and archived_date > datetime.now():
-                    return user  # Zukünftige Archivierung, Login noch erlaubt
-                return None  # Bereits archiviert
+                    pass  # Zukünftige Archivierung, Login noch erlaubt, weiter prüfen
+                else:
+                    return None  # Bereits archiviert
+
+            # 3. Check Aktivierung (NEU)
+            activation_date = user.get('activation_date')
+            if activation_date and activation_date > datetime.now():
+                return None  # Zukünftige Aktivierung, Login noch nicht erlaubt
+
+            # Wenn alle Prüfungen bestanden, User zurückgeben
             return user
+
         return None
     except Exception as e:
         print(f"Fehler bei der Authentifizierung: {e}")
@@ -225,7 +240,9 @@ def get_all_users():
         return []
     try:
         cursor = conn.cursor(dictionary=True)
-        cursor.execute("SELECT id, vorname, name, role, is_approved, is_archived, archived_date FROM users")
+        # NEU: activation_date hinzugefügt
+        cursor.execute(
+            "SELECT id, vorname, name, role, is_approved, is_archived, archived_date, activation_date FROM users")
         users = cursor.fetchall()
         return users
     except Exception as e:
@@ -259,9 +276,9 @@ def get_all_users_with_details():
 def get_ordered_users_for_schedule(include_hidden=False, for_date=None):
     """
     Holt die Benutzer in der festgelegten Reihenfolge.
-    Gibt standardmäßig nur freigeschaltete (is_approved = 1) UND aktive (is_archived = 0) Benutzer zurück.
+    Gibt standardmäßig nur freigeschaltete (is_approved = 1) UND aktive Benutzer zurück.
     Wenn for_date angegeben ist (Stichtag ist der *Beginn des Monats*),
-    werden auch Benutzer zurückgegeben, die NACH diesem Stichtag archiviert wurden (oder noch nicht archiviert sind).
+    werden Benutzer basierend auf ihrem Aktivierungs- und Archivierungsdatum gefiltert.
     """
     global _USER_ORDER_CACHE
 
@@ -279,29 +296,36 @@ def get_ordered_users_for_schedule(include_hidden=False, for_date=None):
                 WHERE u.is_approved = 1
                 """
 
-        # Bedingung für Archivierung hinzufügen
+        # Bedingung für Archivierung und Aktivierung hinzufügen
         if for_date:
             # 'for_date' ist der *Start des aktuellen Monats* (z.B. 2025-10-01 00:00:00)
-
-            # Konvertiere for_date in einen DATETIME-String für den Vergleich
             date_str = for_date.strftime('%Y-%m-%d %H:%M:%S')
 
-            # LOGIK: Zeige Benutzer an, die (nicht archiviert sind)
+            # Ende des Monats berechnen (für Aktivierungs-Check)
+            days_in_month = calendar.monthrange(for_date.year, for_date.month)[1]
+            end_of_month_date = for_date.replace(day=days_in_month, hour=23, minute=59, second=59)
+            end_of_month_date_str = end_of_month_date.strftime('%Y-%m-%d %H:%M:%S')
+
+            # LOGIK ARCHIVIERUNG (unverändert):
+            # Zeige Benutzer, die (nicht archiviert sind)
             # ODER (deren Archivierungsdatum *NACH* dem Start des Monats liegt)
-            # Beispiel:
-            # Plan für OKTOBER. for_date = '2025-10-01 00:00:00'
-            # Archiviert am 15. OKT.
-            # Check: ('2025-10-15' > '2025-10-01') ist WAHR. -> Wird angezeigt (Korrekt)
-            #
-            # Plan für NOVEMBER. for_date = '2025-11-01 00:00:00'
-            # Archiviert am 15. OKT.
-            # Check: ('2025-10-15' > '2025-11-01') ist FALSCH. -> Wird NICHT angezeigt (Korrekt)
             query += f" AND (u.is_archived = 0 OR (u.is_archived = 1 AND u.archived_date > '{date_str}'))"
+
+            # LOGIK AKTIVIERUNG (NEU):
+            # Zeige Benutzer, die (kein Aktivierungsdatum haben)
+            # ODER (deren Aktivierungsdatum *VOR* dem Ende des Monats liegt)
+            query += f" AND (u.activation_date IS NULL OR u.activation_date <= '{end_of_month_date_str}')"
+
         else:
             # Wenn kein Datum angegeben ist (für allgemeine Listen wie UserOrderWindow):
-            # Zeige nur aktive Benutzer an (die nicht archiviert sind ODER deren Archivierung in der Zukunft liegt)
+            # Zeige nur *aktuell* aktive Benutzer an
             now_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+
+            # (Archivierung: nicht archiviert ODER Archivierung in Zukunft)
             query += f" AND (u.is_archived = 0 OR (u.is_archived = 1 AND u.archived_date > '{now_str}'))"
+
+            # (Aktivierung: kein Datum ODER Datum in Vergangenheit) (NEU)
+            query += f" AND (u.activation_date IS NULL OR u.activation_date <= '{now_str}')"
 
         # Sortierung anhängen
         query += " ORDER BY uo.sort_order ASC, u.name ASC"
@@ -362,8 +386,7 @@ def save_user_order(user_order_list):
 
 
 def get_all_user_participation():
-    # ... (unverändert) ...
-    # KORREKTUR: Muss auch zukünftig archivierte Benutzer anzeigen
+    # ... (verändert, prüft activation_date) ...
     conn = create_connection()
     if conn is None:
         return []
@@ -375,6 +398,7 @@ def get_all_user_participation():
             FROM users
             WHERE is_approved = 1 
             AND (is_archived = 0 OR (is_archived = 1 AND archived_date > '{now_str}'))
+            AND (activation_date IS NULL OR activation_date <= '{now_str}')
         """)
         return cursor.fetchall()
     except Exception as e:
@@ -392,12 +416,20 @@ def update_user_details(user_id, details, current_user_id):
         return False, "Keine Datenbankverbindung."
     try:
         cursor = conn.cursor()
+
+        # --- NEU: Leere Strings für Datumsfelder in None umwandeln ---
+        # (Wird von user_edit_window jetzt als None übergeben, aber doppelt sicher)
+        for date_field in ['geburtstag', 'entry_date', 'activation_date', 'archived_date']:
+            if date_field in details and details[date_field] == "":
+                details[date_field] = None
+        # --- ENDE NEU ---
+
         valid_details = {k: v for k, v in details.items() if k != 'password'}
 
         # --- ANPASSUNG FÜR URLAUBSBERECHNUNG BEI DATUMSÄNDERUNG ---
         if 'entry_date' in valid_details:
             new_entry_date = valid_details['entry_date']
-            default_days = 30 # Standardwert
+            default_days = 30  # Standardwert
 
             # Wenn urlaub_gesamt im Update-Paket ist, nutze diesen als neuen Basiswert (falls Datum leer)
             # Konvertiere sicherheitshalber zu int
@@ -405,7 +437,8 @@ def update_user_details(user_id, details, current_user_id):
                 try:
                     default_days = int(valid_details['urlaub_gesamt'])
                 except (ValueError, TypeError):
-                    print(f"Warnung: Ungültiger Wert für urlaub_gesamt in details: {valid_details['urlaub_gesamt']}. Fallback auf 30.")
+                    print(
+                        f"Warnung: Ungültiger Wert für urlaub_gesamt in details: {valid_details['urlaub_gesamt']}. Fallback auf 30.")
                     default_days = 30
             else:
                 # Wenn urlaub_gesamt NICHT geändert wird, hole aktuellen Wert aus DB als Basis
@@ -415,7 +448,8 @@ def update_user_details(user_id, details, current_user_id):
                     try:
                         default_days = int(current_total_result[0])
                     except (ValueError, TypeError):
-                        print(f"Warnung: Ungültiger Wert für urlaub_gesamt in DB: {current_total_result[0]}. Fallback auf 30.")
+                        print(
+                            f"Warnung: Ungültiger Wert für urlaub_gesamt in DB: {current_total_result[0]}. Fallback auf 30.")
                         default_days = 30
 
             # Berechne neuen Gesamtanspruch
@@ -431,33 +465,35 @@ def update_user_details(user_id, details, current_user_id):
                     old_rest = int(current_vacation[1])
                     # --- ENDE KORREKTUR ---
 
-                    diff = new_total_vacation - old_total # Jetzt sollte es int - int sein
+                    diff = new_total_vacation - old_total  # Jetzt sollte es int - int sein
                     new_rest = old_rest + diff
 
                     valid_details['urlaub_gesamt'] = new_total_vacation
-                    valid_details['urlaub_rest'] = new_rest if new_rest >= 0 else 0 # Sicherstellen, dass Rest nicht negativ wird
+                    valid_details[
+                        'urlaub_rest'] = new_rest if new_rest >= 0 else 0  # Sicherstellen, dass Rest nicht negativ wird
 
                 except (ValueError, TypeError) as e:
-                    print(f"Fehler bei Konvertierung der Urlaubstage für User {user_id}: {e}. Urlaubstage werden nicht automatisch angepasst.")
+                    print(
+                        f"Fehler bei Konvertierung der Urlaubstage für User {user_id}: {e}. Urlaubstage werden nicht automatisch angepasst.")
                     # Entferne die automatisch berechneten Werte, falls Konvertierung fehlschlägt
                     if 'urlaub_gesamt' in valid_details and valid_details['urlaub_gesamt'] == new_total_vacation:
-                       del valid_details['urlaub_gesamt']
+                        del valid_details['urlaub_gesamt']
                     if 'urlaub_rest' in valid_details:
-                       del valid_details['urlaub_rest']
+                        del valid_details['urlaub_rest']
             else:
-                 print(f"Warnung: Konnte alte Urlaubstage für User {user_id} nicht abrufen. Automatische Anpassung übersprungen.")
-                 # Entferne die automatisch berechneten Werte
-                 if 'urlaub_gesamt' in valid_details and valid_details['urlaub_gesamt'] == new_total_vacation:
+                print(
+                    f"Warnung: Konnte alte Urlaubstage für User {user_id} nicht abrufen. Automatische Anpassung übersprungen.")
+                # Entferne die automatisch berechneten Werte
+                if 'urlaub_gesamt' in valid_details and valid_details['urlaub_gesamt'] == new_total_vacation:
                     del valid_details['urlaub_gesamt']
-                 if 'urlaub_rest' in valid_details:
+                if 'urlaub_rest' in valid_details:
                     del valid_details['urlaub_rest']
-
 
         # --- ENDE ANPASSUNG ---
 
         # Nur fortfahren, wenn noch Felder zum Aktualisieren übrig sind
         if not valid_details:
-             return True, "Keine Änderungen zum Speichern vorhanden (nach Berechnungsprüfung)." # Oder eine passendere Meldung
+            return True, "Keine Änderungen zum Speichern vorhanden (nach Berechnungsprüfung)."  # Oder eine passendere Meldung
 
         fields = ', '.join([f"`{key}` = %s" for key in valid_details])
         values = list(valid_details.values()) + [user_id]
@@ -710,7 +746,11 @@ def archive_user(user_id, current_user_id, archive_date=None):
 
 
 def unarchive_user(user_id, current_user_id):
-    """Reaktiviert einen Benutzer (setzt is_archived = 0 und archived_date = NULL)."""
+    """
+    Reaktiviert einen Benutzer.
+    Setzt is_archived = 0, archived_date = NULL.
+    Setzt activation_date auf NULL, um sofortigen Login zu ermöglichen (wenn approved).
+    """
     conn = create_connection()
     if conn is None:
         return False, "Keine Datenbankverbindung."
@@ -720,8 +760,9 @@ def unarchive_user(user_id, current_user_id):
         user_data = cursor.fetchone()
         user_fullname = f"{user_data[0]} {user_data[1]}" if user_data else f"ID {user_id}"
 
-        # NEU: Setze archived_date auf NULL
-        cursor.execute("UPDATE users SET is_archived = 0, archived_date = NULL WHERE id = %s", (user_id,))
+        # NEU: Setze archived_date UND activation_date auf NULL
+        cursor.execute("UPDATE users SET is_archived = 0, archived_date = NULL, activation_date = NULL WHERE id = %s",
+                       (user_id,))
 
         _log_activity(cursor, current_user_id, 'USER_UNARCHIVE', f'Benutzer {user_fullname} wurde reaktiviert.')
         _create_admin_notification(cursor, f'Benutzer {user_fullname} wurde reaktiviert.')
@@ -744,6 +785,7 @@ def admin_batch_update_vacation_entitlements(current_user_id):
     """
     Aktualisiert den Urlaubsanspruch (gesamt und rest) für ALLE aktiven Benutzer
     basierend auf den in der DB gespeicherten Regeln (VACATION_RULES_CONFIG_KEY).
+    Berücksichtigt activation_date und archived_date.
     """
     conn = create_connection()
     if conn is None:
@@ -752,13 +794,14 @@ def admin_batch_update_vacation_entitlements(current_user_id):
     try:
         cursor = conn.cursor(dictionary=True)
 
-        # 1. Alle aktiven Benutzer holen (inkl. zukünftig archivierte)
+        # 1. Alle aktiven Benutzer holen (inkl. zukünftig archivierte, exkl. zukünftig aktivierte)
         now_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         cursor.execute(f"""
             SELECT id, vorname, name, entry_date, urlaub_gesamt, urlaub_rest
             FROM users
             WHERE is_approved = 1 
             AND (is_archived = 0 OR (is_archived = 1 AND archived_date > '{now_str}'))
+            AND (activation_date IS NULL OR activation_date <= '{now_str}')
         """)
         all_users = cursor.fetchall()
 
