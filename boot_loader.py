@@ -1,204 +1,225 @@
-# boot_loader.py
+# gui/boot_loader.py
 import tkinter as tk
-from tkinter import messagebox
+from tkinter import ttk, messagebox
 import threading
 import time
-from datetime import date
+from datetime import date, datetime
 
-# Import der DB-Funktionen (inkl. Pre-Warming)
+# Datenbank-Kern (Fassade)
 from database import db_core
 
-# --- NEUE IMPORTE FÜR PRE-LOADING ---
-from database.db_shifts import get_all_shift_types
+# Wichtige Manager
+# KORREKTUR: Wir importieren die Klassen, rufen sie aber statisch auf
 from gui.holiday_manager import HolidayManager
 from gui.event_manager import EventManager
+# --- ENDE KORREKTUR ---
+
+from gui.shift_plan_data_manager import ShiftPlanDataManager
+from database.db_shifts import get_all_shift_types
+
+# Fenster
+from gui.login_window import LoginWindow
+from gui.main_admin_window import MainAdminWindow
+from gui.main_user_window import MainUserWindow
 
 
-# ------------------------------------
+class Application(tk.Tk):
+    """
+    Die Hauptanwendungsklasse (Bootloader), die als Root-Tkinter-Instanz dient,
+    den Start verwaltet und die Hauptfenster (Login, Admin, User) steuert.
+    """
 
-
-class Application:
     def __init__(self):
-        print("[DEBUG] Application.__init__: Erstelle Root-Fenster...")
-        self.root = tk.Tk()
-        self.root.withdraw()
+        super().__init__()
+        self.withdraw()
+
         self.current_user_data = None
         self.main_window = None
         self.login_window = None
+        self.current_display_date = date.today()
 
-        # --- Threads für Pre-Loading ---
         self.prewarm_thread = None
-        self.preload_thread = None  # NEU
-        # -------------------------------
+        self.preload_thread = None
 
-    def run(self):
-        print("[DEBUG] Application.run: Start")
-        # 1. Starte das Pre-Warming des DB-Pools im Hintergrund
+        self.shift_types_data = {}
+        self.min_staffing_rules = {}
+
+        # --- KORREKTUR: Instanziierung entfernt ---
+        # Diese Manager werden jetzt (gemäß Ihrem Code-Design) statisch verwendet.
+        # self.holiday_manager = HolidayManager() # ENTFERNT
+        # self.event_manager = EventManager() # ENTFERNT
+        # --- ENDE KORREKTUR ---
+
+        self.data_manager = None
+        self.global_events_data = {}  # Dieser Cache wird jetzt vom DM gefüllt
+
+        self.start_threads_and_show_login()
+
+    def start_threads_and_show_login(self):
         print("[Boot Loader] Starte DB-Pre-Warming Thread...")
         self.prewarm_thread = threading.Thread(target=db_core.prewarm_connection_pool, daemon=True)
         self.prewarm_thread.start()
 
-        # --- NEU: 2. Starte das Pre-Loading der Common-Daten ---
         print("[Boot Loader] Starte Common-Data-Pre-Loading Thread...")
         self.preload_thread = threading.Thread(target=self.preload_common_data, daemon=True)
         self.preload_thread.start()
-        # ------------------------------------------------------
 
-        # 2. Zeige das Login-Fenster
         self.show_login_window()
 
-        # 3. Starte die mainloop
-        # Die mainloop wird erst beendet, wenn das root-Fenster (das unsichtbar ist)
-        # zerstört wird (z.B. durch on_app_close).
-        print("[DEBUG] Application.run: Starte root.mainloop()...")
-        try:
-            self.root.mainloop()
-        except Exception as e:
-            print(f"[FEHLER] Mainloop gecrasht: {e}")
-        print("[DEBUG] Application.run: Mainloop beendet.")
-
-    # --- NEUE FUNKTION ---
-    def preload_common_data(self):
-        """
-        Lädt die wichtigsten (und langsamsten) Daten, die JEDER Benutzer
-        braucht, in den jeweiligen Cache.
-        """
-        print("[Preload Thread] Starte Daten-Caching...")
-        start_time = time.time()
-        try:
-            # 1. Schichtarten (sind bereits gecacht in db_shifts)
-            print("[Preload Thread] Lade Schichtarten...")
-            get_all_shift_types()
-
-            # 2. Mindestbesetzung (wird jetzt in db_core gecacht)
-            print("[Preload Thread] Lade Mindestbesetzung...")
-            db_core.load_config_json('MIN_STAFFING_RULES')
-
-            # 3. Feiertage (wird jetzt in holiday_manager gecacht)
-            current_year = date.today().year
-            print(f"[Preload Thread] Lade Feiertage für {current_year}...")
-            HolidayManager.get_holidays_for_year(current_year)
-
-            # 4. Events (wird jetzt in event_manager gecacht)
-            print(f"[Preload Thread] Lade Events für {current_year}...")
-            EventManager.get_events_for_year(current_year)
-
-            end_time = time.time()
-            print(f"[Preload Thread] Common-Data-Caching BEENDET. Dauer: {end_time - start_time:.2f}s")
-        except Exception as e:
-            print(f"[Preload Thread] FEHLER beim Caching: {e}")
-            # Der Thread endet, das Login-Fenster wird den Fehler bemerken
-            # (da der Thread nicht mehr .is_alive() ist)
-            # und den Login-Button trotzdem freigeben. Die App lädt dann
-            # die Daten normal (langsam) beim Start des Hauptfensters.
-
-    # ---------------------
-
     def show_login_window(self):
-        # Import hier, um Zirkel-Importe zu vermeiden
-        from gui.login_window import LoginWindow
-
         if self.login_window and self.login_window.winfo_exists():
             self.login_window.lift()
             self.login_window.focus_force()
         else:
             print("[DEBUG] Application.show_login_window: Erstelle LoginWindow...")
-            # --- AUFRUF GEÄNDERT ---
-            # Übergibt jetzt BEIDE Threads an das Login-Fenster
-            self.login_window = LoginWindow(self.root, self, self.prewarm_thread, self.preload_thread)
-            # ---------------------
+            self.login_window = LoginWindow(self, self, self.prewarm_thread, self.preload_thread)
 
-    def on_login_success(self, login_window, user_data):
-        print(f"[DEBUG] on_login_success: User {user_data['vorname']} (Role: {user_data.get('role')})")
-        self.current_user_data = user_data
+    def load_shift_types(self, force_reload=False):
+        if not self.shift_types_data or force_reload:
+            shift_types_list = get_all_shift_types()
+            self.shift_types_data = {
+                st['abbreviation']: st for st in shift_types_list
+            }
+            print(f"[Boot Loader] {len(self.shift_types_data)} Schichtarten in Map-Cache geladen.")
 
-        # Zeige die "Lade..."-UI im Login-Fenster
-        login_window.show_loading_ui()
+    def load_min_staffing_rules(self, force_reload=False):
+        if not self.min_staffing_rules or force_reload:
+            self.min_staffing_rules = db_core.load_config_json("MIN_STAFFING_RULES")
+            if not self.min_staffing_rules:
+                print("[WARNUNG] Mindestbesetzung (MIN_STAFFING_RULES) nicht in DB gefunden. Verwende leere Regeln.")
+                self.min_staffing_rules = {}
 
-        # Lade das Hauptfenster asynchron, damit die Lade-UI angezeigt wird
-        # Wir übergeben das Login-Fenster, damit es bei Erfolg geschlossen werden kann
-        threading.Thread(target=self._load_main_window_async, args=(login_window, user_data), daemon=True).start()
+    # --- KORREKTUR: Aufruf auf STATISCHE Methode geändert ---
+    def load_holidays_for_year(self, year):
+        """Lädt Feiertage für ein Jahr (ruft statische Methode auf)."""
+        HolidayManager.get_holidays_for_year(year)
 
-    def _load_main_window_async(self, login_window, user_data):
-        """Läuft im Hintergrund-Thread nach dem Login."""
+    def is_holiday(self, date_obj):
+        """Prüft, ob ein Datum ein Feiertag ist (ruft statische Methode auf)."""
+        return HolidayManager.is_holiday(date_obj)
+
+    def load_events_for_year(self, year):
+        """Lädt Sondertermine für ein Jahr (ruft statische Methode auf)."""
+        # (Gemäß der Verwendung in db_shifts.py)
+        EventManager.get_events_for_year(year)
+
+    def get_event_type(self, date_obj):
+        """Gibt den Typ eines Sondertermins zurück (oder None)."""
+        # (Gemäß der Verwendung in db_shifts.py)
+        # Wir müssen sicherstellen, dass die globalen Daten (jetzt im DM) geladen sind
+        # Aber der DM ruft DIESE Funktion auf...
+        # KORREKTUR: Der EventManager wird statisch aufgerufen
+        year_events = EventManager.get_events_for_year(date_obj.year)
+        return year_events.get(date_obj.strftime('%Y-%m-%d'))
+
+    # --- ENDE KORREKTUR ---
+
+    def preload_common_data(self):
+        """
+        THREAD-FUNKTION: Lädt alle notwendigen Anwendungsdaten parallel
+        zum DB-Pre-Warming. Lädt auch den Schichtplan für den aktuellen Monat vor.
+        """
+        print("[Preload Thread] Starte Daten-Caching...")
+        start_time = time.time()
+
+        while not db_core.is_db_initialized():
+            if self.prewarm_thread and not self.prewarm_thread.is_alive():
+                print("[FEHLER im Preload] DB-Thread ist tot, aber DB nicht initialisiert. Breche Preload ab.")
+                return
+            time.sleep(0.1)
+
         try:
-            print("[Async Load] Lade Hauptfenster...")
-            start_time = time.time()
+            print("[Preload Thread] Lade Schichtarten...")
+            self.load_shift_types(force_reload=True)
 
-            # --- KORREKTUR: Prüfe auf 'role' statt 'is_admin' ---
-            user_role = user_data.get('role')
-            if user_role == 'Admin' or user_role == 'SuperAdmin':
-                # --- ENDE KORREKTUR ---
-                from gui.main_admin_window import MainAdminWindow
-                main_window_instance = MainAdminWindow(self.root, user_data, self)
-            else:
-                from gui.main_user_window import MainUserWindow
-                main_window_instance = MainUserWindow(self.root, user_data, self)
+            print("[Preload Thread] Lade Mindestbesetzung...")
+            self.load_min_staffing_rules(force_reload=True)
 
-            end_time = time.time()
-            print(f"[Async Load] Hauptfenster-Instanz erstellt. Dauer: {end_time - start_time:.2f}s")
+            current_year = date.today().year
+            print(f"[Preload Thread] Lade Feiertage für {current_year}...")
+            # KORREKTUR: Fange den Fehler hier ab, falls event_manager.py ihn auslöst
+            self.load_holidays_for_year(current_year)
 
-            # Zurück zum Hauptthread, um die UI zu aktualisieren
-            self.root.after(0, self.on_main_window_loaded, main_window_instance, login_window)
+            if self.data_manager is None:
+                print("[Preload Thread] Instanziiere ShiftPlanDataManager...")
+                self.data_manager = ShiftPlanDataManager(self)
+
+            print("[Preload Thread] Lade Schichtplan (aktueller Monat)...")
+            today = date.today()
+            self.data_manager.load_and_process_data(today.year, today.month)
+            print(f"[Preload Thread] Schichtplan für {today.year}-{today.month} vorgeladen.")
 
         except Exception as e:
-            print(f"KRITISCHER FEHLER beim Laden des Hauptfensters: {e}")
+            # Fängt Fehler ab (z.B. den 'year_int'-Fehler, falls er erneut auftritt)
+            print(f"[FEHLER] Preload des Schichtplans ODER der Stammdaten fehlgeschlagen: {e}")
             import traceback
             traceback.print_exc()
-            # Zurück zum Hauptthread, um Fehler anzuzeigen
-            self.root.after(0, self.on_main_window_load_failed, login_window, e)
 
-    def on_main_window_loaded(self, main_window_instance, login_window):
-        """Wird im Hauptthread aufgerufen, wenn das Hauptfenster fertig geladen ist."""
-        print("[DEBUG] on_main_window_loaded: Zeige Hauptfenster, zerstöre Login-Fenster.")
-        self.main_window = main_window_instance
-        # Zerstöre das Login-Fenster (oder verstecke es)
-        if login_window and login_window.winfo_exists():
-            login_window.destroy()
-        self.login_window = None
-        # Das Hauptfenster wurde bereits beim Erstellen angezeigt (via Toplevel)
-        self.main_window.lift()
-        self.main_window.focus_force()
+        end_time = time.time()
+        print(f"[Preload Thread] Common-Data-Caching BEENDET. Dauer: {end_time - start_time:.2f}s")
 
-    def on_main_window_load_failed(self, login_window, error):
-        """Wird im Hauptthread aufgerufen, wenn das Laden des Hauptfensters fehlschlägt."""
-        print(f"[FEHLER] on_main_window_load_failed: {error}")
-        # Zeige das Login-Fenster wieder an (falls es noch existiert)
-        if login_window and login_window.winfo_exists():
-            login_window.show_login_ui()  # Zeigt das Login-Formular wieder an
-        messagebox.showerror("Fehler beim Laden",
-                             f"Das Hauptfenster konnte nicht geladen werden:\n{error}\n\n"
-                             "Bitte versuchen Sie den Login erneut.",
-                             parent=login_window if login_window and login_window.winfo_exists() else self.root)
+    def on_login_success(self, login_window, user_data):
+        print(
+            f"[Boot Loader] Login erfolgreich für: {user_data['vorname']} {user_data['name']} (Rolle: {user_data['role']})")
+        self.current_user_data = user_data
+        login_window.show_loading_ui()
+        self.after(100, lambda: self._load_main_window(user_data))
 
-    def on_logout(self, main_window):
-        """Wird aufgerufen, wenn sich ein Benutzer abmeldet."""
-        print("[DEBUG] Application.on_logout")
-        if main_window and main_window.winfo_exists():
-            main_window.destroy()
+    def _load_main_window(self, user_data):
+        try:
+            if self.main_window:
+                self.main_window.destroy()
+
+            role = user_data.get('role')
+            if role in ["Admin", "SuperAdmin"]:
+                print("[Boot Loader] Lade Admin-Fenster...")
+                self.main_window = MainAdminWindow(self, user_data, self)
+            else:
+                print("[Boot Loader] Lade Benutzer-Fenster...")
+                self.main_window = MainUserWindow(self, user_data, self)
+
+            self.main_window.wait_visibility()
+            self.main_window.update_idletasks()
+
+            print("[Boot Loader] Hauptfenster geladen. Wechsle Fenster...")
+            self.login_window.destroy()
+            self.login_window = None
+            self.main_window.deiconify()
+
+        except Exception as e:
+            print(f"[FEHLER] Kritisches Laden des Hauptfensters fehlgeschlagen: {e}")
+            import traceback
+            traceback.print_exc()
+            messagebox.showerror("Kritischer Fehler",
+                                 f"Das Hauptfenster konnte nicht geladen werden:\n{e}\n\n"
+                                 "Die Anwendung wird beendet oder zum Login zurückgesetzt.",
+                                 parent=self.login_window)
+
+            if self.login_window and self.login_window.winfo_exists():
+                self.login_window.show_login_ui()
+            else:
+                self.on_app_close()
+
+    def on_logout(self):
+        print("[Boot Loader] Logout eingeleitet.")
+        if self.main_window:
+            self.main_window.destroy()
         self.main_window = None
         self.current_user_data = None
-
-        # --- Threads neu starten für den nächsten Login ---
-        print("[Boot Loader] Starte DB-Pre-Warming Thread (nach Logout)...")
-        self.prewarm_thread = threading.Thread(target=db_core.prewarm_connection_pool, daemon=True)
-        self.prewarm_thread.start()
-
-        print("[Boot Loader] Starte Common-Data-Pre-Loading Thread (nach Logout)...")
-        self.preload_thread = threading.Thread(target=self.preload_common_data, daemon=True)
-        self.preload_thread.start()
-        # --------------------------------------------------
-
-        self.show_login_window()
+        self.start_threads_and_show_login()
 
     def on_app_close(self):
-        """Wird aufgerufen, wenn das Fenster geschlossen wird."""
-        print("[DEBUG] Application.on_app_close: Schließe Anwendung.")
-        # Zerstöre alle Fenster und beende die mainloop
-        if self.main_window and self.main_window.winfo_exists():
-            self.main_window.destroy()
-        if self.login_window and self.login_window.winfo_exists():
-            self.login_window.destroy()
-        if self.root and self.root.winfo_exists():
-            self.root.destroy()
-        print("[DEBUG] Anwendung heruntergefahren.")
+        print("[Boot Loader] Anwendung wird beendet.")
+        try:
+            if self.main_window:
+                self.main_window.destroy()
+            if self.login_window:
+                self.login_window.destroy()
+        except Exception as e:
+            print(f"Fehler beim Schließen der Fenster: {e}")
+        finally:
+            self.quit()
+
+    def run(self):
+        print("[DEBUG] Application.run: Starte root.mainloop()...")
+        self.mainloop()
