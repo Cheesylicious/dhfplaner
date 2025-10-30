@@ -14,6 +14,9 @@ from .dialogs.rejection_reason_dialog import RejectionReasonDialog
 from database.db_core import load_config_json
 # NEU: Import des ShiftLockManagers
 from gui.shift_lock_manager import ShiftLockManager
+# --- NEUER IMPORT (INNOVATION) ---
+from database.db_locks import delete_all_locks_for_month
+# --- ENDE NEUER IMPORT ---
 
 SHIFT_MENU_CONFIG_KEY = "SHIFT_DISPLAY_CONFIG"
 
@@ -585,11 +588,12 @@ class ShiftPlanActionHandler:
         else:
             messagebox.showerror("Fehler", f"Wunschfrei-Anfrage speichern fehlgeschlagen: {msg}", parent=self.tab)
 
-    # --- NEUE FUNKTION ZUM LÖSCHEN DES GESAMTEN MONATSPLANS (Innovation) ---
+    # --- FUNKTION ZUM LÖSCHEN DES GESAMTEN MONATSPLANS (Innovation) ---
     def delete_shift_plan_by_admin(self, year, month):
         """
         Fragt den Benutzer, ob der Schichtplan gelöscht werden soll und ruft die
         DB-Funktion auf, die bestimmte Schichten (X, S, QA, EU) ausschließt.
+        (Wird von ShiftPlanTab._on_delete_month aufgerufen)
         """
         try:
             # KORRIGIERT: Holt EXCLUDED_SHIFTS_ON_DELETE nun vom korrekten Funktionsnamen
@@ -628,7 +632,44 @@ class ShiftPlanActionHandler:
         else:
             messagebox.showerror("Fehler", f"Fehler beim Löschen des Plans:\n{message}")
 
+    # --- ENDE FUNKTION LÖSCHEN ---
+
+
+    # --- NEUE FUNKTION (INNOVATION) ---
+    def unlock_all_shifts_for_month(self, year, month):
+        """
+        Hebt alle Schichtsicherungen (Locks) für den angegebenen Monat auf.
+        (Wird von ShiftPlanTab._on_unlock_all_shifts aufgerufen)
+        """
+        # Admin-ID für das Logging holen
+        admin_id = getattr(self.app, 'current_user_id', None)
+        if not admin_id:
+            messagebox.showerror("Fehler", "Admin-ID nicht gefunden. Aktion kann nicht geloggt werden.", parent=self.tab)
+            return
+
+        # 1. DB-Aufruf
+        success, message = delete_all_locks_for_month(year, month, admin_id)
+
+        if success:
+            # 2. Lokalen Cache leeren (wichtig!)
+            # Wir leeren den gesamten Cache, da er monatsbasiert ist
+            if self.shift_lock_manager and hasattr(self.shift_lock_manager, 'locked_shifts'):
+                self.shift_lock_manager.locked_shifts.clear()
+                print(f"[Action] Lokaler ShiftLockManager-Cache für {month}/{year} geleert.")
+            else:
+                print(f"[WARNUNG] ShiftLockManager-Cache konnte nicht geleert werden.")
+
+            messagebox.showinfo("Erfolg", message, parent=self.tab)
+
+            # 3. UI komplett neu laden, um alle Lock-Icons zu entfernen
+            if hasattr(self.tab, 'build_shift_plan_grid'):
+                self.tab.build_shift_plan_grid(year, month)
+            else:
+                self.tab.refresh_plan() # Fallback
+        else:
+            messagebox.showerror("Fehler", f"Fehler beim Aufheben der Sicherungen:\n{message}", parent=self.tab)
     # --- ENDE NEUE FUNKTION ---
+
 
     # --- NEUE HILFSFUNKTIONEN ---
     def _get_old_shift_from_ui(self, user_id, date_str):

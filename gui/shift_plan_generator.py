@@ -69,8 +69,11 @@ class ShiftPlanGenerator:
         self.progress_callback = progress_callback
         self.completion_callback = completion_callback
 
-        # NEU: 'QA' und 'S' wurden hier zu den Schichten hinzugefügt, falls sie fehlen.
-        self.shifts_to_plan = ["6", "T.", "N.", "QA", "S"]
+        # --- KORREKTUR (INNOVATION) ---
+        # Der Generator soll nur 6, T. und N. aktiv planen.
+        self.shifts_to_plan = ["6", "T.", "N."]
+        # --- ENDE KORREKTUR ---
+
         self.shift_hours = {abbrev: float(data.get('hours', 0.0))
                             for abbrev, data in self.app.shift_types_data.items()}
         self.work_shifts = {s for s, data in self.app.shift_types_data.items() if
@@ -79,7 +82,7 @@ class ShiftPlanGenerator:
         self.free_shifts_indicators = {"", "FREI", "U", "X", "EU", "WF", "U?"}
 
         # NEU: Schichten, die der Generator niemals überschreiben oder planen darf, wenn sie vorhanden sind.
-        # Enthält alle Freischichten, Urlaube und feste Blöcke
+        # Enthält alle Freischichten, Urlaube und feste Blöcke (QA, S)
         self.fixed_shifts_indicators = {"U", "X", "EU", "WF", "U?", "QA", "S", "24"}
 
         # Konstanten als Attribute
@@ -184,19 +187,49 @@ class ShiftPlanGenerator:
         for day in range(start_day, days_in_month + 1):
             current_date_obj = date(self.year, self.month, day)
             date_str = current_date_obj.strftime('%Y-%m-%d')
+
+            # --- KORREKTE MINDESTBESETZUNG LOGIK (SONDERTERMINE IGNORIEREN) ---
             try:
+                # 1. Lade die Besetzung (die T/N/6 an Event-Tagen fälschlich auf 0 setzen könnte)
                 min_staffing_today = self.data_manager.get_min_staffing_for_date(current_date_obj)
-                if not min_staffing_today: continue
+
+                # 2. Prüfe, ob ein Event (S/QA) T/N/6 überschrieben hat
+                is_event_day = False
+                if min_staffing_today:
+                    if min_staffing_today.get('S', 0) > 0 or min_staffing_today.get('QA', 0) > 0:
+                        is_event_day = True
+
+                # 3. Wenn Event-Tag, lade die Basis-Regeln (Wochentag/Feiertag)
+                if is_event_day:
+                    base_staffing_rules = self.app.staffing_rules
+                    is_holiday_today = current_date_obj in self.holidays_in_month
+                    base_staffing_today = {}
+
+                    if is_holiday_today and 'holiday_staffing' in base_staffing_rules:
+                        base_staffing_today = base_staffing_rules['holiday_staffing'].copy()
+                    else:
+                        weekday_str = str(current_date_obj.weekday())
+                        if weekday_str in base_staffing_rules.get('weekday_staffing', {}):
+                            base_staffing_today = base_staffing_rules['weekday_staffing'][weekday_str].copy()
+
+                    # 4. Überschreibe T/N/6 im Event-Staffing mit den Basis-Regeln
+                    for shift in self.shifts_to_plan:  # ["6", "T.", "N."]
+                        if shift in base_staffing_today:
+                            min_staffing_today[shift] = base_staffing_today[shift]
+
             except Exception as staffing_err:
                 min_staffing_today = {};
                 print(f"[WARN] Staffing Error bei Krit-Vorfilter {date_str}: {staffing_err}");
-                continue
+                traceback.print_exc()
+            # --- ENDE MINDESTBESETZUNG LOGIK ---
+
+            if not min_staffing_today: continue
             initial_availability_per_shift = defaultdict(int)
 
-            # ACHTUNG: Hier filtern wir nur die Schichten heraus, die besetzt werden MÜSSEN,
-            # basierend auf den Work Shifts des Generators.
+            # KORREKTUR: Nur die Schichten prüfen, die der Generator planen soll
             shifts_to_check = [s for s in self.shifts_to_plan if
                                s in min_staffing_today and min_staffing_today.get(s, 0) > 0]
+            # (self.shifts_to_plan ist jetzt ["6", "T.", "N."])
 
             for user_dict in self.all_users:
                 user_id_int = user_dict.get('id');
@@ -309,8 +342,9 @@ class ShiftPlanGenerator:
             # N->T/6 Block
             if not skip_reason and prev_shift == "N." and target_shift_abbrev in ["T.", "6"]: skip_reason = "N->T/6"
 
-            # NEUE HARD RULE: N. -> QA/S Block
-            if not skip_reason and prev_shift == "N." and target_shift_abbrev in ["QA", "S"]: skip_reason = "N->QA/S"
+            # --- KORREKTUR: N. -> QA/S Block entfernt ---
+            # if not skip_reason and prev_shift == "N." and target_shift_abbrev in ["QA", "S"]: skip_reason = "N->QA/S"
+            # --- ENDE KORREKTUR ---
 
             if not skip_reason and target_shift_abbrev == "T." and one_day_ago_raw_shift in self.free_shifts_indicators and two_days_ago_shift == "N.": skip_reason = "N-F-T"
             if not skip_reason and target_shift_abbrev in user_pref.get('shift_exclusions',
@@ -391,9 +425,10 @@ class ShiftPlanGenerator:
                 if not skip_reason and prev_shift == "N." and critical_shift_abbrev in ["T.",
                                                                                         "6"]: skip_reason = "N->T/6"
 
-                # NEUE HARD RULE: N. -> QA/S Block
-                if not skip_reason and prev_shift == "N." and critical_shift_abbrev in ["QA",
-                                                                                        "S"]: skip_reason = "N->QA/S"
+                # --- KORREKTUR: N. -> QA/S Block entfernt ---
+                # (Da QA/S nicht von dieser Funktion geplant werden sollten,
+                # da _identify_potential_critical_shifts sie ignoriert)
+                # --- ENDE KORREKTUR ---
 
                 if not skip_reason and critical_shift_abbrev == "T." and one_day_ago_raw_shift in self.free_shifts_indicators and two_days_ago_shift == "N.": skip_reason = "N-F-T"
                 if not skip_reason and critical_shift_abbrev in user_pref.get('shift_exclusions',
@@ -483,9 +518,10 @@ class ShiftPlanGenerator:
                     if hours > 0: self.live_user_hours[user_id_int] += hours
                     if shift in ['T.', '6']: live_shift_counts_ratio[user_id_int]['T_OR_6'] += 1
                     if shift == 'N.': live_shift_counts_ratio[user_id_int]['N_DOT'] += 1
-                    # ACHTUNG: Hier sollte die Prüfung auf self.shifts_to_plan angepasst werden,
-                    # um QA und S korrekt als Dienste zu zählen, wenn sie es sind.
-                    if shift in self.shifts_to_plan: live_shift_counts[user_id_int][shift] += 1
+
+                    # KORREKTUR: Zähle T/N/6
+                    if shift in self.shifts_to_plan:  # self.shifts_to_plan = ["6", "T.", "N."]
+                        live_shift_counts[user_id_int][shift] += 1
             # --- Ende Initialisierung ---
 
             save_count = 0
@@ -525,6 +561,8 @@ class ShiftPlanGenerator:
                     if existing_shift:
                         # Wenn die Schicht KEIN normaler Freischicht-Indikator ist (also T., N., QA, S, U, etc.)
                         # UND sie KEIN "FREI" oder "" ist, blockiert sie die Zelle.
+
+                        # KORREKTUR: Nutzt self.fixed_shifts_indicators
                         if existing_shift in self.fixed_shifts_indicators:
                             is_unavailable = True  # User hat bereits einen festen Eintrag (X, QA, S, U, EU, WF, U?, 24)
 
@@ -537,14 +575,42 @@ class ShiftPlanGenerator:
                     if is_working and user_dog and user_dog != '---':
                         existing_dog_assignments[user_dog].append({'user_id': user_id_int, 'shift': existing_shift})
 
-                # Mindestbesetzung
+                # --- KORREKTE MINDESTBESETZUNG LOGIK (SONDERTERMINE IGNORIEREN) ---
                 try:
+                    # 1. Lade die Besetzung (die T/N/6 an Event-Tagen fälschlich auf 0 setzen könnte)
                     min_staffing_today = self.data_manager.get_min_staffing_for_date(current_date_obj)
+
+                    # 2. Prüfe, ob ein Event (S/QA) T/N/6 überschrieben hat
+                    is_event_day = False
+                    if min_staffing_today:
+                        if min_staffing_today.get('S', 0) > 0 or min_staffing_today.get('QA', 0) > 0:
+                            is_event_day = True
+
+                    # 3. Wenn Event-Tag, lade die Basis-Regeln (Wochentag/Feiertag)
+                    if is_event_day:
+                        base_staffing_rules = self.app.staffing_rules
+                        is_holiday_today = current_date_obj in self.holidays_in_month
+                        base_staffing_today = {}
+
+                        if is_holiday_today and 'holiday_staffing' in base_staffing_rules:
+                            base_staffing_today = base_staffing_rules['holiday_staffing'].copy()
+                        else:
+                            weekday_str = str(current_date_obj.weekday())
+                            if weekday_str in base_staffing_rules.get('weekday_staffing', {}):
+                                base_staffing_today = base_staffing_rules['weekday_staffing'][weekday_str].copy()
+
+                        # 4. Überschreibe T/N/6 im Event-Staffing mit den Basis-Regeln
+                        for shift in self.shifts_to_plan:  # ["6", "T.", "N."]
+                            if shift in base_staffing_today:
+                                min_staffing_today[shift] = base_staffing_today[shift]
+
                 except Exception as staffing_err:
                     min_staffing_today = {};
                     print(f"[WARN] Staffing Error {date_str}: {staffing_err}")
+                    traceback.print_exc()
+                # --- ENDE MINDESTBESETZUNG LOGIK ---
 
-                # Schleife: Schichten
+                # Schleife: Schichten (self.shifts_to_plan ist jetzt ["6", "T.", "N."])
                 for shift_abbrev in self.shifts_to_plan:
                     current_step += 1;
                     progress_perc = int(10 + (current_step / total_steps) * 90);
@@ -555,16 +621,18 @@ class ShiftPlanGenerator:
                     is_holiday_6 = shift_abbrev == '6' and current_date_obj in self.holidays_in_month
                     if shift_abbrev == '6' and not (is_friday_6 or is_holiday_6): continue
 
-                    # Neue Logik für "QA" und "S" (nur planen, wenn Mindestbesetzung > 0)
-                    if shift_abbrev in ["QA", "S"] and min_staffing_today.get(shift_abbrev, 0) == 0: continue
+                    # (Die Prüfung auf QA/S ist nicht mehr nötig, da sie nicht in self.shifts_to_plan sind)
 
+                    # HIER IST DER ZENTRALE PUNKT:
+                    # min_staffing_today enthält jetzt T/N (Basis oder Event-überschrieben)
                     required_count = min_staffing_today.get(shift_abbrev, 0);
                     if required_count <= 0: continue
+
                     current_assigned_count = len(assignments_today_by_shift.get(shift_abbrev, set()));
                     needed_now = required_count - current_assigned_count
                     if needed_now <= 0: continue
                     print(
-                        f"   -> Need {needed_now} for '{shift_abbrev}' @ {date_str} (Req:{required_count}, Has:{current_assigned_count})")  # "incl. Pre-Plan" entfernt
+                        f"   -> Need {needed_now} for '{shift_abbrev}' @ {date_str} (Req:{required_count}, Has:{current_assigned_count})")
 
                     # Runde 1 (Aufruf ohne critical_shifts)
                     assigned_in_round_1 = self.rounds.run_fair_assignment_round(shift_abbrev, current_date_obj,
@@ -573,7 +641,7 @@ class ShiftPlanGenerator:
                                                                                 assignments_today_by_shift,
                                                                                 self.live_user_hours, live_shift_counts,
                                                                                 live_shift_counts_ratio, needed_now,
-                                                                                days_in_month)  # critical_shifts entfernt
+                                                                                days_in_month)
                     save_count += assigned_in_round_1
 
                     # Runden 2, 3, 4 (unverändert)
@@ -606,11 +674,14 @@ class ShiftPlanGenerator:
             self._update_progress(100, "Generierung abgeschlossen.")
             final_hours_list = sorted(self.live_user_hours.items(), key=lambda item: item[1], reverse=True)
             print("Finale Stunden nach Generierung:", [(uid, f"{h:.1f}") for uid, h in final_hours_list])
-            print("Finale Schichtzählungen (T./N./6/QA/S):")
+
+            # KORREKTUR: Debug-Ausgabe angepasst
+            print("Finale Schichtzählungen (T./N./6):")
             for user_id_int in sorted(self.live_user_hours.keys()):
                 counts = live_shift_counts[user_id_int];
                 print(
-                    f"  User {user_id_int}: T:{counts.get('T.', 0)}, N:{counts.get('N.', 0)}, 6:{counts.get('6', 0)}, QA:{counts.get('QA', 0)}, S:{counts.get('S', 0)}")
+                    f"  User {user_id_int}: T:{counts.get('T.', 0)}, N:{counts.get('N.', 0)}, 6:{counts.get('6', 0)}")
+
             if self.completion_callback: self.app.after(100, lambda sc=save_count: self.completion_callback(True, sc,
                                                                                                             None))
 

@@ -10,7 +10,7 @@ import math
 # Importiere die Helfer-Module
 from database.db_users import get_ordered_users_for_schedule
 from gui.request_lock_manager import RequestLockManager
-from gui.shift_plan_data_manager import ShiftPlanDataManager # DataManager importiert (war schon da)
+from gui.shift_plan_data_manager import ShiftPlanDataManager  # DataManager importiert (war schon da)
 from gui.shift_plan_renderer import ShiftPlanRenderer
 from gui.shift_plan_actions import ShiftPlanActionHandler
 from database.db_shifts import get_ordered_shift_abbrevs, \
@@ -27,7 +27,7 @@ class ShiftPlanTab(ttk.Frame):
         super().__init__(master)
         self.app = app
         # Erstellt die DataManager Instanz, die später übergeben wird
-        self.data_manager = ShiftPlanDataManager(app) # DataManager hier initialisiert
+        self.data_manager = ShiftPlanDataManager(app)  # DataManager hier initialisiert
         self.action_handler = ShiftPlanActionHandler(self, app, self, None)
         self.renderer = ShiftPlanRenderer(self, app, self.data_manager, self.action_handler)
         self.action_handler.renderer = self.renderer
@@ -87,19 +87,32 @@ class ShiftPlanTab(ttk.Frame):
         # Gelb für Einstellungen (mit schwarzem Text für Lesbarkeit)
         style.configure("SettingsWarn.TButton", background="gold", foreground="black", font=('Segoe UI', 9, 'bold'))
         style.map("SettingsWarn.TButton", background=[('active', 'goldenrod')])
+
+        # --- NEUER STIL (INNOVATION) ---
+        # Orange für "Alle Sicherungen aufheben"
+        style.configure("UnlockAll.TButton", background="darkorange", foreground="white", font=('Segoe UI', 9, 'bold'))
+        style.map("UnlockAll.TButton", background=[('active', '#E67E00')])
         # --- Ende Stile ---
 
         ttk.Button(left_nav_frame, text="< Voriger Monat", command=self.show_previous_month).pack(side="left")
         ttk.Button(left_nav_frame, text="📄 Drucken", command=self.print_shift_plan).pack(side="left", padx=(20, 5))
         # Button "Schichtplan Löschen !!!" mit rotem Stil
-        ttk.Button(left_nav_frame, text="Schichtplan Löschen !!!", command=self._on_delete_month, style="Delete.TButton").pack(side="left", padx=5) # Stil hinzugefügt
+        ttk.Button(left_nav_frame, text="Schichtplan Löschen !!!", command=self._on_delete_month,
+                   style="Delete.TButton").pack(side="left", padx=5)  # Stil hinzugefügt
         ttk.Separator(left_nav_frame, orient='vertical').pack(side='left', fill='y', padx=(10, 5))
 
         # Button "Schichtplan generieren" mit grünem Stil
-        ttk.Button(left_nav_frame, text="Schichtplan generieren", command=self._on_generate_plan, style="Generate.TButton").pack(side="left", padx=5) # Stil hinzugefügt
+        ttk.Button(left_nav_frame, text="Schichtplan generieren", command=self._on_generate_plan,
+                   style="Generate.TButton").pack(side="left", padx=5)  # Stil hinzugefügt
 
         # Button "Planungsassistent-Einstellungen" mit gelbem Stil
-        ttk.Button(left_nav_frame, text="Planungsassistent-Einstellungen", command=self._open_generator_settings, style="SettingsWarn.TButton").pack(side="left", padx=5) # Stil hinzugefügt
+        ttk.Button(left_nav_frame, text="Planungsassistent-Einstellungen", command=self._open_generator_settings,
+                   style="SettingsWarn.TButton").pack(side="left", padx=5)  # Stil hinzugefügt
+
+        # --- NEUER BUTTON (INNOVATION) ---
+        ttk.Button(left_nav_frame, text="Alle Sicherungen aufheben", command=self._on_unlock_all_shifts,
+                   style="UnlockAll.TButton").pack(side="left", padx=5)
+        # --- ENDE NEUER BUTTON ---
 
         # --- KORREKTUR: 24er Checkbox entfernt ---
         # ttk.Checkbutton(left_nav_frame, text="24er?", variable=self.generate_24h_var, state="disabled").pack(
@@ -312,6 +325,31 @@ class ShiftPlanTab(ttk.Frame):
                                  parent=self);
             import traceback;
             traceback.print_exc()
+
+    # --- NEUE FUNKTION (INNOVATION) ---
+    def _on_unlock_all_shifts(self):
+        """
+        Fragt nach Bestätigung und löst das Entfernen aller Schichtsicherungen
+        für den aktuellen Monat über den ActionHandler aus.
+        """
+        year = self.app.current_display_date.year
+        month = self.app.current_display_date.month
+        month_str = self.month_label_var.get()
+
+        msg = f"Möchten Sie wirklich **ALLE** Schichtsicherungen (Locks 🔒) für\n\n{month_str}\n\naufheben?\n\nDie eingetragenen Schichten selbst bleiben erhalten."
+        if not messagebox.askyesno("WARNUNG: Alle Sicherungen aufheben", msg, icon='warning', parent=self):
+            return
+
+        try:
+            # Delegation an den ActionHandler
+            self.action_handler.unlock_all_shifts_for_month(year, month)
+        except Exception as e:
+            messagebox.showerror("Schwerer Fehler", f"Ein unerwarteter Fehler ist aufgetreten:\n{e}",
+                                 parent=self);
+            import traceback;
+            traceback.print_exc()
+
+    # --- ENDE NEUE FUNKTION ---
 
     # --- Generierungsfunktionen ---
     def _on_generate_plan(self):
