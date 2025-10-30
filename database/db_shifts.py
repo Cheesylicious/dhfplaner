@@ -33,6 +33,10 @@ def _check_for_event_conflict_db(date_str, user_id, shift_abbrev):
     Prüft, ob der geplante Dienst an einem Datum mit einem globalen Event
     aus der Datenbank kollidiert (z.B. Ausbildung, Schießen).
     Gibt True zurück, wenn ein Konflikt besteht, sonst False.
+
+    KORREKTUR (INNOVATION): "T.", "N." und "6" werden von dieser Prüfung ausgenommen,
+    damit der Generator diese Schichten an Event-Tagen planen kann,
+    solange nicht "QA" oder "S" manuell eingetragen ist.
     """
     try:
         year = int(date_str.split('-')[0])
@@ -44,8 +48,17 @@ def _check_for_event_conflict_db(date_str, user_id, shift_abbrev):
 
         # Logik zur Konfliktprüfung:
         if event_type and event_type in ["Ausbildung", "Schießen"]:
-            # Prüfe, ob die zuzuweisende Schicht eine Arbeitsschicht ist
+
+            # Schichten, die der Generator planen darf, werden ignoriert (KEIN KONFLIKT)
+            generator_planned_shifts = {"T.", "N.", "6"}
+            if shift_abbrev in generator_planned_shifts:
+                return False  # Generator darf T/N/6 planen, kein Konflikt
+
+            # Prüfe, ob die zuzuweisende Schicht eine *andere* Arbeitsschicht ist
+            # (z.B. ein manuell eingetragenes "F", aber auch QA/S, falls sie hier landen)
             if shift_abbrev not in ["", "FREI", "U", "X", "EU", "WF", "U?"]:
+                # Diese Prüfung blockiert jetzt nur noch manuelle Einträge,
+                # aber nicht mehr T/N/6 vom Generator.
                 print(
                     f"[INFO] Event-Konflikt verhindert: User {user_id} kann Schicht '{shift_abbrev}' am Event-Tag '{date_str}' ({event_type}) nicht übernehmen.")
                 return True  # Konflikt gefunden!
@@ -116,6 +129,7 @@ def get_consolidated_month_data(year, month):
 def save_shift_entry(user_id, shift_date_str, shift_abbrev, keep_request_record=False):
     """Speichert oder aktualisiert einen einzelnen Schichteintrag."""
 
+    # Diese Prüfung lässt T/N/6 jetzt durch, blockiert aber andere Schichten an Event-Tagen
     if _check_for_event_conflict_db(shift_date_str, user_id, shift_abbrev):
         return False, f"Konflikt: An diesem Tag findet ein Event statt, das die Schicht '{shift_abbrev}' verhindert."
 
