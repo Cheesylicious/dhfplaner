@@ -344,13 +344,15 @@ def mark_bug_reports_as_notified(report_ids):
 
 
 def get_all_logs_formatted():
-    """Holt alle formatierten Log-Einträge."""
+    """Holt alle formatierten Log-Einträge, JETZT MIT ID."""
     conn = create_connection()
     if conn is None: return []
     try:
         cursor = conn.cursor(dictionary=True)
+        # --- ÄNDERUNG: a.id HINZUGEFÜGT ---
         cursor.execute("""
-                       SELECT a.timestamp,
+                       SELECT a.id,
+                              a.timestamp,
                               COALESCE(CONCAT(u.vorname, ' ', u.name), 'Unbekannt') as user_name,
                               a.action_type,
                               a.details
@@ -358,6 +360,7 @@ def get_all_logs_formatted():
                                 LEFT JOIN users u ON a.user_id = u.id
                        ORDER BY a.timestamp DESC
                        """)
+        # --- ENDE ÄNDERUNG ---
         return cursor.fetchall()
     finally:
         if conn and conn.is_connected():
@@ -369,7 +372,7 @@ def get_login_logout_logs_formatted():
     """
     Holt alle Login- und Logout-Protokolleinträge, formatiert den Benutzernamen
     und extrahiert die Sitzungsdauer für Logout-Einträge aus dem Detailfeld.
-    Dies wird für den neuen 'Protokoll'-Reiter verwendet.
+    JETZT MIT ID.
     """
     conn = create_connection()
     if conn is None:
@@ -413,13 +416,16 @@ def get_login_logout_logs_formatted():
                     else:
                         session_duration = duration_and_rest.strip()
 
+            # --- ÄNDERUNG: log['id'] HINZUGEFÜGT ---
             logs.append({
+                'id': log['id'],  # Hinzugefügt für die Löschfunktion
                 'timestamp': log['timestamp'],
                 'user_name': user_name,
                 'action_type': log['action_type'],
                 'details': log['details'],
                 'duration': session_duration
             })
+            # --- ENDE ÄNDERUNG ---
 
     except Exception as e:
         print(f"Fehler beim Abrufen der Protokoll-Logs: {e}")
@@ -429,3 +435,46 @@ def get_login_logout_logs_formatted():
             conn.close()
 
     return logs
+
+
+# --- NEUE FUNKTION ---
+def delete_activity_logs(log_ids):
+    """Löscht Aktivitäts-Log-Einträge anhand ihrer IDs."""
+    if not log_ids:
+        return False, "Keine IDs zum Löschen übergeben."
+
+    conn = create_connection()
+    if conn is None:
+        return False, "Keine Datenbankverbindung."
+
+    try:
+        cursor = conn.cursor()
+
+        # Sicherstellen, dass die IDs Zahlen sind (Schutz vor SQL-Injection)
+        safe_ids = [int(id_val) for id_val in log_ids]
+        if not safe_ids:
+            return False, "Keine gültigen IDs zum Löschen übergeben."
+
+        placeholders = ', '.join(['%s'] * len(safe_ids))
+        query = f"DELETE FROM activity_log WHERE id IN ({placeholders})"
+
+        cursor.execute(query, tuple(safe_ids))
+        conn.commit()
+
+        rowcount = cursor.rowcount
+        if rowcount > 0:
+            return True, f"{rowcount} Protokolleintrag(s) erfolgreich gelöscht."
+        else:
+            return False, "Keine Einträge zum Löschen gefunden."
+
+    except mysql.connector.Error as e:
+        conn.rollback()
+        return False, f"Datenbankfehler beim Löschen: {e}"
+    except ValueError:
+        conn.rollback()
+        return False, "Ungültige ID(s) übergeben. Nur Zahlen sind erlaubt."
+    finally:
+        if conn and conn.is_connected():
+            cursor.close()
+            conn.close()
+# --- ENDE NEUE FUNKTION ---

@@ -7,6 +7,8 @@ from .db_core import create_connection, _log_activity
 import mysql.connector
 # --- KORREKTUR: Import für defaultdict hinzugefügt (wird in get_locked_shifts_for_month verwendet) ---
 from collections import defaultdict
+
+
 # --- ENDE KORREKTUR ---
 
 
@@ -88,14 +90,13 @@ def get_locked_shifts_for_month(year, month):
             # --- Sicherstellen, dass row['shift_date'] ein date/datetime Objekt ist ---
             db_date = row['shift_date']
             if isinstance(db_date, (date, datetime)):
-                 date_str = db_date.strftime('%Y-%m-%d') # Sicherstellen, dass es ein String ist
-                 locked_shifts[user_id_str][date_str] = row['shift_abbrev']
+                date_str = db_date.strftime('%Y-%m-%d')  # Sicherstellen, dass es ein String ist
+                locked_shifts[user_id_str][date_str] = row['shift_abbrev']
             else:
-                 print(f"[WARNUNG] Ungültiger Datumstyp aus DB in get_locked_shifts_for_month: {type(db_date)}")
+                print(f"[WARNUNG] Ungültiger Datumstyp aus DB in get_locked_shifts_for_month: {type(db_date)}")
             # --- ENDE ---
 
-
-        return dict(locked_shifts) # Zurück als normales Dict
+        return dict(locked_shifts)  # Zurück als normales Dict
 
     except Exception as e:
         print(f"DB Fehler in get_locked_shifts_for_month: {e}")
@@ -104,3 +105,44 @@ def get_locked_shifts_for_month(year, month):
         if conn and conn.is_connected():
             if cursor is not None: cursor.close()
             conn.close()
+
+
+# --- NEUE FUNKTION ---
+def delete_all_locks_for_month(year, month, admin_id):
+    """
+    Löscht ALLE Schichtsicherungen (Locks) für einen gesamten Monat.
+    """
+    conn = create_connection()
+    if conn is None: return False, "Keine Datenbankverbindung."
+    cursor = None
+
+    try:
+        cursor = conn.cursor()
+
+        # Monatsgrenzen berechnen (performant, keine unnötigen Abfragen)
+        start_date = date(year, month, 1).strftime('%Y-%m-%d')
+        _, last_day = calendar.monthrange(year, month)
+        end_date = date(year, month, last_day).strftime('%Y-%m-%d')
+
+        # SQL-Query zum Löschen aller Einträge im Datumsbereich
+        query = "DELETE FROM shift_locks WHERE shift_date BETWEEN %s AND %s"
+        cursor.execute(query, (start_date, end_date))
+
+        affected_rows = cursor.rowcount
+
+        log_msg = f"Admin {admin_id} hat {affected_rows} Schichtsicherungen für {month:02d}/{year} global aufgehoben."
+        _log_activity(cursor, admin_id, 'ALL_SHIFTS_UNLOCKED', log_msg)
+
+        conn.commit()
+
+        return True, f"{affected_rows} Sicherungen für {month:02d}/{year} erfolgreich aufgehoben."
+
+    except Exception as e:
+        if conn: conn.rollback()
+        print(f"DB Fehler in delete_all_locks_for_month: {e}")
+        return False, f"Datenbankfehler: {e}"
+    finally:
+        if conn and conn.is_connected():
+            if cursor is not None: cursor.close()
+            conn.close()
+# --- ENDE NEUE FUNKTION ---
