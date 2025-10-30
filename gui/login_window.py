@@ -12,18 +12,24 @@ from database import db_core  # Um den Pool-Status zu prüfen
 
 
 class LoginWindow(tk.Toplevel):
-    def __init__(self, master, app, prewarm_thread):
+    def __init__(self, master, app, prewarm_thread, preload_thread):  # SIGNATUR GEÄNDERT
         """
-        Nimmt jetzt den 'prewarm_thread' entgegen, um den
-        Verbindungsaufbau zu überwachen.
+        Nimmt jetzt den 'prewarm_thread' UND den 'preload_thread' entgegen,
+        um den Verbindungsaufbau UND das Daten-Caching zu überwachen.
         """
         print("[DEBUG] LoginWindow.__init__: Wird initialisiert.")
         super().__init__(master)
         self.app = app
 
-        # --- INNOVATION: Pre-Warming-Thread speichern ---
+        # --- INNOVATION: Pre-Loading-Threads speichern ---
         self.prewarm_thread = prewarm_thread
+        self.preload_thread = preload_thread  # NEU
         # ------------------------------------------------
+
+        # --- NEU: Status-Flags ---
+        self.db_ready = False
+        self.login_button_enabled = False
+        # -------------------------
 
         self.local_version = "0.0.0"
 
@@ -59,15 +65,17 @@ class LoginWindow(tk.Toplevel):
         self.lift()
         self.focus_force()
 
-        # --- INNOVATION: Starte den Checker für den Pre-Warming-Thread ---
-        if self.prewarm_thread:
-            self.after(100, self._check_prewarm_thread)
+        # --- INNOVATION: Starte den Checker für die Pre-Loading-Threads ---
+        if self.prewarm_thread and self.preload_thread:
+            # Startet den neuen Checker
+            self.after(100, self._check_startup_threads)
         else:
             # Fallback
-            print("[WARNUNG] Kein Pre-Warming-Thread an LoginWindow übergeben.")
-            self.db_status_label.config(text="Fehler: Pre-Warming nicht gestartet.")
-            self.db_progressbar.stop()  # Stoppt indeterminate mode
+            print("[WARNUNG] Nicht alle Pre-Loading-Threads an LoginWindow übergeben.")
+            self.db_status_label.config(text="Fehler: Pre-Loading nicht gestartet.")
+            self.db_progressbar.stop()
             self.login_button.config(state="normal")
+            self.login_button_enabled = True
         # -------------------------------------------------------------
 
         print("[DEBUG] LoginWindow.__init__: Initialisierung abgeschlossen, Fenster sichtbar.")
@@ -139,51 +147,85 @@ class LoginWindow(tk.Toplevel):
                                             style='Loading.Horizontal.TProgressbar')
         # -------------------------------------------------
 
-    # --- FUNKTION ÜBERARBEITET ---
-    def _check_prewarm_thread(self):
+    # --- FUNKTION STARK ÜBERARBEITET ---
+    def _check_startup_threads(self):
         """
-        Prüft, ob der Pre-Warming-Thread fertig ist UND
-        simuliert den Ladefortschritt.
+        Prüft, ob die Pre-Loading-Threads (DB-Pool UND Daten-Cache) fertig sind
+        und aktualisiert den Ladebalken entsprechend.
+
+        INNOVATION: Gibt den Login-Button frei, sobald der DB-Pool (kritisch)
+        bereit ist. Das Daten-Caching (optimierend) läuft im Hintergrund weiter.
         """
         # Prüfen ob das Fenster noch existiert
         if not self.winfo_exists():
             return
 
-        if self.prewarm_thread.is_alive():
-            # Thread läuft noch, Ladebalken simulieren
+        db_alive = self.prewarm_thread.is_alive()
+        data_alive = self.preload_thread.is_alive()
 
-            # --- NEU: Simulierter Fortschritt ---
-            current_val = self.db_progressbar['value']
-            if current_val < 95:
-                # Erhöht den Balken langsam.
-                # (100 Schritte * 100ms = 10 Sekunden für 100%)
-                self.db_progressbar.step(1)
-                # --- ENDE NEU ---
-
-            self.after(100, self._check_prewarm_thread)
-        else:
-            # Thread ist beendet
-            print("[DEBUG] LoginWindow: Pre-Warming-Thread ist beendet.")
-
+        # 1. DB-Status prüfen (kritisch für Login)
+        if not db_alive and not self.db_ready:
+            # DB-Thread ist fertig
             if db_core.db_pool is not None and db_core._db_initialized:
-                # Erfolg!
                 print("[DEBUG] LoginWindow: DB-Pool ist bereit.")
-
-                # --- NEU: Auf 100% setzen und ausblenden ---
-                self.db_progressbar['value'] = 100
-                self.db_status_label.config(text="Verbindung bereit.", foreground="#2ecc71")  # Grüner Text
-                self.login_button.config(state="normal")
-                # Nach 500ms den Lade-Frame ausblenden
-                self.after(500, self.pre_login_loading_frame.pack_forget)
-                # --- ENDE NEU ---
+                self.db_ready = True
+                if not self.login_button_enabled:
+                    self.login_button.config(state="normal")
+                    self.login_button_enabled = True
+                    self.db_status_label.config(text="Verbindung bereit. Lade Anwendungsdaten...")
             else:
-                # Fehler!
-                print("[FEHLER] LoginWindow: Pre-Warming ist fehlgeschlagen (Pool ist None).")
+                # DB-Thread FEHLGESCHLAGEN
+                print("[FEHLER] LoginWindow: DB-Pre-Warming ist fehlgeschlagen.")
                 self.db_status_label.config(text="Datenbank-Verbindung fehlgeschlagen.", foreground="red")
-                self.db_progressbar.pack_forget()  # Nur den Balken verstecken
+                self.db_progressbar.pack_forget()
+                if not self.login_button_enabled:
+                    self.login_button.config(state="normal")
+                    self.login_button_enabled = True
+                return  # Checker stoppen
+
+        # 2. Ladebalken-Fortschritt berechnen (jetzt parallel simuliert)
+        # Zielwert = 50 wenn DB fertig, 100 wenn beide fertig
+
+        current_val = self.db_progressbar['value']
+        target_val = 0
+
+        if self.db_ready:
+            target_val += 50  # DB ist fertig
+
+        if not data_alive:
+            target_val += 50  # Daten sind fertig
+
+        if target_val > current_val:
+            # Wenn ein Thread fertig wurde, füllen wir schneller auf
+            self.db_progressbar.step(2)
+        elif db_alive or data_alive:
+            # Mindestens ein Thread läuft noch
+            if current_val < 99:  # Nicht über 99 simulieren
+                self.db_progressbar.step(1)  # Langsam simulieren
+
+        # Sicherstellen, dass der Balken die Zielwerte nicht überschreitet
+        if target_val == 100 and self.db_progressbar['value'] > 99:
+            self.db_progressbar['value'] = 100
+        elif target_val == 50 and self.db_ready and self.db_progressbar['value'] > 49 and data_alive:
+            self.db_progressbar['value'] = 50
+
+        # 3. Schleife fortsetzen oder beenden
+        if db_alive or data_alive:
+            # Einer der Threads (oder beide) läuft noch
+            self.after(100, self._check_startup_threads)
+        else:
+            # BEIDE Threads sind beendet
+            print("[DEBUG] LoginWindow: DB-Pre-Warming UND Common-Data-Preload sind beendet.")
+            self.db_progressbar['value'] = 100
+            if self.db_ready:  # Nur wenn DB OK war
+                self.db_status_label.config(text="Alle Daten bereit.", foreground="#2ecc71")
+                self.after(500, self.pre_login_loading_frame.pack_forget)
+            # (Der Fehlerfall wurde bereits oben behandelt)
 
     def attempt_login(self, event=None):
-        if self.login_button.cget("state") == "disabled":
+        # Wir prüfen jetzt das lokale Flag, nicht mehr den Button-Status,
+        # da der Checker den Status verzögert setzen könnte.
+        if not self.login_button_enabled:
             print("[DEBUG] Login-Versuch abgeblockt (DB noch nicht bereit).")
             return
 
@@ -210,6 +252,7 @@ class LoginWindow(tk.Toplevel):
         print("[DEBUG] LoginWindow.show_loading_ui: Zeige Lade-Animation (Post-Login).")
         self.main_frame.pack_forget()
 
+        # Stelle sicher, dass der Pre-Login-Lader auch weg ist
         self.pre_login_loading_frame.pack_forget()
 
         self.loading_label.pack(pady=(20, 10), fill='x', padx=40)
@@ -229,21 +272,38 @@ class LoginWindow(tk.Toplevel):
 
         self.main_frame.pack()
 
+        # --- Status-Flags zurücksetzen ---
+        self.db_ready = False
+        self.login_button_enabled = False
+        # ---------------------------------
+
+        # --- Threads neu starten (wichtig!) ---
+        # (Holt die Referenzen aus der app-Instanz)
         print("[Boot Loader] Starte Pre-Warming Thread (erneut)...")
         self.prewarm_thread = threading.Thread(target=db_core.prewarm_connection_pool, daemon=True)
         self.prewarm_thread.start()
 
+        print("[Boot Loader] Starte Common-Data-Pre-Loading Thread (erneut)...")
+        self.preload_thread = threading.Thread(target=self.app.preload_common_data, daemon=True)
+        self.preload_thread.start()
+
+        # Aktualisiere die Thread-Referenzen in der App, falls der Bootloader
+        # sie nicht ohnehin überschreibt (Sicherheitsmaßnahme)
+        self.app.prewarm_thread = self.prewarm_thread
+        self.app.preload_thread = self.preload_thread
+        # --- Ende ---
+
         self.pre_login_loading_frame.pack(fill='x', padx=40, pady=(10, 0))
         self.db_status_label.config(text="Verbindung wird erneut geprüft...", foreground="#bdc3c7")
+        self.db_status_label.config(foreground="#bdc3c7")  # Farbe zurücksetzen
 
-        # --- NEU: Determinate-Balken zurücksetzen ---
         self.db_progressbar.pack(fill='x', pady=(5, 0))
         self.db_progressbar.config(value=0)  # Zurück auf 0
-        # --- ENDE NEU ---
 
         self.login_button.config(state="disabled")
 
-        self.after(100, self._check_prewarm_thread)
+        # Den neuen Checker starten
+        self.after(100, self._check_startup_threads)
 
     # ---------------------
 
