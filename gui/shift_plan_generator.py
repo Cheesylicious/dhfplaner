@@ -343,6 +343,9 @@ class ShiftPlanGenerator:
             if not skip_reason and prev_shift == "N." and target_shift_abbrev in ["T.", "6"]: skip_reason = "N->T/6"
 
             # --- KORREKTUR: N. -> QA/S Block entfernt ---
+            # (Da der Generator nur T/N/6 plant, ist diese Regel hier nicht relevant,
+            # aber die N->QA/S-Regel in generator_rounds.py ist wichtig, falls sich
+            # self.shifts_to_plan ändert.)
             # if not skip_reason and prev_shift == "N." and target_shift_abbrev in ["QA", "S"]: skip_reason = "N->QA/S"
             # --- ENDE KORREKTUR ---
 
@@ -426,8 +429,8 @@ class ShiftPlanGenerator:
                                                                                         "6"]: skip_reason = "N->T/6"
 
                 # --- KORREKTUR: N. -> QA/S Block entfernt ---
-                # (Da QA/S nicht von dieser Funktion geplant werden sollten,
-                # da _identify_potential_critical_shifts sie ignoriert)
+                # (Da QA/S nicht von dieser Funktion geplant werden (nur T/N/6),
+                # ist die Regel hier nicht nötig.)
                 # --- ENDE KORREKTUR ---
 
                 if not skip_reason and critical_shift_abbrev == "T." and one_day_ago_raw_shift in self.free_shifts_indicators and two_days_ago_shift == "N.": skip_reason = "N-F-T"
