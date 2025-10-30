@@ -365,24 +365,40 @@ def get_ordered_users_for_schedule(include_hidden=False, for_date=None):
 
 
 def save_user_order(user_order_list):
-    # ... (unverändert) ...
+    """
+    Speichert die Benutzerreihenfolge und Sichtbarkeit als schnelle Batch-Operation.
+    """
     conn = create_connection()
     if conn is None:
         return False, "Keine Datenbankverbindung."
     try:
         cursor = conn.cursor()
+
+        # --- INNOVATION: Batch-Verarbeitung ---
+        # 1. Bereite die Datenliste für executemany() vor
+        data_to_save = []
         for index, user_info in enumerate(user_order_list):
             user_id = user_info['id']
             is_visible = user_info.get('is_visible', 1)
-            query = """
-                    INSERT INTO user_order (user_id, sort_order, is_visible)
-                    VALUES (%s, %s, %s) AS new
-                    ON DUPLICATE KEY \
-                    UPDATE \
-                        sort_order = new.sort_order, \
-                        is_visible = new.is_visible
-                    """
-            cursor.execute(query, (user_id, index, is_visible))
+            # Tupel (user_id, index, is_visible)
+            data_to_save.append((user_id, index, is_visible))
+
+        # 2. Definiere die Batch-Query
+        # Nutzt ON DUPLICATE KEY UPDATE, um Einträge zu aktualisieren oder neu zu erstellen
+        # (VALUES() ist effizienter als die 'AS new' Syntax)
+        query = """
+                INSERT INTO user_order (user_id, sort_order, is_visible)
+                VALUES (%s, %s, %s)
+                ON DUPLICATE KEY UPDATE
+                    sort_order = VALUES(sort_order),
+                    is_visible = VALUES(is_visible)
+                """
+
+        # 3. Führe den Befehl *einmal* für alle Daten aus
+        if data_to_save:
+            cursor.executemany(query, data_to_save)
+        # --- ENDE INNOVATION ---
+
         conn.commit()
         clear_user_order_cache()
         return True, "Reihenfolge erfolgreich gespeichert."

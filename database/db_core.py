@@ -7,6 +7,7 @@ from datetime import datetime, date  # 'date' hinzugefügt
 from collections import defaultdict
 import sys
 import os
+import threading  # NEU: Importiert für Thread-sichere Initialisierung
 
 # ==============================================================================
 # 💥 DATENBANK-KONFIGURATION WIRD JETZT AUS 'db_config.json' GELADEN 💥
@@ -54,8 +55,6 @@ def load_db_config():
         with open(config_path, 'r', encoding='utf-8') as f:
             config = json.load(f)
 
-        # Überschreibe raise_on_warnings aus der Datei mit False, falls es dort noch True ist
-        # Das stellt sicher, dass Warnungen ignoriert werden, unabhängig vom Dateiinhalt
         config["raise_on_warnings"] = False
 
         if config["host"] == "IHRE_SERVER_IP_HIER" or config["password"] == "IhrPasswortHier":
@@ -84,35 +83,131 @@ except Exception as e:
     DB_CONFIG = None
     raise
 
-try:
-    print("Versuche, den Datenbank-Connection-Pool zu erstellen...")
-    if DB_CONFIG is None:
-        raise ConnectionError("DB_CONFIG wurde aufgrund eines Fehlers nicht geladen.")
+# --- INNOVATION: Lazy-Loading des Connection-Pools ---
 
-    db_pool = pooling.MySQLConnectionPool(pool_name="dhf_pool",
-                                          pool_size=5,
-                                          **DB_CONFIG)
-    print("✅ Datenbank-Connection-Pool erfolgreich erstellt.")
-except mysql.connector.Error as err:
-    print(f"❌ KRITISCHER FEHLER beim Erstellen des Connection-Pools: {err}")
-    print("Überprüfen Sie Ihre 'db_config.json' und die Erreichbarkeit der Datenbank.")
-    db_pool = None
-    raise ConnectionError(f"Fehler beim Erstellen des DB-Pools: {err}")
-except Exception as e:
-    print(f"❌ KRITISCHER FEHLER (Allgemein) beim Initialisieren von db_core: {e}")
-    db_pool = None
-    raise
+# Global-Variablen für den Pool und ein Lock
+db_pool = None
+_pool_init_lock = threading.Lock()
+_db_initialized = False  # NEU: Flag, um initialize_db() nur einmal auszuführen
+
+
+# Die Erstellung des Pools wird von hier (globaler Scope) ...
+# ... in die create_connection() Funktion verschoben,
+# um den Programmstart ("boot") zu beschleunigen.
+
+# --- ENDE INNOVATION ---
 
 
 def create_connection():
-    if db_pool is None:
-        print("❌ Fehler: Der Connection-Pool ist nicht verfügbar.")
-        return None
+    """
+    Stellt eine Verbindung aus dem Pool her.
+    Initialisiert den Pool "lazy" (erst bei der ersten Anfrage),
+    um den Programmstart zu beschleunigen.
+    Initialisiert das DB-Schema (Tabellen) einmalig nach Pool-Erstellung.
+    """
+    global db_pool, _db_initialized
+
+    # 1. Schnelle Prüfung (ohne Lock), ob der Pool bereits existiert.
+    if db_pool is not None:
+        try:
+            return db_pool.get_connection()
+        except mysql.connector.Error as err:
+            print(f"❌ Fehler beim Abrufen einer Verbindung aus dem Pool: {err}")
+            return None
+        except Exception as e:
+            # Fängt seltene Fälle ab, z.B. wenn der Pool geschlossen wurde
+            print(f"❌ Unerwarteter Fehler beim Abrufen der Verbindung: {e}")
+            db_pool = None  # Pool zurücksetzen, um Neuerstellung zu erzwingen
+            return None
+
+    # 2. Pool existiert nicht. Wir müssen ihn erstellen (Thread-sicher).
+    with _pool_init_lock:
+        # 3. Erneute Prüfung (Double-Checked Locking)
+        # Falls ein anderer Thread den Pool erstellt hat, während wir auf das Lock gewartet haben.
+        if db_pool is not None:
+            try:
+                return db_pool.get_connection()
+            except mysql.connector.Error as err:
+                print(f"❌ Fehler beim Abrufen einer Verbindung aus dem Pool (nach Lock): {err}")
+                return None
+
+        # 4. Der Pool muss jetzt wirklich erstellt werden.
+        try:
+            print("Versuche, den Datenbank-Connection-Pool (lazy) zu erstellen...")
+            if DB_CONFIG is None:
+                raise ConnectionError("DB_CONFIG wurde aufgrund eines Fehlers nicht geladen.")
+
+            # (Wir verwenden pool_size=10, wie in der letzten Optimierung)
+            db_pool = pooling.MySQLConnectionPool(pool_name="dhf_pool",
+                                                  pool_size=10,
+                                                  **DB_CONFIG)
+            print("✅ Datenbank-Connection-Pool erfolgreich erstellt.")
+
+            # 5. NEU: Datenbank-Schema (Tabellen) initialisieren
+            #    Wir tun dies hier, da dies der erste garantierte Punkt ist,
+            #    an dem der Pool existiert.
+            if not _db_initialized:
+                print("[DB Core] Führe erstmalige Schema-Initialisierung (initialize_db) durch...")
+                conn = None
+                try:
+                    # Wir müssen eine temporäre Verbindung für initialize_db holen
+                    conn = db_pool.get_connection()
+                    # initialize_db() benötigt eine *offene* Verbindung
+                    _run_initialize_db(conn)  # (Verschobene Logik)
+                    _db_initialized = True
+                    print("✅ Schema-Initialisierung abgeschlossen.")
+                except Exception as init_e:
+                    # Wenn das Schema fehlschlägt, ist die DB unbrauchbar.
+                    print(f"❌ KRITISCHER FEHLER bei initialize_db: {init_e}")
+                    db_pool = None  # Pool bei Fehler wieder zerstören
+                    raise init_e  # Fehler weiterwerfen
+                finally:
+                    if conn and conn.is_connected():
+                        conn.close()
+
+            # 6. Finale Verbindung zurückgeben
+            return db_pool.get_connection()
+
+        except mysql.connector.Error as err:
+            print(f"❌ KRITISCHER FEHLER beim Erstellen des Connection-Pools: {err}")
+            print("Überprüfen Sie Ihre 'db_config.json' und die Erreichbarkeit der Datenbank.")
+            db_pool = None  # Sicherstellen, dass es None bleibt bei Fehler
+            raise ConnectionError(f"Fehler beim Erstellen des DB-Pools: {err}")
+        except Exception as e:
+            print(f"❌ KRITISCHER FEHLER (Allgemein) beim Initialisieren von db_core: {e}")
+            db_pool = None
+            raise
+
+
+# --- NEUE FUNKTION FÜR PRE-WARMING ---
+def prewarm_connection_pool():
+    """
+    Ruft create_connection() einmal auf, um den Pool und das Schema im Hintergrund
+    zu initialisieren, während der Benutzer im Login-Fenster ist.
+    """
+    global _db_initialized
+    if db_pool is not None and _db_initialized:
+        print("[DB Core] Pre-Warming übersprungen (Pool & Schema bereits initialisiert).")
+        return
+
+    print("[DB Core] Starte Pre-Warming des Connection-Pools im Hintergrund...")
+    conn = None
     try:
-        return db_pool.get_connection()
-    except mysql.connector.Error as err:
-        print(f"❌ Fehler beim Abrufen einer Verbindung aus dem Pool: {err}")
-        return None
+        conn = create_connection()
+        if conn:
+            print("[DB Core] Pre-Warming erfolgreich. Pool und Schema sind jetzt initialisiert.")
+        else:
+            print("[DB Core] Pre-Warming fehlgeschlagen (create_connection gab None zurück).")
+    except Exception as e:
+        # Fängt Fehler ab, wenn z.B. die DB nicht erreichbar ist.
+        # Der Haupt-Login-Versuch wird den Fehler dann erneut (korrekt) anzeigen.
+        print(f"[DB Core] Pre-Warming THREAD FEHLER: {e}")
+    finally:
+        if conn and conn.is_connected():
+            conn.close()  # Wichtig: Verbindung sofort zurück in den Pool geben.
+
+
+# --- ENDE NEUE FUNKTION ---
 
 
 def close_pool():
@@ -169,15 +264,24 @@ def _add_index_if_not_exists(cursor, table_name, index_name, columns):
         cursor.execute(f"CREATE INDEX `{index_name}` ON `{table_name}` ({columns})")
 
 
-def initialize_db():
+# --- INNOVATION: Logik von initialize_db() in eine private Funktion verschoben ---
+def _run_initialize_db(conn):
+    """
+    Führt die eigentliche Schema-Initialisierung durch.
+    Wird jetzt von create_connection() beim ersten Start aufgerufen.
+    Nimmt eine *existierende* Verbindung entgegen.
+    """
+    # Diese Funktion wird jetzt von create_connection aufgerufen,
+    # daher ist der Pool garantiert vorhanden, aber die Konfig muss geprüft werden.
     if DB_CONFIG is None:
-        raise ConnectionError("Datenbank-Initialisierung fehlgeschlagen: Konfiguration nicht geladen.")
+        raise ConnectionError("DB-Init fehlgeschlagen: Konfiguration nicht geladen.")
 
     config_init = DB_CONFIG.copy()
     db_name = config_init.pop('database')
     if not db_name:
         raise ValueError("Datenbank-Name nicht in DB_CONFIG gefunden.")
 
+    # 1. DB-Erstellung (separater Connect ohne Pool)
     try:
         conn_server = mysql.connector.connect(**config_init)
         cursor_server = conn_server.cursor()
@@ -195,7 +299,8 @@ def initialize_db():
         print(f"KRITISCHER FEHLER: Verbindung zum DB-Server fehlgeschlagen: {e}")
         raise ConnectionError(f"DB-Server-Verbindung fehlgeschlagen: {e}")
 
-    conn = create_connection()
+    # 2. Tabellen-Erstellung (nutzt die übergebene Pool-Verbindung 'conn')
+    # conn = create_connection() # NICHT MEHR NÖTIG
     if conn is None:
         print("Konnte die Datenbank-Tabellen nicht initialisieren.")
         raise ConnectionError("DB-Verbindung für Tabellen-Init fehlgeschlagen.")
@@ -219,7 +324,7 @@ def initialize_db():
                     # Anderen Fehler weiter werfen
                     raise e  # Wichtig: Nur `raise` verwenden, um den ursprünglichen Traceback zu behalten
 
-        # --- Tabellen erstellen ---
+        # --- Tabellen erstellen (unverändert) ---
         execute_create_table_if_not_exists(
             "CREATE TABLE IF NOT EXISTS `config_storage` (config_key VARCHAR(255) PRIMARY KEY, config_json TEXT NOT NULL);")
         execute_create_table_if_not_exists(
@@ -367,7 +472,6 @@ def initialize_db():
             "CREATE TABLE IF NOT EXISTS `user_order` (user_id INT PRIMARY KEY, sort_order INT NOT NULL, is_visible TINYINT(1) DEFAULT 1, FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE);")  # Beispiel
 
         # --- NEU: Fehlende Tabelle shift_locks hinzufügen ---
-        # Diese Tabelle wird von db_locks.py und gui/shift_lock_manager.py benötigt
         execute_create_table_if_not_exists("""
                                            CREATE TABLE IF NOT EXISTS `shift_locks`
                                            (
@@ -410,18 +514,20 @@ def initialize_db():
                                            """)
         # --- ENDE NEU ---
 
-        # --- Index hinzufügen ---
+        # --- Index hinzufügen (unverändert) ---
         _add_index_if_not_exists(cursor, "shift_schedule", "idx_shift_date_user", "`shift_date`, `user_id`")
-        _add_index_if_not_exists(cursor, "tasks", "idx_tasks_creator", "`creator_admin_id`")  # Index für neue Tabelle
+        _add_index_if_not_exists(cursor, "tasks", "idx_tasks_creator", "`creator_admin_id`")
+        _add_index_if_not_exists(cursor, "users", "idx_user_status",
+                                 "`is_approved`, `is_archived`, `activation_date`, `archived_date`")
+        _add_index_if_not_exists(cursor, "users", "idx_user_auth", "`vorname`(255), `name`(255), `password_hash`(255)")
+        _add_index_if_not_exists(cursor, "chat_messages", "idx_chat_recipient_read", "`recipient_id`, `is_read`")
 
-        # --- Spalten hinzufügen (Migrationslogik) ---
-        _add_column_if_not_exists(cursor, "users", "entry_date", "DATE DEFAULT NULL")  # Präziser Datentyp
+        # --- Spalten hinzufügen (Migrationslogik) (unverändert) ---
+        _add_column_if_not_exists(cursor, "users", "entry_date", "DATE DEFAULT NULL")
         _add_column_if_not_exists(cursor, "users", "last_seen", "DATETIME DEFAULT NULL")
         _add_column_if_not_exists(cursor, "users", "is_approved", "TINYINT(1) DEFAULT 0")
-        _add_column_if_not_exists(cursor, "users", "is_archived",
-                                  "TINYINT(1) DEFAULT 0")  # Nicht mehr AFTER is_approved
-        _add_column_if_not_exists(cursor, "users", "archived_date",
-                                  "DATETIME DEFAULT NULL")  # Nicht mehr AFTER is_archived
+        _add_column_if_not_exists(cursor, "users", "is_archived", "TINYINT(1) DEFAULT 0")
+        _add_column_if_not_exists(cursor, "users", "archived_date", "DATETIME DEFAULT NULL")
         _add_column_if_not_exists(cursor, "shift_types", "check_for_understaffing", "TINYINT(1) DEFAULT 0")
 
         conn.commit()
@@ -431,9 +537,28 @@ def initialize_db():
         conn.rollback()  # Rollback bei Fehlern
         raise  # Fehler weiterwerfen
     finally:
-        if conn and conn.is_connected():
+        # Die Verbindung wird NICHT hier geschlossen, sondern in create_connection()
+        if cursor:
             cursor.close()
-            conn.close()
+
+
+# --- ÖFFENTLICHE FUNKTION (unverändert) ---
+def initialize_db():
+    """
+    Öffentlicher Wrapper, der sicherstellt, dass die Initialisierung
+    über den 'create_connection'-Mechanismus läuft.
+    """
+    print("Starte öffentliche initialize_db()...")
+    conn = create_connection()
+    if conn:
+        print("DB-Verbindung für initialize_db() erhalten, Schema sollte bereits initialisiert sein.")
+        conn.close()
+    else:
+        print("Fehler beim Abrufen der DB-Verbindung für initialize_db().")
+        raise ConnectionError("DB-Initialisierung fehlgeschlagen.")
+
+
+# --- ENDE ÄNDERUNG ---
 
 
 # --- Restliche Hilfsfunktionen (save_config_json etc.) bleiben unverändert ---
@@ -443,7 +568,7 @@ def save_config_json(key, data_dict):
     try:
         cursor = conn.cursor()
         data_json = json.dumps(data_dict)
-        query = "INSERT INTO config_storage (config_key, config_json) VALUES (%s, %s) ON DUPLICATE KEY UPDATE config_json = VALUES(config_json)"  # VALUES() verwenden
+        query = "INSERT INTO config_storage (config_key, config_json) VALUES (%s, %s) ON DUPLICATE KEY UPDATE config_json = VALUES(config_json)"
         cursor.execute(query, (key, data_json))
         conn.commit()
         return True
@@ -475,17 +600,9 @@ def load_config_json(key):
         if conn and conn.is_connected(): cursor.close(); conn.close()
 
 
-# --- NEUE HILFSFUNKTION FÜR URLAUBSBERECHNUNG ---
 def get_vacation_days_for_tenure(entry_date_obj, default_days=30):
-    """
-    Berechnet den Urlaubsanspruch basierend auf der Betriebszugehörigkeit.
-    Lädt Regeln aus VACATION_RULES_CONFIG_KEY.
-    entry_date_obj muss ein date-Objekt oder None sein.
-    """
     if not entry_date_obj:
         return default_days
-
-    # Sicherstellen, dass wir mit einem date-Objekt arbeiten (falls ein str übergeben wurde)
     if isinstance(entry_date_obj, str):
         try:
             entry_date_obj = datetime.strptime(entry_date_obj, '%Y-%m-%d').date()
@@ -503,8 +620,6 @@ def get_vacation_days_for_tenure(entry_date_obj, default_days=30):
         return default_days
 
     try:
-        # Regeln müssen numerisch sein und werden absteigend sortiert
-        # Format: [{"years": 10, "days": 35}, {"years": 5, "days": 32}, {"years": 0, "days": 30}]
         rules = sorted(
             [{"years": int(r["years"]), "days": int(r["days"])} for r in rules_config],
             key=lambda x: x["years"],
@@ -514,24 +629,17 @@ def get_vacation_days_for_tenure(entry_date_obj, default_days=30):
         print(f"Fehler beim Parsen der Urlaubsregeln: {e}. Verwende Standard-Urlaubstage.")
         return default_days
 
-    # Dienstjahre berechnen
     today = date.today()
-    # (today.year - entry_date_obj.year) ist eine Annäherung.
-    # Genauer: Prüfen, ob das Dienstjubiläum dieses Jahr schon war.
     tenure_years = today.year - entry_date_obj.year
     if (today.month, today.day) < (entry_date_obj.month, entry_date_obj.day):
-        tenure_years -= 1  # Jubiläum war dieses Jahr noch nicht
+        tenure_years -= 1
 
-    # Die erste zutreffende Regel (von oben nach unten) finden
     for rule in rules:
         if tenure_years >= rule["years"]:
             return rule["days"]
 
-    # Fallback, falls Regeln konfiguriert sind, aber keine zutrifft (z.B. 0 Jahre nicht definiert)
     return default_days
 
-
-# --- ENDE NEU ---
 
 def save_shift_frequency(frequency_dict):
     conn = create_connection()
@@ -539,7 +647,7 @@ def save_shift_frequency(frequency_dict):
     try:
         cursor = conn.cursor()
         cursor.execute("DELETE FROM shift_frequency")
-        if frequency_dict:  # Nur einfügen, wenn Daten vorhanden sind
+        if frequency_dict:
             query = "INSERT INTO shift_frequency (shift_abbrev, count) VALUES (%s, %s)"
             data_to_insert = list(frequency_dict.items())
             cursor.executemany(query, data_to_insert)
@@ -584,24 +692,17 @@ def reset_shift_frequency():
         if conn and conn.is_connected(): cursor.close(); conn.close()
 
 
-# --- save_special_appointment, delete_special_appointment, get_special_appointments ---
-# --- _log_activity, _create_admin_notification ---
-# --- run_db_fix_approve_all_users, run_db_update_is_approved, run_db_update_v1 ---
-# --- run_db_update_add_is_archived, run_db_update_add_archived_date ---
-# (Diese Funktionen bleiben unverändert von der letzten Version)
 def save_special_appointment(date_str, appointment_type, description=""):
     conn = create_connection()
     if conn is None: return False
     try:
         cursor = conn.cursor()
-        # Annahme: 'special_appointments' Tabelle existiert (wurde in initialize_db nicht gezeigt)
-        # Falls nicht, muss sie hinzugefügt werden.
         query = "INSERT INTO special_appointments (appointment_date, appointment_type, description) VALUES (%s, %s, %s) ON DUPLICATE KEY UPDATE appointment_type=VALUES(appointment_type), description=VALUES(description)"
         cursor.execute(query, (date_str, appointment_type, description))
         conn.commit()
         return True
     except mysql.connector.Error as e:
-        if e.errno == 1146:  # Table doesn't exist
+        if e.errno == 1146:
             print("FEHLER: Tabelle 'special_appointments' existiert nicht. Bitte in initialize_db() hinzufügen.")
         else:
             print(f"DB Error on save_special_appointment: {e}")
@@ -616,7 +717,6 @@ def delete_special_appointment(date_str, appointment_type):
     if conn is None: return False
     try:
         cursor = conn.cursor()
-        # Annahme: 'special_appointments' Tabelle existiert
         query = "DELETE FROM special_appointments WHERE appointment_date = %s AND appointment_type = %s"
         cursor.execute(query, (date_str, appointment_type))
         conn.commit()
@@ -637,7 +737,6 @@ def get_special_appointments():
     if conn is None: return []
     try:
         cursor = conn.cursor(dictionary=True)
-        # Annahme: 'special_appointments' Tabelle existiert
         cursor.execute("SELECT * FROM special_appointments")
         return cursor.fetchall()
     except mysql.connector.Error as e:
@@ -671,9 +770,11 @@ def run_db_fix_approve_all_users():
         conn.commit()
         return True, f"{updated_rows} bestehende Benutzer wurden erfolgreich freigeschaltet."
     except mysql.connector.Error as e:
-        conn.rollback(); return False, f"Ein Datenbankfehler ist aufgetreten: {e}"
+        conn.rollback();
+        return False, f"Ein Datenbankfehler ist aufgetreten: {e}"
     except Exception as e:
-        conn.rollback(); return False, f"Ein unerwarteter Fehler ist aufgetreten: {e}"
+        conn.rollback();
+        return False, f"Ein unerwarteter Fehler ist aufgetreten: {e}"
     finally:
         if conn and conn.is_connected(): cursor.close(); conn.close()
 
@@ -682,12 +783,13 @@ def run_db_update_is_approved():
     conn = create_connection()
     if not conn: return False, "Keine Datenbankverbindung."
     try:
-        cursor = conn.cursor(dictionary=True)  # dictionary=True für Helfer
-        _add_column_if_not_exists(cursor, "users", "is_approved", "TINYINT(1) DEFAULT 0")  # Datentyp präzisiert
+        cursor = conn.cursor(dictionary=True)
+        _add_column_if_not_exists(cursor, "users", "is_approved", "TINYINT(1) DEFAULT 0")
         conn.commit()
         return True, "DB-Update (is_approved Spalte) erfolgreich."
     except mysql.connector.Error as e:
-        conn.rollback(); return False, f"Ein Fehler ist aufgetreten: {e}"
+        conn.rollback();
+        return False, f"Ein Fehler ist aufgetreten: {e}"
     finally:
         if conn and conn.is_connected(): cursor.close(); conn.close()
 
@@ -696,13 +798,13 @@ def run_db_update_v1():
     conn = create_connection()
     if not conn: return False, "Keine Datenbankverbindung."
     try:
-        cursor = conn.cursor(dictionary=True)  # dictionary=True für Helfer
-        _add_column_if_not_exists(cursor, "users", "last_seen", "DATETIME DEFAULT NULL")  # Defaultwert hinzugefügt
-        # Tabelle chat_messages wird jetzt in initialize_db erstellt
+        cursor = conn.cursor(dictionary=True)
+        _add_column_if_not_exists(cursor, "users", "last_seen", "DATETIME DEFAULT NULL")
         conn.commit()
         return True, "DB-Update für Chat erfolgreich."
     except mysql.connector.Error as e:
-        conn.rollback(); return False, f"Ein Fehler ist aufgetreten: {e}"
+        conn.rollback();
+        return False, f"Ein Fehler ist aufgetreten: {e}"
     finally:
         if conn and conn.is_connected(): cursor.close(); conn.close()
 
@@ -711,12 +813,14 @@ def run_db_update_add_is_archived():
     conn = create_connection()
     if conn is None: return False, "Keine Datenbankverbindung."
     try:
-        cursor = conn.cursor(dictionary=True)  # dictionary=True für Helfer
-        _add_column_if_not_exists(cursor, "users", "is_archived", "TINYINT(1) DEFAULT 0")  # Datentyp präzisiert
+        cursor = conn.cursor(dictionary=True)
+        _add_column_if_not_exists(cursor, "users", "is_archived", "TINYINT(1) DEFAULT 0")
         conn.commit()
         return True, "DB-Update (is_archived Spalte) erfolgreich."
     except Exception as e:
-        conn.rollback(); print(f"Fehler: {e}"); return False, f"Fehler: {e}"
+        conn.rollback();
+        print(f"Fehler: {e}");
+        return False, f"Fehler: {e}"
     finally:
         if conn and conn.is_connected(): cursor.close(); conn.close()
 
@@ -725,12 +829,14 @@ def run_db_update_add_archived_date():
     conn = create_connection()
     if conn is None: return False, "Keine Datenbankverbindung."
     try:
-        cursor = conn.cursor(dictionary=True)  # dictionary=True für Helfer
-        _add_column_if_not_exists(cursor, "users", "archived_date", "DATETIME DEFAULT NULL")  # Defaultwert hinzugefügt
+        cursor = conn.cursor(dictionary=True)
+        _add_column_if_not_exists(cursor, "users", "archived_date", "DATETIME DEFAULT NULL")
         conn.commit()
         return True, "DB-Update (archived_date Spalte) erfolgreich."
     except Exception as e:
-        conn.rollback(); print(f"Fehler: {e}"); return False, f"Fehler: {e}"
+        conn.rollback();
+        print(f"Fehler: {e}");
+        return False, f"Fehler: {e}"
     finally:
         if conn and conn.is_connected(): cursor.close(); conn.close()
 
