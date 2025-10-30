@@ -1,7 +1,10 @@
 # gui/generator/generator_rounds.py
 from collections import defaultdict
 from datetime import date, timedelta, datetime, time
-from database.db_shifts import save_shift_entry  # Direkter DB-Import
+
+
+# --- ENTFERNT ---
+# from database.db_shifts import save_shift_entry  # Direkter DB-Import ENTFERNT
 
 
 class GeneratorRounds:
@@ -156,28 +159,34 @@ class GeneratorRounds:
                 f"Block={chosen_user['prev_shift'] == shift_abbrev}, "
                 f"Hrs={chosen_user['hours']:.1f})"
             )
-            success, msg = save_shift_entry(chosen_user['id'], date_str, shift_abbrev)
 
-            if success:
-                assigned_count_this_round += 1;
-                user_id_int = chosen_user['id'];
-                user_id_str = chosen_user['id_str'];
-                user_dog = chosen_user['dog']
-                if user_id_str not in self.gen.live_shifts_data: self.gen.live_shifts_data[user_id_str] = {}
-                self.gen.live_shifts_data[user_id_str][date_str] = shift_abbrev;
-                users_unavailable_today.add(user_id_str);
-                assignments_today_by_shift[shift_abbrev].add(user_id_int)
-                if user_dog and user_dog != '---': existing_dog_assignments[user_dog].append(
-                    {'user_id': user_id_int, 'shift': shift_abbrev})
-                hours_added = self.gen.shift_hours.get(shift_abbrev, 0.0);
-                live_user_hours[user_id_int] += hours_added
-                if shift_abbrev in ['T.', '6']: live_shift_counts_ratio[user_id_int]['T_OR_6'] += 1
-                if shift_abbrev == 'N.': live_shift_counts_ratio[user_id_int]['N_DOT'] += 1
-                # Korrektur: Inkrementiere live_shift_counts für alle Schichten
-                live_shift_counts[user_id_int][shift_abbrev] += 1
-            else:
-                print(f"      -> Fair DB ERROR for User {chosen_user['id']}: {msg}")
-                users_unavailable_today.add(chosen_user['id_str'])
+            # --- ÄNDERUNG: DB-Aufruf entfernt ---
+            # success, msg = save_shift_entry(chosen_user['id'], date_str, shift_abbrev)
+            # if success:
+
+            # Die Zuweisung im Arbeitsspeicher ist immer erfolgreich
+            assigned_count_this_round += 1;
+            user_id_int = chosen_user['id'];
+            user_id_str = chosen_user['id_str'];
+            user_dog = chosen_user['dog']
+            if user_id_str not in self.gen.live_shifts_data: self.gen.live_shifts_data[user_id_str] = {}
+            self.gen.live_shifts_data[user_id_str][date_str] = shift_abbrev;
+            users_unavailable_today.add(user_id_str);
+            assignments_today_by_shift[shift_abbrev].add(user_id_int)
+            if user_dog and user_dog != '---': existing_dog_assignments[user_dog].append(
+                {'user_id': user_id_int, 'shift': shift_abbrev})
+            hours_added = self.gen.shift_hours.get(shift_abbrev, 0.0);
+            live_user_hours[user_id_int] += hours_added
+            if shift_abbrev in ['T.', '6']: live_shift_counts_ratio[user_id_int]['T_OR_6'] += 1
+            if shift_abbrev == 'N.': live_shift_counts_ratio[user_id_int]['N_DOT'] += 1
+            # Korrektur: Inkrementiere live_shift_counts für alle Schichten
+            live_shift_counts[user_id_int][shift_abbrev] += 1
+
+            # --- ÄNDERUNG: Else-Block entfernt ---
+            # else:
+            #     print(f"      -> Fair DB ERROR for User {chosen_user['id']}: {msg}")
+            #     users_unavailable_today.add(chosen_user['id_str'])
+            # --- ENDE ÄNDERUNG ---
 
         return assigned_count_this_round
 
@@ -250,30 +259,37 @@ class GeneratorRounds:
             # Es geht nur darum, die Lücken mit den am wenigsten belasteten Leuten zu füllen.
             possible_fill_candidates.sort(key=lambda x: x['hours']);
             chosen_user = possible_fill_candidates[0]
-            success, msg = save_shift_entry(chosen_user['id'], date_str, shift_abbrev)
 
-            if success:  # Live-Daten updaten
-                assigned_count += 1;
-                user_id_int = chosen_user['id'];
-                user_id_str = chosen_user['id_str'];
-                user_dog = chosen_user['dog']
-                if user_id_str not in self.gen.live_shifts_data: self.gen.live_shifts_data[user_id_str] = {}
-                self.gen.live_shifts_data[user_id_str][date_str] = shift_abbrev;
-                users_unavailable_today.add(user_id_str);
-                assignments_today_by_shift[shift_abbrev].add(user_id_int)
-                if user_dog and user_dog != '---': existing_dog_assignments[user_dog].append(
-                    {'user_id': user_id_int, 'shift': shift_abbrev})
-                hours_added = self.gen.shift_hours.get(shift_abbrev, 0.0);
-                live_user_hours[user_id_int] += hours_added
-                if shift_abbrev in ['T.', '6']: live_shift_counts_ratio[user_id_int]['T_OR_6'] += 1
-                if shift_abbrev == 'N.': live_shift_counts_ratio[user_id_int]['N_DOT'] += 1
-                # Korrektur: Inkrementiere live_shift_counts für alle Schichten
-                live_shift_counts[user_id_int][shift_abbrev] += 1
-                print(
-                    f"         -> Fill OK (Runde {round_num}): User {chosen_user['id']} -> {shift_abbrev}. H:{live_user_hours[user_id_int]:.1f}")
-            else:
-                print(
-                    f"         -> Fill DB ERROR (Runde {round_num}) User {chosen_user['id']}: {msg}");
-                users_unavailable_today.add(
-                    chosen_user['id_str'])
+            # --- ÄNDERUNG: DB-Aufruf entfernt ---
+            # success, msg = save_shift_entry(chosen_user['id'], date_str, shift_abbrev)
+            # if success:
+
+            # Die Zuweisung im Arbeitsspeicher ist immer erfolgreich
+            assigned_count += 1;
+            user_id_int = chosen_user['id'];
+            user_id_str = chosen_user['id_str'];
+            user_dog = chosen_user['dog']
+            if user_id_str not in self.gen.live_shifts_data: self.gen.live_shifts_data[user_id_str] = {}
+            self.gen.live_shifts_data[user_id_str][date_str] = shift_abbrev;
+            users_unavailable_today.add(user_id_str);
+            assignments_today_by_shift[shift_abbrev].add(user_id_int)
+            if user_dog and user_dog != '---': existing_dog_assignments[user_dog].append(
+                {'user_id': user_id_int, 'shift': shift_abbrev})
+            hours_added = self.gen.shift_hours.get(shift_abbrev, 0.0);
+            live_user_hours[user_id_int] += hours_added
+            if shift_abbrev in ['T.', '6']: live_shift_counts_ratio[user_id_int]['T_OR_6'] += 1
+            if shift_abbrev == 'N.': live_shift_counts_ratio[user_id_int]['N_DOT'] += 1
+            # Korrektur: Inkrementiere live_shift_counts für alle Schichten
+            live_shift_counts[user_id_int][shift_abbrev] += 1
+            print(
+                f"         -> Fill OK (Runde {round_num}): User {chosen_user['id']} -> {shift_abbrev}. H:{live_user_hours[user_id_int]:.1f}")
+
+            # --- ÄNDERUNG: Else-Block entfernt ---
+            # else:
+            #     print(
+            #         f"         -> Fill DB ERROR (Runde {round_num}) User {chosen_user['id']}: {msg}");
+            #     users_unavailable_today.add(
+            #         chosen_user['id_str'])
+            # --- ENDE ÄNDERUNG ---
+
         return assigned_count

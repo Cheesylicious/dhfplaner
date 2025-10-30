@@ -12,12 +12,15 @@ try:
 except ImportError:
     ShiftPlanDataManager = None  # Fallback
 
-from database.db_shifts import save_shift_entry
+# --- ÄNDERUNG: save_shift_entry wird hier nicht mehr benötigt ---
+# from database.db_shifts import save_shift_entry
 
 # Imports für ausgelagerte Logik
 from .generator.generator_helpers import GeneratorHelpers
 from .generator.generator_scoring import GeneratorScoring
 from .generator.generator_rounds import GeneratorRounds
+# --- NEUER IMPORT für Batch-Speichern ---
+from .generator.generator_persistence import save_generation_batch_to_db
 
 # Konstanten
 MAX_MONTHLY_HOURS = 228.0
@@ -356,7 +359,7 @@ class ShiftPlanGenerator:
             if not skip_reason: consecutive_days = self.helpers.count_consecutive_shifts(user_id_str, target_date_obj);
             if consecutive_days >= self.HARD_MAX_CONSECUTIVE_SHIFTS: skip_reason = f"MaxCons({consecutive_days})"
             if not skip_reason and self.mandatory_rest_days > 0 and consecutive_days == 0 and not self.helpers.check_mandatory_rest(
-                    user_id_str, target_date_obj): skip_reason = f"Rest({self.mandatory_rest_days}d)"
+                    user_id_str, target_date_obj): skip_reason = f"Rest({self.gen.mandatory_rest_days}d)"
             max_hours_check = max_hours_override if max_hours_override is not None else self.MAX_MONTHLY_HOURS
             if not skip_reason and current_hours + hours_for_this_shift > max_hours_check: skip_reason = f"MaxHrs({current_hours:.1f}+{hours_for_this_shift:.1f}>{max_hours_check})"
 
@@ -393,8 +396,8 @@ class ShiftPlanGenerator:
                     {'user_id': uid_int, 'shift': shift})
             if self.vacation_requests.get(uid_str, {}).get(critical_date_obj) in ['Approved', 'Genehmigt']:
                 users_unavailable_this_call.add(uid_str)
-            elif date_str in self.wunschfrei_requests.get(uid_str, {}):
-                wf_entry = self.wunschfrei_requests[uid_str][date_str]
+            elif date_str in self.gen.wunschfrei_requests.get(uid_str, {}):
+                wf_entry = self.gen.wunschfrei_requests[uid_str][date_str]
                 wf_status, wf_shift = None, None
                 if isinstance(wf_entry, tuple) and len(wf_entry) >= 2: wf_status, wf_shift = wf_entry[0], wf_entry[1]
                 if wf_status in ['Approved', 'Genehmigt', 'Akzeptiert'] and (
@@ -466,29 +469,36 @@ class ShiftPlanGenerator:
 
             possible_candidates.sort(key=lambda x: x['hours']);
             chosen_user = possible_candidates[0]
-            success, msg = save_shift_entry(chosen_user['id'], date_str, critical_shift_abbrev)  # Speichern
-            if success:  # Live-Daten updaten
-                assigned_count += 1;
-                user_id_int = chosen_user['id'];
-                user_id_str = chosen_user['id_str'];
-                user_dog = chosen_user['dog']
-                if user_id_str not in self.live_shifts_data: self.live_shifts_data[user_id_str] = {}
-                self.live_shifts_data[user_id_str][date_str] = critical_shift_abbrev;
-                users_unavailable_this_call.add(user_id_str);
-                hours_added = self.shift_hours.get(critical_shift_abbrev, 0.0);
-                live_user_hours[user_id_int] += hours_added;
-                if critical_shift_abbrev in ['T.', '6']: live_shift_counts_ratio[user_id_int]['T_OR_6'] += 1;
-                if critical_shift_abbrev == 'N.': live_shift_counts_ratio[user_id_int]['N_DOT'] += 1;
-                live_shift_counts[user_id_int][critical_shift_abbrev] += 1;
-                assignments_on_critical_date[critical_shift_abbrev].add(user_id_int)  # NEU: Update für nächsten Loop
-                print(
-                    f"      [Pre-Plan] OK: User {user_id_int} -> {critical_shift_abbrev} @ {date_str}. (Hrs: {live_user_hours[user_id_int]:.1f})")
-                if user_dog and user_dog != '---': dogs_assigned_on_critical_date[user_dog].append(
-                    {'user_id': user_id_int, 'shift': critical_shift_abbrev})
-            else:
-                print(f"      [Pre-Plan] DB ERROR User {chosen_user['id']}: {msg}");
-                users_unavailable_this_call.add(
-                    chosen_user['id_str'])
+
+            # --- ÄNDERUNG: Pre-Plan speichert jetzt auch NUR IN-MEMORY ---
+            # success, msg = save_shift_entry(chosen_user['id'], date_str, critical_shift_abbrev)  # Speichern
+            # if success:  # Live-Daten updaten
+
+            assigned_count += 1;
+            user_id_int = chosen_user['id'];
+            user_id_str = chosen_user['id_str'];
+            user_dog = chosen_user['dog']
+            if user_id_str not in self.live_shifts_data: self.live_shifts_data[user_id_str] = {}
+            self.live_shifts_data[user_id_str][date_str] = critical_shift_abbrev;
+            users_unavailable_this_call.add(user_id_str);
+            hours_added = self.shift_hours.get(critical_shift_abbrev, 0.0);
+            live_user_hours[user_id_int] += hours_added;
+            if critical_shift_abbrev in ['T.', '6']: live_shift_counts_ratio[user_id_int]['T_OR_6'] += 1;
+            if critical_shift_abbrev == 'N.': live_shift_counts_ratio[user_id_int]['N_DOT'] += 1;
+            live_shift_counts[user_id_int][critical_shift_abbrev] += 1;
+            assignments_on_critical_date[critical_shift_abbrev].add(user_id_int)  # NEU: Update für nächsten Loop
+            print(
+                f"      [Pre-Plan] OK (In-Memory): User {user_id_int} -> {critical_shift_abbrev} @ {date_str}. (Hrs: {live_user_hours[user_id_int]:.1f})")
+            if user_dog and user_dog != '---': dogs_assigned_on_critical_date[user_dog].append(
+                {'user_id': user_id_int, 'shift': critical_shift_abbrev})
+
+            # --- ÄNDERUNG: Else-Block entfernt ---
+            # else:
+            #     print(f"      [Pre-Plan] DB ERROR User {chosen_user['id']}: {msg}");
+            #     users_unavailable_this_call.add(
+            #         chosen_user['id_str'])
+            # --- ENDE ÄNDERUNG ---
+
         return assigned_count
 
     # _generate Methode bleibt unverändert zum vorherigen Vorschlag
@@ -527,7 +537,9 @@ class ShiftPlanGenerator:
                         live_shift_counts[user_id_int][shift] += 1
             # --- Ende Initialisierung ---
 
-            save_count = 0
+            # --- ÄNDERUNG: 'save_count' wird nicht mehr verwendet ---
+            # save_count = 0
+
             # --- KEINE PRE-PLANNING PHASE MEHR ---
             self._update_progress(10, "Starte Hauptplanung...")  # Start bei 10%
 
@@ -616,8 +628,9 @@ class ShiftPlanGenerator:
                 # Schleife: Schichten (self.shifts_to_plan ist jetzt ["6", "T.", "N."])
                 for shift_abbrev in self.shifts_to_plan:
                     current_step += 1;
-                    progress_perc = int(10 + (current_step / total_steps) * 90);
-                    self._update_progress(progress_perc, f"Plane {shift_abbrev} für {date_str}...")  # Skala 10-100%
+                    # --- ÄNDERUNG: Progress-Skala angepasst (10-95%) ---
+                    progress_perc = int(10 + (current_step / total_steps) * 85);
+                    self._update_progress(progress_perc, f"Plane {shift_abbrev} für {date_str}...")
 
                     # Logik für "6" Schicht
                     is_friday_6 = shift_abbrev == '6' and current_date_obj.weekday() == 4;
@@ -645,7 +658,8 @@ class ShiftPlanGenerator:
                                                                                 self.live_user_hours, live_shift_counts,
                                                                                 live_shift_counts_ratio, needed_now,
                                                                                 days_in_month)
-                    save_count += assigned_in_round_1
+                    # --- ÄNDERUNG: 'save_count' entfernt ---
+                    # save_count += assigned_in_round_1
 
                     # Runden 2, 3, 4 (unverändert)
                     current_assigned_count = len(assignments_today_by_shift.get(shift_abbrev, set()));
@@ -654,24 +668,43 @@ class ShiftPlanGenerator:
                         shift_abbrev, current_date_obj, users_unavailable_today, existing_dog_assignments,
                         assignments_today_by_shift, self.live_user_hours, live_shift_counts, live_shift_counts_ratio,
                         needed_after_fair,
-                        round_num=2); save_count += assigned_in_round_2; current_assigned_count += assigned_in_round_2
+                        round_num=2); current_assigned_count += assigned_in_round_2  # save_count entfernt
                     needed_after_round_2 = required_count - current_assigned_count
                     if needed_after_round_2 > 0 and self.generator_fill_rounds >= 2: assigned_in_round_3 = self.rounds.run_fill_round(
                         shift_abbrev, current_date_obj, users_unavailable_today, existing_dog_assignments,
                         assignments_today_by_shift, self.live_user_hours, live_shift_counts, live_shift_counts_ratio,
                         needed_after_round_2,
-                        round_num=3); save_count += assigned_in_round_3; current_assigned_count += assigned_in_round_3
+                        round_num=3); current_assigned_count += assigned_in_round_3  # save_count entfernt
                     needed_after_round_3 = required_count - current_assigned_count
                     if needed_after_round_3 > 0 and self.generator_fill_rounds >= 3: assigned_in_round_4 = self.rounds.run_fill_round(
                         shift_abbrev, current_date_obj, users_unavailable_today, existing_dog_assignments,
                         assignments_today_by_shift, self.live_user_hours, live_shift_counts, live_shift_counts_ratio,
                         needed_after_round_3,
-                        round_num=4); save_count += assigned_in_round_4; current_assigned_count += assigned_in_round_4
+                        round_num=4); current_assigned_count += assigned_in_round_4  # save_count entfernt
 
                     # Endgültige Prüfung
                     final_assigned_count = current_assigned_count
                     if final_assigned_count < required_count: print(
                         f"   -> [WARNUNG] Mindestbesetzung für '{shift_abbrev}' an {date_str} NICHT erreicht (Req: {required_count}, Assigned: {final_assigned_count}).")
+
+            # --- NEU: Batch-Speichern am Ende aller Schleifen ---
+            self._update_progress(95, "Speichere Plan in Datenbank...")
+
+            # HIER: Der innovative Teil. Alle DB-Schreibvorgänge in einem Batch.
+            success, saved_count_batch, error_msg_batch = save_generation_batch_to_db(
+                self.live_shifts_data,
+                self.year,
+                self.month
+            )
+
+            if not success:
+                print(f"KRITISCHER FEHLER: Das Speichern des Batch-Plans ist fehlgeschlagen: {error_msg_batch}")
+                if self.completion_callback:
+                    err_msg = f"Fehler beim Batch-Speichern:\n{error_msg_batch}"
+                    self.app.after(100, lambda: self.completion_callback(False, 0, err_msg))
+                return  # Beende die Funktion bei Fehler
+
+            # --- ENDE NEU ---
 
             # Abschluss
             self._update_progress(100, "Generierung abgeschlossen.")
@@ -685,8 +718,9 @@ class ShiftPlanGenerator:
                 print(
                     f"  User {user_id_int}: T:{counts.get('T.', 0)}, N:{counts.get('N.', 0)}, 6:{counts.get('6', 0)}")
 
-            if self.completion_callback: self.app.after(100, lambda sc=save_count: self.completion_callback(True, sc,
-                                                                                                            None))
+            # --- ÄNDERUNG: Callback nutzt jetzt 'saved_count_batch' ---
+            if self.completion_callback:
+                self.app.after(100, lambda sc=saved_count_batch: self.completion_callback(True, sc, None))
 
         except Exception as e:
             print(f"Fehler im Generierungs-Thread: {e}");
