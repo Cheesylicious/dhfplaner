@@ -90,13 +90,87 @@ db_pool = None
 _pool_init_lock = threading.Lock()
 _db_initialized = False  # NEU: Flag, um initialize_db() nur einmal auszuführen
 
+# --- INNOVATION 2: Cache für Konfigurationen ---
+_config_cache = {}
+# ---------------------------------------------
 
-# Die Erstellung des Pools wird von hier (globaler Scope) ...
-# ... in die create_connection() Funktion verschoben,
-# um den Programmstart ("boot") zu beschleunigen.
+# ==============================================================================
+# --- HILFSFUNKTIONEN (AN DEN ANFANG VERSCHOBEN, UM IMPORTFEHLER ZU BEHEBEN) ---
+# ==============================================================================
 
-# --- ENDE INNOVATION ---
+ROLE_HIERARCHY = {"Gast": 1, "Benutzer": 2, "Admin": 3, "SuperAdmin": 4}
+MIN_STAFFING_RULES_CONFIG_KEY = "MIN_STAFFING_RULES"
+REQUEST_LOCKS_CONFIG_KEY = "REQUEST_LOCKS"
+ADMIN_MENU_CONFIG_KEY = "ADMIN_MENU_CONFIG"
+USER_TAB_ORDER_CONFIG_KEY = "USER_TAB_ORDER"
+ADMIN_TAB_ORDER_CONFIG_KEY = "ADMIN_TAB_ORDER"
+VACATION_RULES_CONFIG_KEY = "VACATION_RULES"
 
+
+def hash_password(password):
+    return hashlib.sha256(password.encode('utf-8')).hexdigest()
+
+
+def _log_activity(cursor, user_id, action_type, details):
+    timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    cursor.execute("INSERT INTO activity_log (timestamp, user_id, action_type, details) VALUES (%s, %s, %s, %s)",
+                   (timestamp, user_id, action_type, details))
+
+
+def _create_admin_notification(cursor, message):
+    timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    cursor.execute("INSERT INTO admin_notifications (message, timestamp) VALUES (%s, %s)", (message, timestamp))
+
+
+def get_vacation_days_for_tenure(entry_date_obj, default_days=30):
+    """
+    Berechnet den Urlaubsanspruch basierend auf der Betriebszugehörigkeit.
+    Nutzt (jetzt gecachtes) load_config_json.
+    """
+    if not entry_date_obj:
+        return default_days
+    if isinstance(entry_date_obj, str):
+        try:
+            entry_date_obj = datetime.strptime(entry_date_obj, '%Y-%m-%d').date()
+        except ValueError:
+            print(f"Warnung: Ungültiges entry_date-Format: {entry_date_obj}. Verwende Standard-Urlaubstage.")
+            return default_days
+    elif isinstance(entry_date_obj, datetime):
+        entry_date_obj = entry_date_obj.date()
+    elif not isinstance(entry_date_obj, date):
+        print(f"Warnung: Ungültiger entry_date-Typ: {type(entry_date_obj)}. Verwende Standard-Urlaubstage.")
+        return default_days
+
+    # Nutzt die gecachte Ladefunktion
+    rules_config = load_config_json(VACATION_RULES_CONFIG_KEY)
+    if not rules_config or not isinstance(rules_config, list):
+        return default_days
+
+    try:
+        rules = sorted(
+            [{"years": int(r["years"]), "days": int(r["days"])} for r in rules_config],
+            key=lambda x: x["years"],
+            reverse=True
+        )
+    except (ValueError, KeyError, TypeError) as e:
+        print(f"Fehler beim Parsen der Urlaubsregeln: {e}. Verwende Standard-Urlaubstage.")
+        return default_days
+
+    today = date.today()
+    tenure_years = today.year - entry_date_obj.year
+    if (today.month, today.day) < (entry_date_obj.month, entry_date_obj.day):
+        tenure_years -= 1
+
+    for rule in rules:
+        if tenure_years >= rule["years"]:
+            return rule["days"]
+
+    return default_days
+
+
+# ==============================================================================
+# --- POOL- UND VERBINDUNGS-LOGIK (LAZY LOADING) ---
+# ==============================================================================
 
 def create_connection():
     """
@@ -179,7 +253,6 @@ def create_connection():
             raise
 
 
-# --- NEUE FUNKTION FÜR PRE-WARMING ---
 def prewarm_connection_pool():
     """
     Ruft create_connection() einmal auf, um den Pool und das Schema im Hintergrund
@@ -207,28 +280,13 @@ def prewarm_connection_pool():
             conn.close()  # Wichtig: Verbindung sofort zurück in den Pool geben.
 
 
-# --- ENDE NEUE FUNKTION ---
-
-
 def close_pool():
     print("Der Datenbank-Connection-Pool wird bei Programmende verwaltet.")
 
 
-ROLE_HIERARCHY = {"Gast": 1, "Benutzer": 2, "Admin": 3, "SuperAdmin": 4}
-MIN_STAFFING_RULES_CONFIG_KEY = "MIN_STAFFING_RULES"
-REQUEST_LOCKS_CONFIG_KEY = "REQUEST_LOCKS"
-ADMIN_MENU_CONFIG_KEY = "ADMIN_MENU_CONFIG"
-USER_TAB_ORDER_CONFIG_KEY = "USER_TAB_ORDER"
-ADMIN_TAB_ORDER_CONFIG_KEY = "ADMIN_TAB_ORDER"
-# --- NEUER SCHLÜSSEL ---
-VACATION_RULES_CONFIG_KEY = "VACATION_RULES"
-
-
-# --- ENDE NEU ---
-
-def hash_password(password):
-    return hashlib.sha256(password.encode('utf-8')).hexdigest()
-
+# ==============================================================================
+# --- SCHEMA-INITIALISIERUNG UND MIGRATION ---
+# ==============================================================================
 
 def _add_column_if_not_exists(cursor, table_name, column_name, column_type):
     if DB_CONFIG is None:
@@ -264,15 +322,12 @@ def _add_index_if_not_exists(cursor, table_name, index_name, columns):
         cursor.execute(f"CREATE INDEX `{index_name}` ON `{table_name}` ({columns})")
 
 
-# --- INNOVATION: Logik von initialize_db() in eine private Funktion verschoben ---
 def _run_initialize_db(conn):
     """
     Führt die eigentliche Schema-Initialisierung durch.
     Wird jetzt von create_connection() beim ersten Start aufgerufen.
     Nimmt eine *existierende* Verbindung entgegen.
     """
-    # Diese Funktion wird jetzt von create_connection aufgerufen,
-    # daher ist der Pool garantiert vorhanden, aber die Konfig muss geprüft werden.
     if DB_CONFIG is None:
         raise ConnectionError("DB-Init fehlgeschlagen: Konfiguration nicht geladen.")
 
@@ -300,7 +355,6 @@ def _run_initialize_db(conn):
         raise ConnectionError(f"DB-Server-Verbindung fehlgeschlagen: {e}")
 
     # 2. Tabellen-Erstellung (nutzt die übergebene Pool-Verbindung 'conn')
-    # conn = create_connection() # NICHT MEHR NÖTIG
     if conn is None:
         print("Konnte die Datenbank-Tabellen nicht initialisieren.")
         raise ConnectionError("DB-Verbindung für Tabellen-Init fehlgeschlagen.")
@@ -324,15 +378,15 @@ def _run_initialize_db(conn):
                     # Anderen Fehler weiter werfen
                     raise e  # Wichtig: Nur `raise` verwenden, um den ursprünglichen Traceback zu behalten
 
-        # --- Tabellen erstellen (unverändert) ---
+        # --- Tabellen erstellen ---
         execute_create_table_if_not_exists(
             "CREATE TABLE IF NOT EXISTS `config_storage` (config_key VARCHAR(255) PRIMARY KEY, config_json TEXT NOT NULL);")
         execute_create_table_if_not_exists(
             "CREATE TABLE IF NOT EXISTS `shift_frequency` (shift_abbrev VARCHAR(255) PRIMARY KEY, count INT NOT NULL DEFAULT 0);")
         execute_create_table_if_not_exists(
-            "CREATE TABLE IF NOT EXISTS `users` (id INT AUTO_INCREMENT PRIMARY KEY, password_hash TEXT NOT NULL, role TEXT NOT NULL, vorname TEXT NOT NULL, name TEXT NOT NULL, geburtstag TEXT, telefon TEXT, diensthund TEXT, urlaub_gesamt INT DEFAULT 30, urlaub_rest INT DEFAULT 30, entry_date TEXT, has_seen_tutorial TINYINT(1) DEFAULT 0, password_changed TINYINT(1) DEFAULT 0, last_ausbildung DATE DEFAULT NULL, last_schiessen DATE DEFAULT NULL, last_seen DATETIME DEFAULT NULL, is_approved TINYINT(1) DEFAULT 0, is_archived TINYINT(1) DEFAULT 0, archived_date DATETIME DEFAULT NULL, UNIQUE (vorname(255), name(255)));")  # Datentypen präzisiert
+            "CREATE TABLE IF NOT EXISTS `users` (id INT AUTO_INCREMENT PRIMARY KEY, password_hash TEXT NOT NULL, role TEXT NOT NULL, vorname TEXT NOT NULL, name TEXT NOT NULL, geburtstag TEXT, telefon TEXT, diensthund TEXT, urlaub_gesamt INT DEFAULT 30, urlaub_rest INT DEFAULT 30, entry_date TEXT, has_seen_tutorial TINYINT(1) DEFAULT 0, password_changed TINYINT(1) DEFAULT 0, last_ausbildung DATE DEFAULT NULL, last_schiessen DATE DEFAULT NULL, last_seen DATETIME DEFAULT NULL, is_approved TINYINT(1) DEFAULT 0, is_archived TINYINT(1) DEFAULT 0, archived_date DATETIME DEFAULT NULL, activation_date DATETIME NULL DEFAULT NULL, UNIQUE (vorname(255), name(255)));")
         execute_create_table_if_not_exists(
-            "CREATE TABLE IF NOT EXISTS `chat_messages` (id INT AUTO_INCREMENT PRIMARY KEY, sender_id INT NOT NULL, recipient_id INT NOT NULL, message TEXT NOT NULL, timestamp DATETIME DEFAULT CURRENT_TIMESTAMP, is_read TINYINT(1) DEFAULT 0, FOREIGN KEY (sender_id) REFERENCES users(id) ON DELETE CASCADE, FOREIGN KEY (recipient_id) REFERENCES users(id) ON DELETE CASCADE);")  # Datentyp präzisiert
+            "CREATE TABLE IF NOT EXISTS `chat_messages` (id INT AUTO_INCREMENT PRIMARY KEY, sender_id INT NOT NULL, recipient_id INT NOT NULL, message TEXT NOT NULL, timestamp DATETIME DEFAULT CURRENT_TIMESTAMP, is_read TINYINT(1) DEFAULT 0, FOREIGN KEY (sender_id) REFERENCES users(id) ON DELETE CASCADE, FOREIGN KEY (recipient_id) REFERENCES users(id) ON DELETE CASCADE);")
         execute_create_table_if_not_exists("""
                                            CREATE TABLE IF NOT EXISTS `shift_types`
                                            (
@@ -376,7 +430,6 @@ def _run_initialize_db(conn):
                                            )
                                                );
                                            """)
-        # --- KORREKTUR: Tabelle shift_order OHNE check_for_understaffing ---
         execute_create_table_if_not_exists("""
                                            CREATE TABLE IF NOT EXISTS `shift_order`
                                            (
@@ -396,19 +449,16 @@ def _run_initialize_db(conn):
                                            )
                                                );
                                            """)
-        # --- ENDE KORREKTUR ---
         execute_create_table_if_not_exists(
-            "CREATE TABLE IF NOT EXISTS `shift_schedule` (user_id INT NOT NULL, shift_date DATE NOT NULL, shift_abbrev VARCHAR(10), PRIMARY KEY (user_id, shift_date));")  # NOT NULL hinzugefügt
+            "CREATE TABLE IF NOT EXISTS `shift_schedule` (user_id INT NOT NULL, shift_date DATE NOT NULL, shift_abbrev VARCHAR(10), PRIMARY KEY (user_id, shift_date));")
         execute_create_table_if_not_exists(
-            "CREATE TABLE IF NOT EXISTS `activity_log` (id INT AUTO_INCREMENT PRIMARY KEY, timestamp DATETIME NOT NULL, user_id INT, action_type VARCHAR(255) NOT NULL, details TEXT);")  # Beispiel
+            "CREATE TABLE IF NOT EXISTS `activity_log` (id INT AUTO_INCREMENT PRIMARY KEY, timestamp DATETIME NOT NULL, user_id INT, action_type VARCHAR(255) NOT NULL, details TEXT);")
         execute_create_table_if_not_exists(
-            "CREATE TABLE IF NOT EXISTS `admin_notifications` (id INT AUTO_INCREMENT PRIMARY KEY, message TEXT NOT NULL, timestamp DATETIME NOT NULL, is_read TINYINT(1) DEFAULT 0);")  # Beispiel
+            "CREATE TABLE IF NOT EXISTS `admin_notifications` (id INT AUTO_INCREMENT PRIMARY KEY, message TEXT NOT NULL, timestamp DATETIME NOT NULL, is_read TINYINT(1) DEFAULT 0);")
         execute_create_table_if_not_exists(
-            "CREATE TABLE IF NOT EXISTS `dogs` (id INT AUTO_INCREMENT PRIMARY KEY, name VARCHAR(255) NOT NULL, breed VARCHAR(255), birthdate DATE, owner_id INT, status VARCHAR(50), notes TEXT);")  # Beispiel
+            "CREATE TABLE IF NOT EXISTS `dogs` (id INT AUTO_INCREMENT PRIMARY KEY, name VARCHAR(255) NOT NULL, breed VARCHAR(255), birthdate DATE, owner_id INT, status VARCHAR(50), notes TEXT);")
         execute_create_table_if_not_exists(
-            "CREATE TABLE IF NOT EXISTS `bug_reports` (id INT AUTO_INCREMENT PRIMARY KEY, user_id INT NOT NULL, timestamp DATETIME DEFAULT CURRENT_TIMESTAMP, title TEXT NOT NULL, description TEXT NOT NULL, status VARCHAR(50) DEFAULT 'Offen', admin_comment TEXT, user_feedback TEXT, feedback_requested TINYINT(1) DEFAULT 0, notified TINYINT(1) DEFAULT 0);")  # Beispiel
-
-        # --- NEU: Tabelle tasks ---
+            "CREATE TABLE IF NOT EXISTS `bug_reports` (id INT AUTO_INCREMENT PRIMARY KEY, user_id INT NOT NULL, timestamp DATETIME DEFAULT CURRENT_TIMESTAMP, title TEXT NOT NULL, description TEXT NOT NULL, status VARCHAR(50) DEFAULT 'Offen', admin_comment TEXT, user_feedback TEXT, feedback_requested TINYINT(1) DEFAULT 0, notified TINYINT(1) DEFAULT 0);")
         execute_create_table_if_not_exists("""
                                            CREATE TABLE IF NOT EXISTS `tasks`
                                            (
@@ -460,18 +510,14 @@ def _run_initialize_db(conn):
                                            ) ON DELETE CASCADE
                                                );
                                            """)
-        # --- ENDE NEU ---
-
         execute_create_table_if_not_exists(
-            "CREATE TABLE IF NOT EXISTS `password_reset_requests` (id INT AUTO_INCREMENT PRIMARY KEY, user_id INT NOT NULL UNIQUE, token VARCHAR(255) NOT NULL UNIQUE, timestamp DATETIME DEFAULT CURRENT_TIMESTAMP, FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE);")  # Beispiel
+            "CREATE TABLE IF NOT EXISTS `password_reset_requests` (id INT AUTO_INCREMENT PRIMARY KEY, user_id INT NOT NULL UNIQUE, token VARCHAR(255) NOT NULL UNIQUE, timestamp DATETIME DEFAULT CURRENT_TIMESTAMP, FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE);")
         execute_create_table_if_not_exists(
-            "CREATE TABLE IF NOT EXISTS `vacation_requests` (id INT AUTO_INCREMENT PRIMARY KEY, user_id INT NOT NULL, start_date DATE NOT NULL, end_date DATE NOT NULL, days_requested INT NOT NULL, status VARCHAR(50) DEFAULT 'Ausstehend', submission_timestamp DATETIME DEFAULT CURRENT_TIMESTAMP, approval_timestamp DATETIME DEFAULT NULL, approved_by INT DEFAULT NULL, rejection_reason TEXT, notified TINYINT(1) DEFAULT 0, archived TINYINT(1) DEFAULT 0);")  # Beispiel
+            "CREATE TABLE IF NOT EXISTS `vacation_requests` (id INT AUTO_INCREMENT PRIMARY KEY, user_id INT NOT NULL, start_date DATE NOT NULL, end_date DATE NOT NULL, days_requested INT NOT NULL, status VARCHAR(50) DEFAULT 'Ausstehend', submission_timestamp DATETIME DEFAULT CURRENT_TIMESTAMP, approval_timestamp DATETIME DEFAULT NULL, approved_by INT DEFAULT NULL, rejection_reason TEXT, notified TINYINT(1) DEFAULT 0, archived TINYINT(1) DEFAULT 0);")
         execute_create_table_if_not_exists(
-            "CREATE TABLE IF NOT EXISTS `wunschfrei_requests` (id INT AUTO_INCREMENT PRIMARY KEY, user_id INT NOT NULL, request_date DATE NOT NULL, requested_shift VARCHAR(10) DEFAULT 'WF', status VARCHAR(50) DEFAULT 'Ausstehend', requested_by VARCHAR(50) DEFAULT 'User', submission_timestamp DATETIME DEFAULT CURRENT_TIMESTAMP, approval_timestamp DATETIME DEFAULT NULL, rejection_reason TEXT, notified TINYINT(1) DEFAULT 0, UNIQUE KEY `user_date_request` (`user_id`,`request_date`));")  # Beispiel
+            "CREATE TABLE IF NOT EXISTS `wunschfrei_requests` (id INT AUTO_INCREMENT PRIMARY KEY, user_id INT NOT NULL, request_date DATE NOT NULL, requested_shift VARCHAR(10) DEFAULT 'WF', status VARCHAR(50) DEFAULT 'Ausstehend', requested_by VARCHAR(50) DEFAULT 'User', submission_timestamp DATETIME DEFAULT CURRENT_TIMESTAMP, approval_timestamp DATETIME DEFAULT NULL, rejection_reason TEXT, notified TINYINT(1) DEFAULT 0, UNIQUE KEY `user_date_request` (`user_id`,`request_date`));")
         execute_create_table_if_not_exists(
-            "CREATE TABLE IF NOT EXISTS `user_order` (user_id INT PRIMARY KEY, sort_order INT NOT NULL, is_visible TINYINT(1) DEFAULT 1, FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE);")  # Beispiel
-
-        # --- NEU: Fehlende Tabelle shift_locks hinzufügen ---
+            "CREATE TABLE IF NOT EXISTS `user_order` (user_id INT PRIMARY KEY, sort_order INT NOT NULL, is_visible TINYINT(1) DEFAULT 1, FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE);")
         execute_create_table_if_not_exists("""
                                            CREATE TABLE IF NOT EXISTS `shift_locks`
                                            (
@@ -512,9 +558,8 @@ def _run_initialize_db(conn):
                                              ON DELETE SET NULL
                                                );
                                            """)
-        # --- ENDE NEU ---
 
-        # --- Index hinzufügen (unverändert) ---
+        # --- Index hinzufügen ---
         _add_index_if_not_exists(cursor, "shift_schedule", "idx_shift_date_user", "`shift_date`, `user_id`")
         _add_index_if_not_exists(cursor, "tasks", "idx_tasks_creator", "`creator_admin_id`")
         _add_index_if_not_exists(cursor, "users", "idx_user_status",
@@ -522,12 +567,13 @@ def _run_initialize_db(conn):
         _add_index_if_not_exists(cursor, "users", "idx_user_auth", "`vorname`(255), `name`(255), `password_hash`(255)")
         _add_index_if_not_exists(cursor, "chat_messages", "idx_chat_recipient_read", "`recipient_id`, `is_read`")
 
-        # --- Spalten hinzufügen (Migrationslogik) (unverändert) ---
+        # --- Spalten hinzufügen (Migrationslogik) ---
         _add_column_if_not_exists(cursor, "users", "entry_date", "DATE DEFAULT NULL")
         _add_column_if_not_exists(cursor, "users", "last_seen", "DATETIME DEFAULT NULL")
         _add_column_if_not_exists(cursor, "users", "is_approved", "TINYINT(1) DEFAULT 0")
         _add_column_if_not_exists(cursor, "users", "is_archived", "TINYINT(1) DEFAULT 0")
         _add_column_if_not_exists(cursor, "users", "archived_date", "DATETIME DEFAULT NULL")
+        _add_column_if_not_exists(cursor, "users", "activation_date", "DATETIME NULL DEFAULT NULL")
         _add_column_if_not_exists(cursor, "shift_types", "check_for_understaffing", "TINYINT(1) DEFAULT 0")
 
         conn.commit()
@@ -537,12 +583,10 @@ def _run_initialize_db(conn):
         conn.rollback()  # Rollback bei Fehlern
         raise  # Fehler weiterwerfen
     finally:
-        # Die Verbindung wird NICHT hier geschlossen, sondern in create_connection()
         if cursor:
             cursor.close()
 
 
-# --- ÖFFENTLICHE FUNKTION (unverändert) ---
 def initialize_db():
     """
     Öffentlicher Wrapper, der sicherstellt, dass die Initialisierung
@@ -558,11 +602,16 @@ def initialize_db():
         raise ConnectionError("DB-Initialisierung fehlgeschlagen.")
 
 
-# --- ENDE ÄNDERUNG ---
+# ==============================================================================
+# --- KONFIGURATIONS- UND FREQUENZ-FUNKTIONEN (ANGEPASST MIT CACHING) ---
+# ==============================================================================
 
-
-# --- Restliche Hilfsfunktionen (save_config_json etc.) bleiben unverändert ---
 def save_config_json(key, data_dict):
+    """
+    Speichert eine Konfiguration (JSON) in der Datenbank.
+    Nutzt 'config_storage' und leert den Cache.
+    """
+    global _config_cache
     conn = create_connection()
     if conn is None: return False
     try:
@@ -571,6 +620,11 @@ def save_config_json(key, data_dict):
         query = "INSERT INTO config_storage (config_key, config_json) VALUES (%s, %s) ON DUPLICATE KEY UPDATE config_json = VALUES(config_json)"
         cursor.execute(query, (key, data_json))
         conn.commit()
+
+        # Cache leeren
+        if key in _config_cache:
+            del _config_cache[key]
+
         return True
     except mysql.connector.Error as e:
         print(f"DB Error on save_config_json ({key}): {e}")
@@ -581,6 +635,17 @@ def save_config_json(key, data_dict):
 
 
 def load_config_json(key):
+    """
+    Lädt eine Konfiguration (JSON) aus der Datenbank.
+    Nutzt 'config_storage' und Caching.
+    """
+    global _config_cache
+    # 1. Prüfe den Cache
+    if key in _config_cache:
+        print(f"[DEBUG] Lade '{key}' aus dem Cache.")
+        return _config_cache[key]
+
+    # 2. Lade aus DB
     conn = create_connection()
     if conn is None: return None
     try:
@@ -588,7 +653,10 @@ def load_config_json(key):
         cursor.execute("SELECT config_json FROM config_storage WHERE config_key = %s", (key,))
         result = cursor.fetchone()
         if result and result['config_json']:
-            return json.loads(result['config_json'])
+            data = json.loads(result['config_json'])
+            # 3. Speichere im Cache
+            _config_cache[key] = data
+            return data
         return None
     except mysql.connector.Error as e:
         print(f"DB Error on load_config_json ({key}): {e}")
@@ -600,45 +668,19 @@ def load_config_json(key):
         if conn and conn.is_connected(): cursor.close(); conn.close()
 
 
-def get_vacation_days_for_tenure(entry_date_obj, default_days=30):
-    if not entry_date_obj:
-        return default_days
-    if isinstance(entry_date_obj, str):
-        try:
-            entry_date_obj = datetime.strptime(entry_date_obj, '%Y-%m-%d').date()
-        except ValueError:
-            print(f"Warnung: Ungültiges entry_date-Format: {entry_date_obj}. Verwende Standard-Urlaubstage.")
-            return default_days
-    elif isinstance(entry_date_obj, datetime):
-        entry_date_obj = entry_date_obj.date()
-    elif not isinstance(entry_date_obj, date):
-        print(f"Warnung: Ungültiger entry_date-Typ: {type(entry_date_obj)}. Verwende Standard-Urlaubstage.")
-        return default_days
-
-    rules_config = load_config_json(VACATION_RULES_CONFIG_KEY)
-    if not rules_config or not isinstance(rules_config, list):
-        return default_days
-
-    try:
-        rules = sorted(
-            [{"years": int(r["years"]), "days": int(r["days"])} for r in rules_config],
-            key=lambda x: x["years"],
-            reverse=True
-        )
-    except (ValueError, KeyError, TypeError) as e:
-        print(f"Fehler beim Parsen der Urlaubsregeln: {e}. Verwende Standard-Urlaubstage.")
-        return default_days
-
-    today = date.today()
-    tenure_years = today.year - entry_date_obj.year
-    if (today.month, today.day) < (entry_date_obj.month, entry_date_obj.day):
-        tenure_years -= 1
-
-    for rule in rules:
-        if tenure_years >= rule["years"]:
-            return rule["days"]
-
-    return default_days
+def clear_config_cache(config_key=None):
+    """
+    Leert den Konfigurations-Cache.
+    Wenn config_key None ist, wird der gesamte Cache geleert.
+    """
+    global _config_cache
+    if config_key:
+        if config_key in _config_cache:
+            del _config_cache[config_key]
+            print(f"[DEBUG] Cache für '{config_key}' (extern) geleert.")
+    else:
+        _config_cache.clear()
+        print("[DEBUG] Gesamter Konfig-Cache (extern) geleert.")
 
 
 def save_shift_frequency(frequency_dict):
@@ -749,16 +791,9 @@ def get_special_appointments():
         if conn and conn.is_connected(): cursor.close(); conn.close()
 
 
-def _log_activity(cursor, user_id, action_type, details):
-    timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-    cursor.execute("INSERT INTO activity_log (timestamp, user_id, action_type, details) VALUES (%s, %s, %s, %s)",
-                   (timestamp, user_id, action_type, details))
-
-
-def _create_admin_notification(cursor, message):
-    timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-    cursor.execute("INSERT INTO admin_notifications (message, timestamp) VALUES (%s, %s)", (message, timestamp))
-
+# ==============================================================================
+# --- DB-FIX-FUNKTIONEN (unverändert) ---
+# ==============================================================================
 
 def run_db_fix_approve_all_users():
     conn = create_connection()
