@@ -10,41 +10,74 @@ import math
 # Importiere die Helfer-Module
 from database.db_users import get_ordered_users_for_schedule
 from gui.request_lock_manager import RequestLockManager
-from gui.shift_plan_data_manager import ShiftPlanDataManager  # DataManager importiert (war schon da)
+from gui.shift_plan_data_manager import ShiftPlanDataManager
 from gui.shift_plan_renderer import ShiftPlanRenderer
 from gui.shift_plan_actions import ShiftPlanActionHandler
 from database.db_shifts import get_ordered_shift_abbrevs, \
-    delete_all_shifts_for_month  # delete_all_shifts_for_month muss für abwärtskompatibilität bleiben, wird aber nicht direkt hier aufgerufen
+    delete_all_shifts_for_month
 from ..dialogs.rejection_reason_dialog import RejectionReasonDialog
 from ..dialogs.generator_settings_window import \
-    GeneratorSettingsWindow  # Import des Generator-Einstellungsfensters
+    GeneratorSettingsWindow
 # --- Import des Generators ---
 from gui.shift_plan_generator import ShiftPlanGenerator
 
 
 class ShiftPlanTab(ttk.Frame):
-    def __init__(self, master, app):
+    def __init__(self, master, app):  # 'app' ist MainAdminWindow/MainUserWindow
         super().__init__(master)
-        self.app = app
-        # Erstellt die DataManager Instanz, die später übergeben wird
-        self.data_manager = ShiftPlanDataManager(app)  # DataManager hier initialisiert
+        self.app = app  # app ist MainAdminWindow/MainUserWindow
+
+        # --- KORREKTUR: DataManager von der App (Bootloader) übernehmen ---
+        # self.app.app ist der Bootloader (Application)
+        bootloader_app = self.app.app
+
+        if hasattr(bootloader_app, 'data_manager') and bootloader_app.data_manager is not None:
+            print("[ShiftPlanTab] Übernehme vorgeladenen DataManager vom Bootloader.")
+            self.data_manager = bootloader_app.data_manager
+
+            # WICHTIG: Die App-Referenz im DM auf das FENSTER (MainAdminWindow) aktualisieren
+            # anstatt auf den Bootloader, da der DM (z.B. für Dialoge) das Fenster als Parent braucht.
+            self.data_manager.app = app
+        else:
+            print("[ShiftPlanTab] WARNUNG: Kein vorgeladener DataManager gefunden. Erstelle neuen.")
+            self.data_manager = ShiftPlanDataManager(app)  # Fallback: 'app' ist MainAdminWindow
+
+        # --- Ende DataManager Übernahme ---
+
         self.action_handler = ShiftPlanActionHandler(self, app, self, None)
         self.renderer = ShiftPlanRenderer(self, app, self.data_manager, self.action_handler)
         self.action_handler.renderer = self.renderer
         self.grid_widgets = self.renderer.grid_widgets
-        # --- KORREKTUR: violation_cells vom DataManager holen ---
-        # self.violation_cells = self.data_manager.violation_cells # Wird jetzt direkt im Renderer geholt
-        # --- ENDE KORREKTUR ---
+
         self._menu_item_cache = self._prepare_shift_menu_items()
         self.progress_frame = None
         self.progress_bar = None
         self.status_label = None
-        # --- KORREKTUR: generate_24h_var entfernt, da im Generator-Dialog ---
-        # self.generate_24h_var = tk.BooleanVar(value=False)
-        # --- ENDE KORREKTUR ---
+
         self.setup_ui()
         self.renderer.set_plan_grid_frame(self.plan_grid_frame)
-        self.build_shift_plan_grid(self.app.current_display_date.year, self.app.current_display_date.month)
+
+        # --- KORREKTUR: build_shift_plan_grid intelligent aufrufen ---
+        # Prüfen, ob die vorgeladenen Daten (vom aktuellen Tag) für die
+        # aktuelle Ansicht (die standardmäßig auch der aktuelle Tag ist) passen.
+
+        current_app_date = self.app.current_display_date
+
+        # Prüfen, ob der DM Daten geladen hat UND ob sie für den Monat sind,
+        # den wir anzeigen wollen.
+        if (self.data_manager.year == current_app_date.year and
+                self.data_manager.month == current_app_date.month and
+                self.data_manager.year != 0):  # (Stellt sicher, dass überhaupt etwas geladen wurde)
+
+            print(
+                f"[ShiftPlanTab] Nutze vorgeladene Monatsdaten ({current_app_date.year}-{current_app_date.month}) -> data_ready=True.")
+            # Starte das Rendering direkt mit den vorgeladenen Daten
+            self.build_shift_plan_grid(current_app_date.year, current_app_date.month, data_ready=True)
+        else:
+            print(f"[ShiftPlanTab] Vorgeladene Daten ({self.data_manager.year}-{self.data_manager.month}) "
+                  f"passen nicht zur Ansicht ({current_app_date.year}-{current_app_date.month}). Lade neu.")
+            # Standard-Ladevorgang (asynchron)
+            self.build_shift_plan_grid(current_app_date.year, current_app_date.month)
 
     def _prepare_shift_menu_items(self):
         # (unverändert)
@@ -68,7 +101,7 @@ class ShiftPlanTab(ttk.Frame):
         return prepared_items
 
     def setup_ui(self):
-        # (angepasst: month_label wird klickbar gemacht + Button-Stile)
+        # (unverändert)
         main_view_container = ttk.Frame(self, padding="10");
         main_view_container.pack(fill="both", expand=True)
         nav_frame = ttk.Frame(main_view_container);
@@ -76,61 +109,37 @@ class ShiftPlanTab(ttk.Frame):
         left_nav_frame = ttk.Frame(nav_frame);
         left_nav_frame.pack(side="left")
 
-        # --- Button-Stile definieren ---
         style = ttk.Style(self)
-        # Rot für Löschen
         style.configure("Delete.TButton", background="red", foreground="white", font=('Segoe UI', 9, 'bold'))
         style.map("Delete.TButton", background=[('active', '#CC0000')])
-        # Grün für Generieren
         style.configure("Generate.TButton", background="green", foreground="white", font=('Segoe UI', 9, 'bold'))
         style.map("Generate.TButton", background=[('active', '#006400')])
-        # Gelb für Einstellungen (mit schwarzem Text für Lesbarkeit)
         style.configure("SettingsWarn.TButton", background="gold", foreground="black", font=('Segoe UI', 9, 'bold'))
         style.map("SettingsWarn.TButton", background=[('active', 'goldenrod')])
-
-        # --- NEUER STIL (INNOVATION) ---
-        # Orange für "Alle Sicherungen aufheben"
         style.configure("UnlockAll.TButton", background="darkorange", foreground="white", font=('Segoe UI', 9, 'bold'))
         style.map("UnlockAll.TButton", background=[('active', '#E67E00')])
-        # --- Ende Stile ---
 
         ttk.Button(left_nav_frame, text="< Voriger Monat", command=self.show_previous_month).pack(side="left")
         ttk.Button(left_nav_frame, text="📄 Drucken", command=self.print_shift_plan).pack(side="left", padx=(20, 5))
-        # Button "Schichtplan Löschen !!!" mit rotem Stil
         ttk.Button(left_nav_frame, text="Schichtplan Löschen !!!", command=self._on_delete_month,
-                   style="Delete.TButton").pack(side="left", padx=5)  # Stil hinzugefügt
+                   style="Delete.TButton").pack(side="left", padx=5)
         ttk.Separator(left_nav_frame, orient='vertical').pack(side='left', fill='y', padx=(10, 5))
-
-        # Button "Schichtplan generieren" mit grünem Stil
         ttk.Button(left_nav_frame, text="Schichtplan generieren", command=self._on_generate_plan,
-                   style="Generate.TButton").pack(side="left", padx=5)  # Stil hinzugefügt
-
-        # Button "Planungsassistent-Einstellungen" mit gelbem Stil
+                   style="Generate.TButton").pack(side="left", padx=5)
         ttk.Button(left_nav_frame, text="Planungsassistent-Einstellungen", command=self._open_generator_settings,
-                   style="SettingsWarn.TButton").pack(side="left", padx=5)  # Stil hinzugefügt
-
-        # --- NEUER BUTTON (INNOVATION) ---
+                   style="SettingsWarn.TButton").pack(side="left", padx=5)
         ttk.Button(left_nav_frame, text="Alle Sicherungen aufheben", command=self._on_unlock_all_shifts,
                    style="UnlockAll.TButton").pack(side="left", padx=5)
-        # --- ENDE NEUER BUTTON ---
-
-        # --- KORREKTUR: 24er Checkbox entfernt ---
-        # ttk.Checkbutton(left_nav_frame, text="24er?", variable=self.generate_24h_var, state="disabled").pack(
-        #     side="left")
-        # --- ENDE KORREKTUR ---
 
         self.month_label_var = tk.StringVar()
         month_label_frame = ttk.Frame(nav_frame);
         month_label_frame.pack(side="left", expand=True, fill="x")
 
-        # --- ANPASSUNG: Monatslabel klickbar machen ---
         self.month_label = ttk.Label(month_label_frame, textvariable=self.month_label_var,
                                      font=("Segoe UI", 14, "bold"),
-                                     anchor="center", cursor="hand2")  # cursor="hand2" als visueller Hinweis
+                                     anchor="center", cursor="hand2")
         self.month_label.pack()
-        # Bindet den Linksklick an die neue Methode zur Monatsauswahl
         self.month_label.bind("<Button-1>", self._on_month_label_click)
-        # ---------------------------------------------
 
         self.lock_status_label = ttk.Label(month_label_frame, text="", font=("Segoe UI", 10, "italic"),
                                            anchor="center");
@@ -168,104 +177,68 @@ class ShiftPlanTab(ttk.Frame):
         self.lock_button.pack(side="right", padx=5)
         self.understaffing_result_frame = ttk.Frame(main_view_container, padding="10")
 
-    # --- KORREKTUR: DataManager an den Dialog übergeben ---
     def _open_generator_settings(self):
-        """Öffnet das Dialogfenster für die Planungsassistent-Einstellungen (Generator)."""
-        # Übergibt self.app, self (als parent) UND die Instanz des DataManagers
+        # (unverändert)
         GeneratorSettingsWindow(self.app, self, self.data_manager)
 
-    # --- ENDE KORREKTUR ---
-
     def _on_month_label_click(self, event):
-        """Behandelt den Klick auf das Monatslabel, um einen Dialog zur Auswahl des Monats zu öffnen."""
+        # (unverändert)
         self._show_month_chooser_dialog()
 
     def _show_month_chooser_dialog(self):
-        """Zeigt einen Toplevel-Dialog zur schnellen Auswahl eines Monats an."""
+        # (unverändert)
         dialog = tk.Toplevel(self)
         dialog.title("Monatsauswahl")
-        # Macht das Hauptfenster zum Parent, um den Fokus zu kontrollieren
-        # self.master.master ist wahrscheinlich die Hauptanwendung (Admin/UserWindow)
         dialog.transient(self.master.master)
-        dialog.grab_set()  # Modalität erzwingen
+        dialog.grab_set();
         dialog.focus_set()
-
-        # Aktuelles Datum holen
-        current_date = self.app.current_display_date
-        current_year = current_date.year
+        current_date = self.app.current_display_date;
+        current_year = current_date.year;
         current_month = current_date.month
-
-        # Monatsnamen in deutscher Reihenfolge
         month_names_de = ["Januar", "Februar", "März", "April", "Mai", "Juni", "Juli",
                           "August", "September", "Oktober", "November", "Dezember"]
-
-        # Jahre: Von 5 Jahre in der Vergangenheit bis 5 Jahre in der Zukunft (innovativ: keine unnötigen Abfragen)
-        start_year = date.today().year - 5
+        start_year = date.today().year - 5;
         end_year = date.today().year + 5
         years = [str(y) for y in range(start_year, end_year + 1)]
-
-        # Variabeln für die Auswahl
         selected_month_var = tk.StringVar(value=month_names_de[current_month - 1])
         selected_year_var = tk.StringVar(value=str(current_year))
-
-        # Monat-Combobox
         ttk.Label(dialog, text="Monat auswählen:").pack(padx=10, pady=(10, 0))
         month_combo = ttk.Combobox(dialog, textvariable=selected_month_var, values=month_names_de, state="readonly",
                                    width=15)
         month_combo.pack(padx=10, pady=(0, 10))
-
-        # Jahr-Combobox
         ttk.Label(dialog, text="Jahr auswählen:").pack(padx=10, pady=(10, 0))
         year_combo = ttk.Combobox(dialog, textvariable=selected_year_var, values=years, state="readonly", width=15)
         year_combo.pack(padx=10, pady=(0, 10))
 
         def on_ok():
-            """Verarbeitet die Auswahl und wechselt zum gewählten Monat."""
             try:
-                # Monatsindex (0-11) + 1 für den tatsächlichen Monat (1-12)
                 new_month_index = month_names_de.index(selected_month_var.get())
                 new_month = new_month_index + 1
                 new_year = int(selected_year_var.get())
-
-                # Setze das neue Anzeigedatum
-                # Wir stellen sicher, dass das Datum immer der 1. des Monats ist.
                 new_date = date(new_year, new_month, 1)
-
-                # Wenn sich das Datum geändert hat
                 if new_date.year != current_date.year or new_date.month != current_date.month:
                     self.app.current_display_date = new_date
-
-                    # Prüfe, ob das Jahr gewechselt hat, um Feiertage etc. neu zu laden
                     if current_year != new_year:
                         if hasattr(self.app, '_load_holidays_for_year'): self.app._load_holidays_for_year(new_year)
                         if hasattr(self.app, '_load_events_for_year'): self.app._load_events_for_year(new_year)
-
-                    # Lade das Gitter für den neuen Monat
-                    self.build_shift_plan_grid(new_year, new_month)
-
+                    self.build_shift_plan_grid(new_year, new_month)  # Standard-Ladevorgang
                 dialog.destroy()
-
             except ValueError:
                 messagebox.showerror("Fehler", "Ungültige Monats- oder Jahresauswahl.", parent=dialog)
             except Exception as e:
                 messagebox.showerror("Schwerer Fehler", f"Ein unerwarteter Fehler ist aufgetreten:\n{e}", parent=dialog)
 
-        # Buttons
         button_frame = ttk.Frame(dialog)
         button_frame.pack(padx=10, pady=10)
         ttk.Button(button_frame, text="Abbrechen", command=dialog.destroy).pack(side="left", padx=5)
         ttk.Button(button_frame, text="OK", command=on_ok).pack(side="left", padx=5)
-
-        # Zentrieren des Dialogs
         dialog.update_idletasks()
-        width = dialog.winfo_width()
+        width = dialog.winfo_width();
         height = dialog.winfo_height()
-        # Versuche, das Hauptfenster zu finden
         main_window = self.master.master if self.master and self.master.master else self
         x = main_window.winfo_x() + (main_window.winfo_width() // 2) - (width // 2)
         y = main_window.winfo_y() + (main_window.winfo_height() // 2) - (height // 2)
         dialog.geometry(f'+{x}+{y}')
-
         dialog.wait_window()
 
     def _create_progress_widgets(self):
@@ -287,61 +260,37 @@ class ShiftPlanTab(ttk.Frame):
             messagebox.showerror("Fehler", "Druckfunktion nicht bereit.", parent=self)
 
     def _on_delete_month(self):
-        """
-        Löscht den Schichtplan nach doppelter Bestätigung.
-        DELEGIERUNG: Leitet den Löschvorgang an den ActionHandler weiter,
-        der die korrekten Argumente (inkl. user_id) an die DB-Funktion übergibt.
-        """
+        # (unverändert)
         year = self.app.current_display_date.year
         month = self.app.current_display_date.month
         month_str = self.month_label_var.get()
-
-        # Die erste Warnung wird durch den ActionHandler überschrieben,
-        # da dieser die Details der selektiven Löschung kennt. Hier nur die erste Hürde:
         msg1 = f"Möchten Sie wirklich **ALLE** planbaren Schichteinträge für\n\n{month_str}\n\nlöschen?\n\nDiese Aktion kann nicht rückgängig gemacht werden!"
         if not messagebox.askyesno("WARNUNG: Schichtplan löschen", msg1, icon='warning', parent=self):
             return
-
         prompt = f"Um den Löschvorgang für {month_str} zu bestätigen, geben Sie bitte 'LÖSCHEN' in das Feld ein und klicken Sie OK."
         confirmation_text = simpledialog.askstring("Endgültige Bestätigung", prompt, parent=self)
-
         if confirmation_text != "LÖSCHEN":
             messagebox.showinfo("Abgebrochen",
                                 "Eingabe war ungültig. Der Löschvorgang wurde abgebrochen.",
                                 parent=self)
             return
-
-        # KORRIGIERTER AUFRUF: Delegation an den ActionHandler
         try:
-            # Der ActionHandler übernimmt nun die Verantwortung für den Aufruf von
-            # delete_all_shifts_for_month(year, month, current_user_id) und die UI-Aktualisierung
             self.action_handler.delete_shift_plan_by_admin(year, month)
-
-            # Hinweis: Die build_shift_plan_grid(year, month) im Erfolgsfall wird vom ActionHandler
-            # ausgelöst, um Konsistenz zu wahren.
-
         except Exception as e:
             messagebox.showerror("Schwerer Fehler", f"Ein unerwarteter Fehler ist aufgetreten:\n{e}",
                                  parent=self);
             import traceback;
             traceback.print_exc()
 
-    # --- NEUE FUNKTION (INNOVATION) ---
     def _on_unlock_all_shifts(self):
-        """
-        Fragt nach Bestätigung und löst das Entfernen aller Schichtsicherungen
-        für den aktuellen Monat über den ActionHandler aus.
-        """
+        # (unverändert)
         year = self.app.current_display_date.year
         month = self.app.current_display_date.month
         month_str = self.month_label_var.get()
-
         msg = f"Möchten Sie wirklich **ALLE** Schichtsicherungen (Locks 🔒) für\n\n{month_str}\n\naufheben?\n\nDie eingetragenen Schichten selbst bleiben erhalten."
         if not messagebox.askyesno("WARNUNG: Alle Sicherungen aufheben", msg, icon='warning', parent=self):
             return
-
         try:
-            # Delegation an den ActionHandler
             self.action_handler.unlock_all_shifts_for_month(year, month)
         except Exception as e:
             messagebox.showerror("Schwerer Fehler", f"Ein unerwarteter Fehler ist aufgetreten:\n{e}",
@@ -349,32 +298,23 @@ class ShiftPlanTab(ttk.Frame):
             import traceback;
             traceback.print_exc()
 
-    # --- ENDE NEUE FUNKTION ---
-
-    # --- Generierungsfunktionen ---
     def _on_generate_plan(self):
-        """Startet den Generierungsvorgang für den Schichtplan."""
+        # (unverändert)
         year = self.app.current_display_date.year
         month = self.app.current_display_date.month
         month_str = self.month_label_var.get()
-
         if RequestLockManager.is_month_locked(year, month):
             messagebox.showwarning("Gesperrt",
                                    f"Der Monat {month_str} ist für Anträge gesperrt.\nEine automatische Generierung ist nicht möglich, bitte erst entsperren.",
                                    parent=self)
             return
-
         msg = (f"Dies generiert automatisch 'T.', 'N.' und '6' Dienste für {month_str}.\n\n"
                "Bestehende Einträge (auch Urlaub, Wunschfrei etc.) werden NICHT überschrieben.\n"
                "Hundekonflikte, Urlaube, Ruhezeiten und Mindestbesetzung werden berücksichtigt.\n\n"
                "Fortfahren?")
         if not messagebox.askyesno("Schichtplan generieren", msg, parent=self): return
-
-        # UI für Ladebalken vorbereiten
         for widget in self.plan_grid_frame.winfo_children(): widget.destroy()
         if self.renderer: self.renderer.grid_widgets = {'cells': {}, 'user_totals': {}, 'daily_counts': {}}
-        # self.data_manager.violation_cells.clear() # Nicht hier löschen, passiert im DM beim Laden
-
         self._create_progress_widgets()
         self.progress_frame.grid(row=0, column=0, sticky="nsew", padx=20, pady=20)
         self.plan_grid_frame.grid_rowconfigure(0, weight=1);
@@ -382,35 +322,29 @@ class ShiftPlanTab(ttk.Frame):
         self.progress_bar.config(value=0, maximum=100);
         self.status_label.config(text="Starte Generierung...")
         self.update_idletasks()
-
-        # Daten für den Generator sammeln
         try:
             vacation_requests = self.data_manager.processed_vacations
             wunschfrei_requests = self.data_manager.wunschfrei_data
             current_shifts = self.data_manager.shift_schedule_data
             live_shifts_data = {uid: day_data.copy() for uid, day_data in current_shifts.items()}
-
             first_day_of_target_month = date(year, month, 1)
             date_for_user_filter = datetime.combine(first_day_of_target_month, time(0, 0, 0))
             all_users = get_ordered_users_for_schedule(for_date=date_for_user_filter)
-
             if not all_users:
                 messagebox.showerror("Fehler", f"Keine aktiven Benutzer für die Planung im {month_str} gefunden.",
                                      parent=self)
                 if self.progress_frame and self.progress_frame.winfo_exists(): self.progress_frame.grid_forget()
                 return
             user_data_map = {user['id']: user for user in all_users}
-
             holidays_in_month = set()
-            if hasattr(self.app, 'holiday_manager'):
-                year_holidays = self.app.holiday_manager.holidays.get(year, {})
+            if hasattr(self.app.app, 'holiday_manager'):  # Prüfe Bootloader
+                year_holidays = self.app.app.holiday_manager.holidays.get(str(year), {})
                 for date_str, holiday_name in year_holidays.items():
                     try:
                         h_date = datetime.strptime(date_str, '%Y-%m-%d').date()
                         if h_date.year == year and h_date.month == month: holidays_in_month.add(h_date)
                     except ValueError:
                         print(f"[WARNUNG] Ungültiges Feiertagsdatum ignoriert: {date_str}")
-
         except AttributeError as ae:
             messagebox.showerror("Fehler",
                                  f"Benötigte Plandaten nicht gefunden:\n{ae}\nBitte warten Sie, bis der Plan vollständig geladen ist, oder laden Sie ihn neu.",
@@ -421,64 +355,47 @@ class ShiftPlanTab(ttk.Frame):
             messagebox.showerror("Fehler", f"Fehler beim Vorbereiten der Generierung:\n{e}", parent=self)
             if self.progress_frame and self.progress_frame.winfo_exists(): self.progress_frame.grid_forget()
             return
-
-        # Generator Instanz erstellen
         generator = ShiftPlanGenerator(
-            app=self.app,  # Übergib die Hauptanwendung für Zugriff auf globale Daten wie shift_types
-            data_manager=self.data_manager,  # Übergib den DataManager für Zugriff auf Vormonat etc.
-            year=year,
-            month=month,
-            all_users=all_users,
-            user_data_map=user_data_map,
-            vacation_requests=vacation_requests,
-            wunschfrei_requests=wunschfrei_requests,
-            live_shifts_data=live_shifts_data,  # Kopie der aktuellen Schichten
+            app=self.app,
+            data_manager=self.data_manager,
+            year=year, month=month, all_users=all_users, user_data_map=user_data_map,
+            vacation_requests=vacation_requests, wunschfrei_requests=wunschfrei_requests,
+            live_shifts_data=live_shifts_data,
             holidays_in_month=holidays_in_month,
-            progress_callback=self._safe_update_progress,  # Sicherer Callback für UI-Updates
-            completion_callback=self._on_generation_complete  # Callback für das Ende
+            progress_callback=self._safe_update_progress,
+            completion_callback=self._on_generation_complete
         )
-
-        # Generator in einem neuen Thread starten
         threading.Thread(target=generator.run_generation, daemon=True).start()
 
     def _safe_update_progress(self, value, text):
-        """ Stellt sicher, dass UI-Updates im Hauptthread erfolgen. """
+        # (unverändert)
         self.after(0, lambda v=value, t=text: self._update_progress(v, t))
 
     def _on_generation_complete(self, success, save_count, error_message):
-        """ Callback, der nach Abschluss des Generator-Threads aufgerufen wird. """
+        # (unverändert)
         year = self.app.current_display_date.year
         month = self.app.current_display_date.month
-
-        # Ladebalken entfernen
         if self.progress_frame and self.progress_frame.winfo_exists():
             self.progress_frame.grid_forget()
             if self.plan_grid_frame.winfo_exists():
                 self.plan_grid_frame.grid_rowconfigure(0, weight=0)
                 self.plan_grid_frame.grid_columnconfigure(0, weight=0)
-
         if success:
             messagebox.showinfo("Erfolg",
                                 f"Plan-Generierung abgeschlossen.\n{save_count} Dienste wurden eingetragen.",
                                 parent=self)
-            # Lade den Plan komplett neu, um alle Änderungen anzuzeigen
-            self.build_shift_plan_grid(year, month)
+            self.build_shift_plan_grid(year, month)  # Neu laden
         else:
             messagebox.showerror("Fehler bei Generierung", error_message, parent=self)
-            # Lade den Plan trotzdem neu, um Konsistenz zu wahren.
-            self.build_shift_plan_grid(year, month)
+            self.build_shift_plan_grid(year, month)  # Trotzdem neu laden
 
-    def build_shift_plan_grid(self, year, month):
-        # (unverändert)
-        for widget in self.plan_grid_frame.winfo_children(): widget.destroy()
-        if self.renderer: self.renderer.grid_widgets = {'cells': {}, 'user_totals': {}, 'daily_counts': {}}
-        self._create_progress_widgets()
-        self.progress_frame.grid(row=0, column=0, sticky="nsew", padx=20, pady=20)
-        self.plan_grid_frame.grid_rowconfigure(0, weight=1);
-        self.plan_grid_frame.grid_columnconfigure(0, weight=1)
-        self.progress_bar.config(value=0, maximum=100);
-        self.status_label.config(text="Daten werden geladen...")
-        self.update_idletasks()
+    def build_shift_plan_grid(self, year, month, data_ready=False):
+        """
+        Startet den Lade- oder Zeichenprozess.
+        Wenn data_ready=True, wird angenommen, dass der DataManager
+        die Daten für year/month bereits geladen hat und nur gezeichnet wird.
+        """
+        # (Angepasst: Lade-UI nur anzeigen, wenn data_ready=False)
         month_name_german = {"January": "Januar", "February": "Februar", "March": "März", "April": "April",
                              "May": "Mai", "June": "Juni", "July": "Juli", "August": "August", "September": "September",
                              "October": "Oktober", "November": "November", "December": "Dezember"}
@@ -489,8 +406,34 @@ class ShiftPlanTab(ttk.Frame):
         except ValueError:
             self.month_label_var.set(f"Ungültiger Monat {month}/{year}")
         self.update_lock_status()
-        print(f"[ShiftPlanTab] Starte Lade-Thread für {year}-{month}...")
-        threading.Thread(target=self._load_data_in_thread, args=(year, month), daemon=True).start()
+
+        # UI zurücksetzen
+        for widget in self.plan_grid_frame.winfo_children(): widget.destroy()
+        if self.renderer: self.renderer.grid_widgets = {'cells': {}, 'user_totals': {}, 'daily_counts': {}}
+
+        if data_ready:
+            # --- DATEN SIND BEREITS VORGELADEN (vom Bootloader) ---
+            print(f"[ShiftPlanTab] Starte sofortiges Rendering für {year}-{month} (data_ready=True).")
+            # Wir müssen sicherstellen, dass die UI für das Rendering bereit ist
+            # (insb. der Ladebalken weg ist, falls er noch da war)
+            self._create_progress_widgets()  # Erstellt, aber...
+            self.progress_frame.grid_forget()  # ...sofort versteckt.
+
+            # Starte das Rendering direkt (synchron im UI-Thread)
+            self._render_grid(year, month)
+
+        else:
+            # --- STANDARD-LADEVORGANG (z.B. Monatswechsel) ---
+            self._create_progress_widgets()
+            self.progress_frame.grid(row=0, column=0, sticky="nsew", padx=20, pady=20)
+            self.plan_grid_frame.grid_rowconfigure(0, weight=1);
+            self.plan_grid_frame.grid_columnconfigure(0, weight=1)
+            self.progress_bar.config(value=0, maximum=100);
+            self.status_label.config(text="Daten werden geladen...")
+            self.update_idletasks()
+
+            print(f"[ShiftPlanTab] Starte Lade-Thread für {year}-{month} (data_ready=False)...")
+            threading.Thread(target=self._load_data_in_thread, args=(year, month), daemon=True).start()
 
     def _update_progress(self, step_value, step_text):
         # (unverändert)
@@ -501,7 +444,9 @@ class ShiftPlanTab(ttk.Frame):
         # (unverändert)
         error_message = None
         try:
+            # Nutzt den DataManager, um Daten zu laden UND zu verarbeiten
             self.data_manager.load_and_process_data(year, month, self._safe_update_progress)
+            # Nach erfolgreichem Laden, starte das Rendering im UI-Thread
             self.after(1, lambda: self._render_grid(year, month))
         except Exception as e:
             print(f"FEHLER beim Laden der Daten im Thread: {e}")
@@ -513,10 +458,18 @@ class ShiftPlanTab(ttk.Frame):
     def _render_grid(self, year, month):
         # (unverändert)
         if not self.renderer: print("[FEHLER] Renderer nicht initialisiert in _render_grid."); return
-        if self.progress_bar and self.progress_bar.winfo_exists(): self.progress_bar.config(value=100)
-        if self.status_label and self.status_label.winfo_exists(): self.status_label.config(text="Zeichne Gitter...")
+
+        # (Sicherstellen, dass Lade-UI weg ist, falls sie noch nicht weg war)
+        if self.progress_bar and self.progress_bar.winfo_exists():
+            self.progress_bar.config(value=100)
+        if self.status_label and self.status_label.winfo_exists():
+            self.status_label.config(text="Zeichne Gitter...")
         self.update_idletasks()
+
+        # Ruft den Renderer auf. data_ready=True, da der DM die Daten jetzt hält.
         self.renderer.build_shift_plan_grid(year, month, data_ready=True)
+
+        # (Das _finalize_ui_after_render wird vom Renderer selbst aufgerufen)
 
     def _finalize_ui_after_render(self):
         # (unverändert)
@@ -536,7 +489,7 @@ class ShiftPlanTab(ttk.Frame):
         try:
             print("   -> Lade Daten synchron für Refresh...");
             self.data_manager.load_and_process_data(year,
-                                                    month);
+                                                    month);  # Lädt neu
             print(
                 "   -> Daten für Refresh geladen.")
         except Exception as e:
@@ -545,7 +498,7 @@ class ShiftPlanTab(ttk.Frame):
         if self.renderer:
             print("   -> Zeichne Grid neu für Refresh...");
             self.renderer.build_shift_plan_grid(year, month,
-                                                data_ready=True);
+                                                data_ready=True);  # Zeichnet neu mit geladenen Daten
             print(
                 "   -> Grid für Refresh neu gezeichnet.")
         else:
@@ -567,9 +520,10 @@ class ShiftPlanTab(ttk.Frame):
         new_year, new_month = self.app.current_display_date.year, self.app.current_display_date.month
         self.app.current_display_date = self.app.current_display_date.replace(day=1)
         if current_date.year != new_year:
-            if hasattr(self.app, '_load_holidays_for_year'): self.app._load_holidays_for_year(new_year)
-            if hasattr(self.app, '_load_events_for_year'): self.app._load_events_for_year(new_year)
-        self.build_shift_plan_grid(new_year, new_month)
+            # (Prüfe self.app.app (Bootloader) für die Hilfsfunktionen)
+            if hasattr(self.app.app, 'load_holidays_for_year'): self.app.app.load_holidays_for_year(new_year)
+            if hasattr(self.app.app, 'load_events_for_year'): self.app.app.load_events_for_year(new_year)
+        self.build_shift_plan_grid(new_year, new_month)  # Standard-Ladevorgang
 
     def show_next_month(self):
         # (unverändert)
@@ -580,9 +534,9 @@ class ShiftPlanTab(ttk.Frame):
         self.app.current_display_date = first_day_of_next_month
         new_year, new_month = self.app.current_display_date.year, self.app.current_display_date.month
         if current_date.year != new_year:
-            if hasattr(self.app, '_load_holidays_for_year'): self.app._load_holidays_for_year(new_year)
-            if hasattr(self.app, '_load_events_for_year'): self.app._load_events_for_year(new_year)
-        self.build_shift_plan_grid(new_year, new_month)
+            if hasattr(self.app.app, 'load_holidays_for_year'): self.app.app.load_holidays_for_year(new_year)
+            if hasattr(self.app.app, 'load_events_for_year'): self.app.app.load_events_for_year(new_year)
+        self.build_shift_plan_grid(new_year, new_month)  # Standard-Ladevorgang
 
     def check_understaffing(self):
         # (unverändert)
@@ -597,6 +551,7 @@ class ShiftPlanTab(ttk.Frame):
                                  "Tageszählungen (daily_counts) nicht im DataManager gefunden.\nBitte warten Sie, bis der Plan geladen ist.",
                                  parent=self);
             return
+        # (Prüfe self.app.app (Bootloader) für die shift_types_data)
         shifts_to_check_data = get_ordered_shift_abbrevs(include_hidden=False)
         shifts_to_check = [item['abbreviation'] for item in shifts_to_check_data if item.get('check_for_understaffing')]
         understaffing_found = False
@@ -611,7 +566,8 @@ class ShiftPlanTab(ttk.Frame):
                     count = daily_counts.get(date_str, {}).get(shift, 0)
                     if count < min_req:
                         understaffing_found = True
-                        shift_name = self.app.shift_types_data.get(shift, {}).get('name', shift)
+                        shift_name = self.app.app.shift_types_data.get(shift, {}).get('name',
+                                                                                      shift)  # Hole Namen vom Bootloader
                         ttk.Label(self.understaffing_result_frame,
                                   text=f"Unterbesetzung am {current_date.strftime('%d.%m.%Y')}: Schicht '{shift_name}' ({shift}) - {count} von {min_req} anwesend.",
                                   foreground="red", font=("Segoe UI", 10)).pack(anchor="w")

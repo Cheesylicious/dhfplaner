@@ -5,13 +5,11 @@ from collections import defaultdict
 import traceback  # Import für detailliertere Fehlermeldungen
 
 # DB Imports
-# --- INNOVATION: Nur noch 1 DB-Funktion für das Laden benötigt ---
+# --- INNOVATION: Nur noch 1 DB-Funktion für das Laden benötigt (BLEIBT ERHALTEN) ---
 from database.db_shifts import get_all_data_for_plan_display
 # --- ANPASSUNG: Veraltete Importe entfernt ---
-# from database.db_requests import get_wunschfrei_requests_for_month, get_all_vacation_requests_for_month
-# from database.db_users import get_user_by_id, get_ordered_users_for_schedule
-# --- ENDE ANPASSUNG ---
-# from database.db_users import get_user_by_id # Wird nicht mehr benötigt
+# (Wie in Ihrer Originaldatei)
+
 from database.db_core import load_config_json, save_config_json
 from gui.event_manager import EventManager
 from gui.shift_lock_manager import ShiftLockManager
@@ -21,12 +19,20 @@ class ShiftPlanDataManager:
     """
     Verantwortlich für das Laden, Vorverarbeiten und Berechnen aller Daten,
     die für die Anzeige des Dienstplans benötigt werden (Staffing, Stunden, Konflikte).
+    NUTZT INNOVATIVE BATCH-ABFRAGEN (Regel 2).
     """
 
     GENERATOR_CONFIG_KEY = "GENERATOR_SETTINGS_V1"
 
     def __init__(self, app):
         self.app = app
+
+        # --- NEU (Für Pre-Loading) ---
+        # Speichert, welcher Monat aktuell geladen ist
+        self.year = 0
+        self.month = 0
+        # --- ENDE NEU ---
+
         # Caches für die Hauptdaten
         self.shift_schedule_data = {}
         self.processed_vacations = {}
@@ -56,6 +62,31 @@ class ShiftPlanDataManager:
 
         # ShiftLockManager Instanz
         self.shift_lock_manager = ShiftLockManager(app)
+
+    # --- NEU: Zentrale Cache-Löschfunktion (Regel 4) ---
+    def _clear_caches(self):
+        """
+        Setzt alle Caches zurück. Notwendig beim Laden eines neuen Monats,
+        um eine Vermischung von Daten zu verhindern.
+        """
+        print("[DM] Caches werden zurückgesetzt...")
+        self.shift_schedule_data = {}
+        self.processed_vacations = {}
+        self.wunschfrei_data = {}
+        self.daily_counts = {}
+        self.violation_cells.clear()
+        self._prev_month_shifts = {}
+        self.previous_month_shifts = {}
+        self.processed_vacations_prev = {}
+        self.wunschfrei_data_prev = {}
+        self.next_month_shifts = {}
+        self.cached_users_for_month = []
+        self._warned_missing_times.clear()  # Warnungen auch zurücksetzen
+
+        # WICHTIG: Setzt die Locks im Manager zurück (basierend auf Ihrer Logik)
+        self.shift_lock_manager.locked_shifts = {}
+
+    # --- ENDE NEU ---
 
     def get_previous_month_shifts(self):
         """Gibt die geladenen Schichtdaten des Vormonats für den Generator zurück."""
@@ -130,6 +161,16 @@ class ShiftPlanDataManager:
         Führt den konsolidierten DB-Abruf im Worker-Thread durch. Ruft danach die volle Konfliktprüfung auf.
         """
 
+        # --- NEU (Für Pre-Loading) ---
+        # Setzt den Status, welcher Monat geladen wird/ist
+        self.year = year
+        self.month = month
+
+        # Caches leeren, um Daten vom Vormonat (falls vorhanden) zu entfernen
+        self._clear_caches()
+
+        # --- ENDE NEU ---
+
         def update_progress(value, text):
             if progress_callback: progress_callback(value, text)
 
@@ -138,15 +179,12 @@ class ShiftPlanDataManager:
         first_day_current_month = date(year, month, 1)
         current_date_for_archive_check = datetime.combine(first_day_current_month, time(0, 0, 0))
 
-        # 1. EIN EINZIGER DB-AUFRUF
-        # Ruft die neue, optimierte DB-Funktion auf
+        # 1. EIN EINZIGER DB-AUFRUF (Ihre innovative Funktion)
         batch_data = get_all_data_for_plan_display(year, month, current_date_for_archive_check)
 
         if batch_data is None:
             print("[FEHLER] get_all_data_for_plan_display gab None zurück.")
-            # Setze alle Caches auf leere Werte, um Folgefehler zu vermeiden
-            self.shift_schedule_data, self.daily_counts, self.wunschfrei_data, self._prev_month_shifts, self.processed_vacations, self.cached_users_for_month, self.shift_lock_manager.locked_shifts = {}, {}, {}, {}, {}, [], {}
-            self.violation_cells.clear()
+            # Caches bleiben leer (wurden durch _clear_caches() geleert)
             raise Exception("Fehler beim Abrufen der Batch-Daten aus der Datenbank.")
 
         update_progress(60, "Verarbeite Schicht- und Antragsdaten...")
@@ -187,11 +225,19 @@ class ShiftPlanDataManager:
 
         # Lade globale Events
         try:
-            self.app.global_events_data = EventManager.get_events_for_year(year)
+            # Stellt sicher, dass self.app (MainAdmin/UserWindow) 'app' (Bootloader) hat
+            if hasattr(self.app, 'app'):
+                self.app.app.global_events_data = EventManager.get_events_for_year(year)
+            else:
+                # Fallback, falls 'app' der Bootloader selbst ist (während Pre-Loading)
+                self.app.global_events_data = EventManager.get_events_for_year(year)
             print(f"[DM Load] Globale Events für {year} aus Datenbank geladen.")
         except Exception as e:
             print(f"[FEHLER] Fehler beim Laden der globalen Events aus DB: {e}")
-            self.app.global_events_data = {}
+            if hasattr(self.app, 'app'):
+                self.app.app.global_events_data = {}
+            else:
+                self.app.global_events_data = {}
 
         # Tageszählungen (müssen nicht mehr berechnet werden, kommen aus DB)
         print("[DM Load] Tageszählungen (daily_counts) direkt aus Batch übernommen.")
@@ -348,16 +394,29 @@ class ShiftPlanDataManager:
 
         print(f"[DM Counts] Neue Zählung für {date_str}: {self.daily_counts.get(date_str, {})}")
 
+    def _get_app_shift_types(self):
+        """Hilfsfunktion, um shift_types_data sicher vom Bootloader (app.app) oder der App (app) zu holen."""
+        if hasattr(self.app, 'shift_types_data'):
+            return self.app.shift_types_data
+        if hasattr(self.app, 'app') and hasattr(self.app.app, 'shift_types_data'):
+            return self.app.app.shift_types_data
+        print("[WARNUNG] shift_types_data weder in app noch in app.app gefunden.")
+        return {}
+
     def _preprocess_shift_times(self):
         """ Konvertiert Schichtzeiten in Minuten-Intervalle für schnelle Überlappungsprüfung. """
         self._preprocessed_shift_times.clear()
         self._warned_missing_times.clear()
-        if not self.app.shift_types_data:
+
+        shift_types_data = self._get_app_shift_types()  # Nutzt die neue Hilfsfunktion
+
+        if not shift_types_data:
             print("[WARNUNG] shift_types_data ist leer in _preprocess_shift_times.")
             return
+
         print("[DM] Verarbeite Schichtzeiten vor...")
         count = 0
-        for abbrev, data in self.app.shift_types_data.items():
+        for abbrev, data in shift_types_data.items():
             start_time_str = data.get('start_time');
             end_time_str = data.get('end_time')
             if not start_time_str or not end_time_str: continue
@@ -389,43 +448,50 @@ class ShiftPlanDataManager:
             user_id_str = str(req.get('user_id'))
             if not user_id_str: continue
             try:
-                # --- FEHLERBEHEBUNG: Daten aus DB sind date-Objekte, keine Strings ---
                 start_date_obj = req['start_date']
                 end_date_obj = req['end_date']
                 if not isinstance(start_date_obj, date):
                     start_date_obj = datetime.strptime(str(start_date_obj), '%Y-%m-%d').date()
                 if not isinstance(end_date_obj, date):
                     end_date_obj = datetime.strptime(str(end_date_obj), '%Y-%m-%d').date()
-                # --- ENDE FEHLERBEHEBUNG ---
 
                 status = req.get('status', 'Unbekannt')
 
                 current_date = start_date_obj
                 while current_date <= end_date_obj:
+                    # Prüfe nur Daten im relevanten Monat (Performance)
                     if month_start <= current_date <= month_end:
                         processed[user_id_str][current_date] = status;
                     if current_date > month_end:
-                        break
+                        break  # OPTIMIERUNG: Brich ab, wenn das Ende des Monats überschritten ist
                     current_date += timedelta(days=1)
             except (ValueError, TypeError, KeyError) as e:
                 print(f"[WARNUNG] Fehler beim Verarbeiten von Urlaub ID {req.get('id', 'N/A')}: {e}")
 
-        return dict(processed)
+        return dict(processed)  # Konvertiere defaultdict zu dict für saubere Übergabe
 
     def get_min_staffing_for_date(self, current_date):
         """ Ermittelt die Mindestbesetzungsregeln für ein spezifisches Datum. """
-        rules = getattr(self.app, 'staffing_rules', {});
+        # Sicherer Zugriff auf die Regeln im Bootloader (app.app)
+        rules_source = self.app
+        if hasattr(self.app, 'app'):  # Wenn 'app' das MainAdminWindow ist
+            rules_source = self.app.app
+
+        rules = getattr(rules_source, 'staffing_rules', {});
         min_staffing = {}
         min_staffing.update(rules.get('Daily', {}))
         weekday = current_date.weekday()
-        if weekday >= 5:
+        if weekday >= 5:  # Sa/So
             min_staffing.update(rules.get('Sa-So', {}))
-        elif weekday == 4:
+        elif weekday == 4:  # Fr
             min_staffing.update(rules.get('Fr', {}))
-        else:
+        else:  # Mo-Do
             min_staffing.update(rules.get('Mo-Do', {}))
-        if hasattr(self.app, 'is_holiday') and self.app.is_holiday(current_date): min_staffing.update(
-            rules.get('Holiday', {}))
+
+        # Feiertags-Check (nutzt die Funktion im Bootloader)
+        if hasattr(rules_source, 'is_holiday') and rules_source.is_holiday(current_date):
+            min_staffing.update(rules.get('Holiday', {}))
+
         return {k: int(v) for k, v in min_staffing.items() if
                 isinstance(v, (int, str)) and str(v).isdigit() and int(v) >= 0}
 
@@ -439,12 +505,14 @@ class ShiftPlanDataManager:
             return 0.0
 
         days_in_month = calendar.monthrange(year, month)[1]
+        shift_types_data = self._get_app_shift_types()  # Nutzt Hilfsfunktion
 
+        # Überstunden vom Vormonat (N.)
         prev_month_last_day = date(year, month, 1) - timedelta(days=1)
         prev_shift = self._get_shift_helper(user_id_str, prev_month_last_day, year, month)
         if prev_shift == 'N.':
-            shift_info_n = self.app.shift_types_data.get('N.')
-            hours_overlap = 6.0
+            shift_info_n = shift_types_data.get('N.')
+            hours_overlap = 6.0  # Standard-Übertrag
             if shift_info_n and shift_info_n.get('end_time'):
                 try:
                     end_time_n = datetime.strptime(shift_info_n['end_time'], '%H:%M').time();
@@ -453,6 +521,7 @@ class ShiftPlanDataManager:
                     pass
             total_hours += hours_overlap
 
+        # Stunden des aktuellen Monats
         user_shifts_this_month = self.shift_schedule_data.get(user_id_str, {})
         for day in range(1, days_in_month + 1):
             current_date = date(year, month, day);
@@ -464,20 +533,25 @@ class ShiftPlanDataManager:
             actual_shift_for_hours = shift
             if vacation_status == 'Genehmigt':
                 actual_shift_for_hours = 'U'
+            # (Ihre Logik prüft hier nur WF, nicht andere genehmigte Wünsche)
             elif request_info and request_info[1] == 'WF' and request_info[0] in ["Genehmigt", "Akzeptiert"]:
                 actual_shift_for_hours = 'X'
 
-            if actual_shift_for_hours in self.app.shift_types_data:
-                hours = float(self.app.shift_types_data[actual_shift_for_hours].get('hours', 0.0))
+            if actual_shift_for_hours in shift_types_data:
+                hours = float(shift_types_data[actual_shift_for_hours].get('hours', 0.0))
+
+                # Abzug der Überstunden am Monatsende
                 if actual_shift_for_hours == 'N.' and day == days_in_month:
-                    shift_info_n = self.app.shift_types_data.get('N.')
-                    hours = 6.0
-                    if shift_info_n and shift_info_n.get('start_time'):
+                    shift_info_n = shift_types_data.get('N.')
+                    hours_to_deduct = 6.0  # Standard-Abzug
+                    if shift_info_n and shift_info_n.get('end_time'):
                         try:
-                            start_time_n = datetime.strptime(shift_info_n['start_time'], '%H:%M').time();
-                            hours = 24.0 - (start_time_n.hour + start_time_n.minute / 60.0)
+                            end_time_n = datetime.strptime(shift_info_n['end_time'], '%H:%M').time();
+                            hours_to_deduct = end_time_n.hour + end_time_n.minute / 60.0
                         except ValueError:
                             pass
+                    hours -= hours_to_deduct  # Ziehe den Übertrag ins nächste Monat ab
+
                 total_hours += hours
 
         return round(total_hours, 2)
@@ -488,27 +562,33 @@ class ShiftPlanDataManager:
         self.violation_cells.clear();
         days_in_month = calendar.monthrange(year, month)[1]
         current_user_order = self.cached_users_for_month
-        if not current_user_order: print("[WARNUNG] Benutzer-Cache leer in update_violation_set!"); return
+        if not current_user_order:
+            print("[WARNUNG] Benutzer-Cache leer in update_violation_set!");
+            return
 
         # 1. Ruhezeitkonflikte (N -> T/6 und NEUE REGEL: N -> QA/S)
         for user in current_user_order:
             user_id = user.get('id');
             if user_id is None: continue;
             user_id_str = str(user_id)
+
+            # Wir müssen vom letzten Tag des Vormonats starten
             current_check_date = date(year, month, 1) - timedelta(days=1);
+            # Und bis zum Ende des Monats prüfen
             end_check_date = date(year, month, days_in_month)
 
-            end_check_date_for_rules = end_check_date + timedelta(days=2)
-
-            while current_check_date < end_check_date_for_rules:
-
+            while current_check_date <= end_check_date:
                 next_day_date = current_check_date + timedelta(days=1)
+
+                # (Spezialfall für Monatsende: next_day_date könnte im Folgemonat sein)
                 shift1 = self._get_shift_helper(user_id_str, current_check_date, year, month);
                 shift2 = self._get_shift_helper(user_id_str, next_day_date, year, month)
 
+                # (Ihre Logik: N. -> T., 6, QA, S)
                 is_ruhezeit_violation = (shift1 == 'N.' and shift2 in ["T.", "6", "QA", "S"])
 
                 if is_ruhezeit_violation:
+                    # Markiere beide Tage, wenn sie im aktuellen Monat liegen
                     if current_check_date.month == month and current_check_date.year == year:
                         self.violation_cells.add((user_id, current_check_date.day))
                     if next_day_date.month == month and next_day_date.year == year:
@@ -527,14 +607,19 @@ class ShiftPlanDataManager:
                     if user_id is None: continue;
                     user_id_str = str(user_id)
                     shift = self._get_shift_helper(user_id_str, current_date, year, month)
-                    if shift: dog_schedule_today[dog].append({'id': user_id, 'shift': shift})
+                    if shift:
+                        dog_schedule_today[dog].append({'id': user_id, 'shift': shift})
+
+            # Prüfe jeden Hund einzeln
             for dog, assignments in dog_schedule_today.items():
                 if len(assignments) > 1:
+                    # Mehr als ein Mitarbeiter mit DIESEM Hund arbeitet heute
                     for i in range(len(assignments)):
                         for j in range(i + 1, len(assignments)):
                             u1 = assignments[i];
                             u2 = assignments[j]
                             if self._check_time_overlap_optimized(u1['shift'], u2['shift']):
+                                # Ihre Schichten überlappen sich!
                                 self.violation_cells.add((u1['id'], day));
                                 self.violation_cells.add((u2['id'], day))
 
@@ -557,4 +642,5 @@ class ShiftPlanDataManager:
                 self._warned_missing_times.add(shift2_abbrev)
             return False
 
+        # Standard-Überlappungsprüfung
         return (s1 < e2) and (s2 < e1)
