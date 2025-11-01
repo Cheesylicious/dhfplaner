@@ -44,11 +44,7 @@ class ShiftPlanTab(ttk.Frame):
 
         # --- Ende DataManager Übernahme ---
 
-        # --- KORREKTUR: self.data_manager an den ActionHandler übergeben ---
-        # Zuvor stand hier fälschlicherweise 'self' als drittes Argument,
-        # was dem ActionHandler das ShiftPlanTab-Frame statt des DataManagers gab.
         self.action_handler = ShiftPlanActionHandler(self, app, self.data_manager, None)
-        # --- ENDE KORREKTUR ---
 
         self.renderer = ShiftPlanRenderer(self, bootloader_app, self.data_manager, self.action_handler)
         self.action_handler.renderer = self.renderer
@@ -62,25 +58,27 @@ class ShiftPlanTab(ttk.Frame):
         self.setup_ui()
         self.renderer.set_plan_grid_frame(self.plan_grid_frame)
 
-        # --- KORREKTUR: build_shift_plan_grid intelligent aufrufen ---
-        # Prüfen, ob die vorgeladenen Daten (vom aktuellen Tag) für die
-        # aktuelle Ansicht (die standardmäßig auch der aktuelle Tag ist) passen.
-
+        # --- KORRIGIERTE LOGIK: Prüfe den P5-Cache direkt ---
         current_app_date = self.app.current_display_date
+        cache_key = (current_app_date.year, current_app_date.month)
 
-        # Prüfen, ob der DM Daten geladen hat UND ob sie für den Monat sind,
-        # den wir anzeigen wollen.
-        if (self.data_manager.year == current_app_date.year and
-                self.data_manager.month == current_app_date.month and
-                self.data_manager.year != 0):  # (Stellt sicher, dass überhaupt etwas geladen wurde)
-
+        if cache_key in self.data_manager.monthly_caches:
             print(
-                f"[ShiftPlanTab] Nutze vorgeladene Monatsdaten ({current_app_date.year}-{current_app_date.month}) -> data_ready=True.")
-            # Starte das Rendering direkt mit den vorgeladenen Daten
+                f"[ShiftPlanTab] Nutze Daten aus P5-Cache ({current_app_date.year}-{current_app_date.month}) -> data_ready=True."
+            )
+
+            # WICHTIG: Stelle sicher, dass DM.year/month auf den aktuellen Monat zeigt.
+            # Dadurch wird vermieden, dass der Renderer (oder andere Komponenten)
+            # auf den falschen DM.year/month (z.B. 2026-01 vom Preloader) zugreifen.
+            self.data_manager.year = current_app_date.year
+            self.data_manager.month = current_app_date.month
+
+            # Starte das Rendering direkt (synchron)
             self.build_shift_plan_grid(current_app_date.year, current_app_date.month, data_ready=True)
+
         else:
-            print(f"[ShiftPlanTab] Vorgeladene Daten ({self.data_manager.year}-{self.data_manager.month}) "
-                  f"passen nicht zur Ansicht ({current_app_date.year}-{current_app_date.month}). Lade neu.")
+            print(
+                f"[ShiftPlanTab] Daten für ({current_app_date.year}-{current_app_date.month}) nicht im P5-Cache. Lade neu.")
             # Standard-Ladevorgang (asynchron)
             self.build_shift_plan_grid(current_app_date.year, current_app_date.month)
 
@@ -223,9 +221,10 @@ class ShiftPlanTab(ttk.Frame):
                 new_date = date(new_year, new_month, 1)
                 if new_date.year != current_date.year or new_date.month != current_date.month:
                     self.app.current_display_date = new_date
-                    if current_year != new_year:
-                        if hasattr(self.app, '_load_holidays_for_year'): self.app._load_holidays_for_year(new_year)
-                        if hasattr(self.app, '_load_events_for_year'): self.app._load_events_for_year(new_year)
+                    if current_date.year != new_year:
+                        if hasattr(self.app.app, 'load_holidays_for_year'): self.app.app.load_holidays_for_year(
+                            new_year)
+                        if hasattr(self.app.app, 'load_events_for_year'): self.app.app.load_events_for_year(new_year)
 
                     # --- NEU (P4): Preloader beim Monatswechsel per Dialog triggern ---
                     if hasattr(self.app, 'trigger_shift_plan_preload'):
