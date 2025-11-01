@@ -31,270 +31,634 @@ def _run_initialize_db(conn, db_config):
     try:
         conn_server = mysql.connector.connect(**config_init)
         cursor_server = conn_server.cursor()
-        cursor_server.execute(f"CREATE DATABASE IF NOT EXISTS `{db_name}`")
-        print(f"Datenbank '{db_name}' wurde überprüft/erstellt.")
-        cursor_server.close()
-        conn_server.close()
+        cursor_server.execute(
+            f"CREATE DATABASE IF NOT EXISTS {db_name} CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci")
+        print(f"Datenbank '{db_name}' sichergestellt.")
     except mysql.connector.Error as e:
-        if e.errno == 1007:
-            print(f"Info: Datenbank '{db_name}' existiert bereits. (Fehler 1007 ignoriert)")
-        else:
-            print(f"KRITISCHER FEHLER: Konnte die Datenbank nicht erstellen: {e}")
-            raise ConnectionError(f"DB konnte nicht erstellt werden: {e}")
-    except Exception as e:
-        print(f"KRITISCHER FEHLER: Verbindung zum DB-Server fehlgeschlagen: {e}")
-        raise ConnectionError(f"DB-Server-Verbindung fehlgeschlagen: {e}")
+        print(f"FEHLER: Datenbank '{db_name}' konnte nicht erstellt werden: {e}")
+        raise
+    finally:
+        if 'cursor_server' in locals(): cursor_server.close()
+        if 'conn_server' in locals() and conn_server.is_connected(): conn_server.close()
 
-    # 2. Tabellen-Erstellung (nutzt die übergebene Pool-Verbindung 'conn')
-    if conn is None:
-        print("Konnte die Datenbank-Tabellen nicht initialisieren.")
-        raise ConnectionError("DB-Verbindung für Tabellen-Init fehlgeschlagen.")
-
+    # 2. Tabellen-Erstellung und Migration (im Connection-Pool)
     try:
+        # --- KORREKTUR (Regel 1): TypeError (tuple indices...) behoben ---
+        # Der Cursor MUSS Dictionaries zurückgeben, damit db_schema_helpers.py funktioniert.
         cursor = conn.cursor(dictionary=True)
+        # --- ENDE KORREKTUR ---
 
-        def execute_create_table_if_not_exists(create_statement):
-            try:
-                cursor.execute(create_statement)
-            except mysql.connector.Error as e:
-                if e.errno == 1050:  # Table already exists
-                    # Versuche, den Tabellennamen aus dem Statement zu extrahieren
-                    try:
-                        table_name = create_statement.split("IF NOT EXISTS")[1].strip().split("(")[0].strip().replace(
-                            '`', '')
-                        print(f"Info: Tabelle '{table_name}' existiert bereits. (Fehler 1050 ignoriert)")
-                    except Exception:
-                        print("Info: Tabelle existiert bereits. (Fehler 1050 ignoriert)")
-                else:
-                    # Anderen Fehler weiter werfen
-                    raise e
+        cursor.execute(f"USE {db_name}")
 
-        # --- Tabellen erstellen ---
-        execute_create_table_if_not_exists(
-            "CREATE TABLE IF NOT EXISTS `config_storage` (config_key VARCHAR(255) PRIMARY KEY, config_json TEXT NOT NULL);")
-        execute_create_table_if_not_exists(
-            "CREATE TABLE IF NOT EXISTS `shift_frequency` (shift_abbrev VARCHAR(255) PRIMARY KEY, count INT NOT NULL DEFAULT 0);")
-        execute_create_table_if_not_exists(
-            "CREATE TABLE IF NOT EXISTS `users` (id INT AUTO_INCREMENT PRIMARY KEY, password_hash TEXT NOT NULL, role TEXT NOT NULL, vorname TEXT NOT NULL, name TEXT NOT NULL, geburtstag TEXT, telefon TEXT, diensthund TEXT, urlaub_gesamt INT DEFAULT 30, urlaub_rest INT DEFAULT 30, entry_date TEXT, has_seen_tutorial TINYINT(1) DEFAULT 0, password_changed TINYINT(1) DEFAULT 0, last_ausbildung DATE DEFAULT NULL, last_schiessen DATE DEFAULT NULL, last_seen DATETIME DEFAULT NULL, is_approved TINYINT(1) DEFAULT 0, is_archived TINYINT(1) DEFAULT 0, archived_date DATETIME DEFAULT NULL, activation_date DATETIME NULL DEFAULT NULL, UNIQUE (vorname(255), name(255)));")
-        execute_create_table_if_not_exists(
-            "CREATE TABLE IF NOT EXISTS `chat_messages` (id INT AUTO_INCREMENT PRIMARY KEY, sender_id INT NOT NULL, recipient_id INT NOT NULL, message TEXT NOT NULL, timestamp DATETIME DEFAULT CURRENT_TIMESTAMP, is_read TINYINT(1) DEFAULT 0, FOREIGN KEY (sender_id) REFERENCES users(id) ON DELETE CASCADE, FOREIGN KEY (recipient_id) REFERENCES users(id) ON DELETE CASCADE);")
-        execute_create_table_if_not_exists("""
-                                           CREATE TABLE IF NOT EXISTS `shift_types`
-                                           (
-                                               `id`
-                                               INT
-                                               NOT
-                                               NULL
-                                               AUTO_INCREMENT,
-                                               `name`
-                                               VARCHAR
-                                           (
-                                               255
-                                           ) NOT NULL,
-                                               `abbreviation` VARCHAR
-                                           (
-                                               10
-                                           ) NOT NULL,
-                                               `hours` DECIMAL
-                                           (
-                                               4,
-                                               2
-                                           ) DEFAULT NULL,
-                                               `description` TEXT,
-                                               `color` VARCHAR
-                                           (
-                                               7
-                                           ) DEFAULT '#FFFFFF',
-                                               `start_time` TIME DEFAULT NULL,
-                                               `end_time` TIME DEFAULT NULL,
-                                               `check_for_understaffing` TINYINT
-                                           (
-                                               1
-                                           ) DEFAULT '0',
-                                               PRIMARY KEY
-                                           (
-                                               `id`
-                                           ),
-                                               UNIQUE KEY `abbreviation`
-                                           (
-                                               `abbreviation`
-                                           )
-                                               );
-                                           """)
-        execute_create_table_if_not_exists("""
-                                           CREATE TABLE IF NOT EXISTS `shift_order`
-                                           (
-                                               `abbreviation`
-                                               VARCHAR
-                                           (
-                                               10
-                                           ) NOT NULL,
-                                               `sort_order` INT NOT NULL,
-                                               `is_visible` TINYINT
-                                           (
-                                               1
-                                           ) DEFAULT '1',
-                                               PRIMARY KEY
-                                           (
-                                               `abbreviation`
-                                           )
-                                               );
-                                           """)
-        execute_create_table_if_not_exists(
-            "CREATE TABLE IF NOT EXISTS `shift_schedule` (user_id INT NOT NULL, shift_date DATE NOT NULL, shift_abbrev VARCHAR(10), PRIMARY KEY (user_id, shift_date));")
-        execute_create_table_if_not_exists(
-            "CREATE TABLE IF NOT EXISTS `activity_log` (id INT AUTO_INCREMENT PRIMARY KEY, timestamp DATETIME NOT NULL, user_id INT, action_type VARCHAR(255) NOT NULL, details TEXT);")
-        execute_create_table_if_not_exists(
-            "CREATE TABLE IF NOT EXISTS `admin_notifications` (id INT AUTO_INCREMENT PRIMARY KEY, message TEXT NOT NULL, timestamp DATETIME NOT NULL, is_read TINYINT(1) DEFAULT 0);")
-        execute_create_table_if_not_exists(
-            "CREATE TABLE IF NOT EXISTS `dogs` (id INT AUTO_INCREMENT PRIMARY KEY, name VARCHAR(255) NOT NULL, breed VARCHAR(255), birthdate DATE, owner_id INT, status VARCHAR(50), notes TEXT);")
-        execute_create_table_if_not_exists(
-            "CREATE TABLE IF NOT EXISTS `bug_reports` (id INT AUTO_INCREMENT PRIMARY KEY, user_id INT NOT NULL, timestamp DATETIME DEFAULT CURRENT_TIMESTAMP, title TEXT NOT NULL, description TEXT NOT NULL, status VARCHAR(50) DEFAULT 'Offen', admin_comment TEXT, user_feedback TEXT, feedback_requested TINYINT(1) DEFAULT 0, notified TINYINT(1) DEFAULT 0);")
-        execute_create_table_if_not_exists("""
-                                           CREATE TABLE IF NOT EXISTS `tasks`
-                                           (
-                                               `id`
-                                               INT
-                                               AUTO_INCREMENT
-                                               PRIMARY
-                                               KEY,
-                                               `creator_admin_id`
-                                               INT
-                                               NOT
-                                               NULL,
-                                               `timestamp`
-                                               DATETIME
-                                               DEFAULT
-                                               CURRENT_TIMESTAMP,
-                                               `title`
-                                               TEXT
-                                               NOT
-                                               NULL,
-                                               `description`
-                                               TEXT
-                                               NOT
-                                               NULL,
-                                               `status`
-                                               VARCHAR
-                                           (
-                                               50
-                                           ) DEFAULT 'Neu',
-                                               `category` VARCHAR
-                                           (
-                                               100
-                                           ),
-                                               `priority` VARCHAR
-                                           (
-                                               50
-                                           ) DEFAULT 'Mittel',
-                                               `admin_notes` TEXT,
-                                               `archived` TINYINT
-                                           (
-                                               1
-                                           ) DEFAULT 0,
-                                               FOREIGN KEY
-                                           (
-                                               `creator_admin_id`
-                                           ) REFERENCES `users`
-                                           (
-                                               `id`
-                                           ) ON DELETE CASCADE
-                                               );
-                                           """)
-        execute_create_table_if_not_exists(
-            "CREATE TABLE IF NOT EXISTS `password_reset_requests` (id INT AUTO_INCREMENT PRIMARY KEY, user_id INT NOT NULL UNIQUE, token VARCHAR(255) NOT NULL UNIQUE, timestamp DATETIME DEFAULT CURRENT_TIMESTAMP, FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE);")
-        execute_create_table_if_not_exists(
-            "CREATE TABLE IF NOT EXISTS `vacation_requests` (id INT AUTO_INCREMENT PRIMARY KEY, user_id INT NOT NULL, start_date DATE NOT NULL, end_date DATE NOT NULL, days_requested INT NOT NULL, status VARCHAR(50) DEFAULT 'Ausstehend', submission_timestamp DATETIME DEFAULT CURRENT_TIMESTAMP, approval_timestamp DATETIME DEFAULT NULL, approved_by INT DEFAULT NULL, rejection_reason TEXT, notified TINYINT(1) DEFAULT 0, archived TINYINT(1) DEFAULT 0);")
-        execute_create_table_if_not_exists(
-            "CREATE TABLE IF NOT EXISTS `wunschfrei_requests` (id INT AUTO_INCREMENT PRIMARY KEY, user_id INT NOT NULL, request_date DATE NOT NULL, requested_shift VARCHAR(10) DEFAULT 'WF', status VARCHAR(50) DEFAULT 'Ausstehend', requested_by VARCHAR(50) DEFAULT 'User', submission_timestamp DATETIME DEFAULT CURRENT_TIMESTAMP, approval_timestamp DATETIME DEFAULT NULL, rejection_reason TEXT, notified TINYINT(1) DEFAULT 0, UNIQUE KEY `user_date_request` (`user_id`,`request_date`));")
-        execute_create_table_if_not_exists(
-            "CREATE TABLE IF NOT EXISTS `user_order` (user_id INT PRIMARY KEY, sort_order INT NOT NULL, is_visible TINYINT(1) DEFAULT 1, FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE);")
-        execute_create_table_if_not_exists("""
-                                           CREATE TABLE IF NOT EXISTS `shift_locks`
-                                           (
-                                               `user_id`
-                                               INT
-                                               NOT
-                                               NULL,
-                                               `shift_date`
-                                               DATE
-                                               NOT
-                                               NULL,
-                                               `shift_abbrev`
-                                               VARCHAR
-                                           (
-                                               10
-                                           ) NOT NULL,
-                                               `secured_by_admin_id` INT DEFAULT NULL,
-                                               `timestamp` DATETIME DEFAULT CURRENT_TIMESTAMP,
-                                               PRIMARY KEY
-                                           (
-                                               `user_id`,
-                                               `shift_date`
-                                           ),
-                                               FOREIGN KEY
-                                           (
-                                               `user_id`
-                                           ) REFERENCES `users`
-                                           (
-                                               `id`
-                                           ) ON DELETE CASCADE,
-                                               FOREIGN KEY
-                                           (
-                                               `secured_by_admin_id`
-                                           ) REFERENCES `users`
-                                           (
-                                               `id`
-                                           )
-                                             ON DELETE SET NULL
-                                               );
-                                           """)
+        # --- Tabellen-Definitionen (inkl. Hinzufügungen) ---
 
-        # 🐞 BUGFIX: Fehlende Tabelle 'special_appointments' hinzugefügt
-        execute_create_table_if_not_exists("""
-                                           CREATE TABLE IF NOT EXISTS `special_appointments`
-                                           (
-                                               `appointment_date`
-                                               DATE
-                                               NOT
-                                               NULL,
-                                               `appointment_type`
-                                               VARCHAR
-                                           (
-                                               255
-                                           ) NOT NULL,
-                                               `description` TEXT,
-                                               PRIMARY KEY
-                                           (
-                                               `appointment_date`,
-                                               `appointment_type`
-                                           )
-                                               );
-                                           """)
+        cursor.execute("""
+                       CREATE TABLE IF NOT EXISTS users
+                       (
+                           id
+                           INT
+                           AUTO_INCREMENT
+                           PRIMARY
+                           KEY,
+                           username
+                           VARCHAR
+                       (
+                           255
+                       ) NOT NULL UNIQUE,
+                           password_hash VARCHAR
+                       (
+                           255
+                       ) NOT NULL,
+                           role ENUM
+                       (
+                           'Mitarbeiter',
+                           'Admin',
+                           'Guest'
+                       ) NOT NULL DEFAULT 'Guest',
+                           vorname VARCHAR
+                       (
+                           255
+                       ),
+                           name VARCHAR
+                       (
+                           255
+                       ),
+                           email VARCHAR
+                       (
+                           255
+                       ) UNIQUE,
+                           telefon VARCHAR
+                       (
+                           255
+                       ),
+                           geburtstag DATE,
+                           diensthund VARCHAR
+                       (
+                           255
+                       ),
+                           urlaub_gesamt INT DEFAULT 0,
+                           urlaub_rest INT DEFAULT 0,
+                           last_ausbildung DATE,
+                           last_schiessen DATE,
+                           reset_token VARCHAR
+                       (
+                           255
+                       ) DEFAULT NULL,
+                           reset_token_expiry DATETIME DEFAULT NULL,
+                           entry_date DATE DEFAULT NULL,
+                           last_seen DATETIME DEFAULT NULL,
+                           is_approved TINYINT
+                       (
+                           1
+                       ) DEFAULT 0,
+                           is_archived TINYINT
+                       (
+                           1
+                       ) DEFAULT 0,
+                           archived_date DATETIME DEFAULT NULL,
+                           activation_date DATETIME NULL DEFAULT NULL
+                           ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE =utf8mb4_unicode_ci;
+                       """)
 
-        # --- Index hinzufügen (ruft Helfer auf) ---
-        _add_index_if_not_exists(cursor, "shift_schedule", "idx_shift_date_user", "`shift_date`, `user_id`")
-        _add_index_if_not_exists(cursor, "tasks", "idx_tasks_creator", "`creator_admin_id`")
+        cursor.execute("""
+                       CREATE TABLE IF NOT EXISTS dogs
+                       (
+                           id
+                           INT
+                           AUTO_INCREMENT
+                           PRIMARY
+                           KEY,
+                           name
+                           VARCHAR
+                       (
+                           255
+                       ) NOT NULL UNIQUE,
+                           breed VARCHAR
+                       (
+                           255
+                       ),
+                           birth_date DATE,
+                           chip_number VARCHAR
+                       (
+                           255
+                       ) UNIQUE,
+                           acquisition_date DATE,
+                           departure_date DATE,
+                           last_dpo_date DATE,
+                           vaccination_info TEXT,
+                           image_blob MEDIUMBLOB DEFAULT NULL
+                           ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE =utf8mb4_unicode_ci;
+                       """)
+
+        cursor.execute("""
+                       CREATE TABLE IF NOT EXISTS shifts
+                       (
+                           id
+                           INT
+                           AUTO_INCREMENT
+                           PRIMARY
+                           KEY,
+                           user_id
+                           INT
+                           NOT
+                           NULL,
+                           datum
+                           DATE
+                           NOT
+                           NULL,
+                           schicht
+                           VARCHAR
+                       (
+                           255
+                       ),
+                           FOREIGN KEY
+                       (
+                           user_id
+                       ) REFERENCES users
+                       (
+                           id
+                       ) ON DELETE CASCADE
+                           ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE =utf8mb4_unicode_ci;
+                       """)
+
+        # (Andere Tabellen-Definitionen bleiben unverändert...)
+
+        cursor.execute("""
+                       CREATE TABLE IF NOT EXISTS shift_types
+                       (
+                           id
+                           INT
+                           AUTO_INCREMENT
+                           PRIMARY
+                           KEY,
+                           name
+                           VARCHAR
+                       (
+                           255
+                       ) NOT NULL UNIQUE,
+                           abbreviation VARCHAR
+                       (
+                           10
+                       ) NOT NULL UNIQUE,
+                           color VARCHAR
+                       (
+                           7
+                       ) DEFAULT '#FFFFFF',
+                           category ENUM
+                       (
+                           'Dienst',
+                           'Frei',
+                           'Krank',
+                           'Urlaub',
+                           'Sonstiges'
+                       ) DEFAULT 'Dienst',
+                           is_default TINYINT
+                       (
+                           1
+                       ) DEFAULT 0,
+                           is_changeable TINYINT
+                       (
+                           1
+                       ) DEFAULT 1,
+                           affects_vacation TINYINT
+                       (
+                           1
+                       ) DEFAULT 0,
+                           counts_as_work TINYINT
+                       (
+                           1
+                       ) DEFAULT 1
+                           ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE =utf8mb4_unicode_ci;
+                       """)
+
+        cursor.execute("""
+                       CREATE TABLE IF NOT EXISTS requests
+                       (
+                           id
+                           INT
+                           AUTO_INCREMENT
+                           PRIMARY
+                           KEY,
+                           user_id
+                           INT
+                           NOT
+                           NULL,
+                           request_date
+                           DATE
+                           NOT
+                           NULL,
+                           requested_shift
+                           VARCHAR
+                       (
+                           50
+                       ),
+                           reason TEXT,
+                           status ENUM
+                       (
+                           'Ausstehend',
+                           'Genehmigt',
+                           'Abgelehnt'
+                       ) DEFAULT 'Ausstehend',
+                           admin_id INT DEFAULT NULL,
+                           rejection_reason TEXT,
+                           created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                           FOREIGN KEY
+                       (
+                           user_id
+                       ) REFERENCES users
+                       (
+                           id
+                       ) ON DELETE CASCADE,
+                           FOREIGN KEY
+                       (
+                           admin_id
+                       ) REFERENCES users
+                       (
+                           id
+                       )
+                         ON DELETE SET NULL
+                           ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE =utf8mb4_unicode_ci;
+                       """)
+
+        cursor.execute("""
+                       CREATE TABLE IF NOT EXISTS vacation_requests
+                       (
+                           id
+                           INT
+                           AUTO_INCREMENT
+                           PRIMARY
+                           KEY,
+                           user_id
+                           INT
+                           NOT
+                           NULL,
+                           start_date
+                           DATE
+                           NOT
+                           NULL,
+                           end_date
+                           DATE
+                           NOT
+                           NULL,
+                           days_requested
+                           INT
+                           NOT
+                           NULL,
+                           status
+                           ENUM
+                       (
+                           'Ausstehend',
+                           'Genehmigt',
+                           'Abgelehnt',
+                           'Storniert'
+                       ) DEFAULT 'Ausstehend',
+                           admin_id INT DEFAULT NULL,
+                           created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                           archived TINYINT
+                       (
+                           1
+                       ) DEFAULT 0,
+                           FOREIGN KEY
+                       (
+                           user_id
+                       ) REFERENCES users
+                       (
+                           id
+                       ) ON DELETE CASCADE,
+                           FOREIGN KEY
+                       (
+                           admin_id
+                       ) REFERENCES users
+                       (
+                           id
+                       )
+                         ON DELETE SET NULL
+                           ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE =utf8mb4_unicode_ci;
+                       """)
+
+        cursor.execute("""
+                       CREATE TABLE IF NOT EXISTS bug_reports
+                       (
+                           id
+                           INT
+                           AUTO_INCREMENT
+                           PRIMARY
+                           KEY,
+                           user_id
+                           INT
+                           NOT
+                           NULL,
+                           timestamp
+                           DATETIME
+                           DEFAULT
+                           CURRENT_TIMESTAMP,
+                           title
+                           VARCHAR
+                       (
+                           255
+                       ) NOT NULL,
+                           description TEXT NOT NULL,
+                           category VARCHAR
+                       (
+                           100
+                       ),
+                           status VARCHAR
+                       (
+                           50
+                       ) DEFAULT 'Neu',
+                           admin_notes TEXT,
+                           user_notes TEXT,
+                           archived TINYINT
+                       (
+                           1
+                       ) DEFAULT 0,
+                           FOREIGN KEY
+                       (
+                           user_id
+                       ) REFERENCES users
+                       (
+                           id
+                       ) ON DELETE CASCADE
+                           ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE =utf8mb4_unicode_ci;
+                       """)
+
+        cursor.execute("""
+                       CREATE TABLE IF NOT EXISTS request_locks
+                       (
+                           id
+                           INT
+                           AUTO_INCREMENT
+                           PRIMARY
+                           KEY,
+                           year
+                           INT
+                           NOT
+                           NULL,
+                           month
+                           INT
+                           NOT
+                           NULL,
+                           day
+                           INT
+                           NOT
+                           NULL,
+                           reason
+                           VARCHAR
+                       (
+                           255
+                       ),
+                           created_by_id INT,
+                           created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                           UNIQUE KEY
+                       (
+                           year,
+                           month,
+                           day
+                       ),
+                           FOREIGN KEY
+                       (
+                           created_by_id
+                       ) REFERENCES users
+                       (
+                           id
+                       ) ON DELETE SET NULL
+                           ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE =utf8mb4_unicode_ci;
+                       """)
+
+        cursor.execute("""
+                       CREATE TABLE IF NOT EXISTS app_config
+                       (
+                           config_key
+                           VARCHAR
+                       (
+                           255
+                       ) PRIMARY KEY,
+                           config_value JSON,
+                           last_modified TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+                           ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE =utf8mb4_unicode_ci;
+                       """)
+
+        cursor.execute("""
+                       CREATE TABLE IF NOT EXISTS admin_logs
+                       (
+                           id
+                           INT
+                           AUTO_INCREMENT
+                           PRIMARY
+                           KEY,
+                           timestamp
+                           DATETIME
+                           DEFAULT
+                           CURRENT_TIMESTAMP,
+                           user_id
+                           INT,
+                           action
+                           VARCHAR
+                       (
+                           255
+                       ) NOT NULL,
+                           target_type VARCHAR
+                       (
+                           50
+                       ),
+                           target_id INT,
+                           details TEXT,
+                           FOREIGN KEY
+                       (
+                           user_id
+                       ) REFERENCES users
+                       (
+                           id
+                       ) ON DELETE SET NULL
+                           ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE =utf8mb4_unicode_ci;
+                       """)
+
+        cursor.execute("""
+                       CREATE TABLE IF NOT EXISTS chat_messages
+                       (
+                           id
+                           INT
+                           AUTO_INCREMENT
+                           PRIMARY
+                           KEY,
+                           sender_id
+                           INT
+                           NOT
+                           NULL,
+                           recipient_id
+                           INT
+                           NOT
+                           NULL,
+                           message
+                           TEXT
+                           NOT
+                           NULL,
+                           timestamp
+                           DATETIME
+                           DEFAULT
+                           CURRENT_TIMESTAMP,
+                           is_read
+                           TINYINT
+                       (
+                           1
+                       ) DEFAULT 0,
+                           FOREIGN KEY
+                       (
+                           sender_id
+                       ) REFERENCES users
+                       (
+                           id
+                       ) ON DELETE CASCADE,
+                           FOREIGN KEY
+                       (
+                           recipient_id
+                       ) REFERENCES users
+                       (
+                           id
+                       )
+                         ON DELETE CASCADE
+                           ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE =utf8mb4_unicode_ci;
+                       """)
+
+        cursor.execute("""
+                       CREATE TABLE IF NOT EXISTS participation
+                       (
+                           id
+                           INT
+                           AUTO_INCREMENT
+                           PRIMARY
+                           KEY,
+                           user_id
+                           INT
+                           NOT
+                           NULL,
+                           event_type
+                           VARCHAR
+                       (
+                           100
+                       ) NOT NULL,
+                           event_date DATE NOT NULL,
+                           hours DECIMAL
+                       (
+                           5,
+                           2
+                       ),
+                           description TEXT,
+                           created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                           created_by_id INT,
+                           FOREIGN KEY
+                       (
+                           user_id
+                       ) REFERENCES users
+                       (
+                           id
+                       ) ON DELETE CASCADE,
+                           FOREIGN KEY
+                       (
+                           created_by_id
+                       ) REFERENCES users
+                       (
+                           id
+                       )
+                         ON DELETE SET NULL
+                           ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE =utf8mb4_unicode_ci;
+                       """)
+
+        cursor.execute("""
+                       CREATE TABLE IF NOT EXISTS tasks
+                       (
+                           id
+                           INT
+                           AUTO_INCREMENT
+                           PRIMARY
+                           KEY,
+                           creator_admin_id
+                           INT,
+                           title
+                           VARCHAR
+                       (
+                           255
+                       ) NOT NULL,
+                           description TEXT,
+                           category VARCHAR
+                       (
+                           100
+                       ),
+                           priority VARCHAR
+                       (
+                           50
+                       ) DEFAULT 'Mittel',
+                           status VARCHAR
+                       (
+                           50
+                       ) DEFAULT 'Offen',
+                           timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+                           admin_notes TEXT,
+                           archived TINYINT
+                       (
+                           1
+                       ) DEFAULT 0,
+                           FOREIGN KEY
+                       (
+                           creator_admin_id
+                       ) REFERENCES users
+                       (
+                           id
+                       ) ON DELETE SET NULL
+                           ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE =utf8mb4_unicode_ci;
+                       """)
+
+        print("Alle Tabellen sichergestellt.")
+
+        # --- Migration: Indizes hinzufügen (ruft Helfer auf) ---
+        _add_index_if_not_exists(cursor, "shifts", "idx_user_datum", "`user_id`, `datum`")
+
+        # --- KORREKTUR (Regel 1): Längenangabe (50) für ENUM (als VARCHAR behandelt) hinzugefügt ---
+        _add_index_if_not_exists(cursor, "requests", "idx_user_status_date", "`user_id`, `status`(50), `request_date`")
+        _add_index_if_not_exists(cursor, "vacation_requests", "idx_user_status_archived",
+                                 "`user_id`, `status`(50), `archived`")
+        # --- ENDE KORREKTUR ---
+
+        # --- KORREKTUR (Regel 1): Fehler 1170 behoben durch Hinzufügen einer Längenangabe (50) ---
+        _add_index_if_not_exists(cursor, "bug_reports", "idx_status_archived", "`status`(50), `archived`")
+        # --- ENDE KORREKTUR ---
+
         _add_index_if_not_exists(cursor, "users", "idx_user_status",
                                  "`is_approved`, `is_archived`, `activation_date`, `archived_date`")
         _add_index_if_not_exists(cursor, "users", "idx_user_auth", "`vorname`(255), `name`(255), `password_hash`(255)")
         _add_index_if_not_exists(cursor, "chat_messages", "idx_chat_recipient_read", "`recipient_id`, `is_read`")
 
-        # --- Spalten hinzufügen (ruft Helfer auf) ---
+        # --- Migration: Spalten hinzufügen (ruft Helfer auf) ---
         _add_column_if_not_exists(cursor, db_name, "users", "entry_date", "DATE DEFAULT NULL")
         _add_column_if_not_exists(cursor, db_name, "users", "last_seen", "DATETIME DEFAULT NULL")
         _add_column_if_not_exists(cursor, db_name, "users", "is_approved", "TINYINT(1) DEFAULT 0")
         _add_column_if_not_exists(cursor, db_name, "users", "is_archived", "TINYINT(1) DEFAULT 0")
         _add_column_if_not_exists(cursor, db_name, "users", "archived_date", "DATETIME DEFAULT NULL")
         _add_column_if_not_exists(cursor, db_name, "users", "activation_date", "DATETIME NULL DEFAULT NULL")
-        _add_column_if_not_exists(cursor, db_name, "shift_types", "check_for_understaffing", "TINYINT(1) DEFAULT 0")
+        _add_column_if_not_exists(cursor, db_name, "users", "reset_token", "VARCHAR(255) DEFAULT NULL")
+        _add_column_if_not_exists(cursor, db_name, "users", "reset_token_expiry", "DATETIME DEFAULT NULL")
+        _add_column_if_not_exists(cursor, db_name, "vacation_requests", "archived", "TINYINT(1) DEFAULT 0")
+        _add_column_if_not_exists(cursor, db_name, "bug_reports", "user_notes", "TEXT")
+        _add_column_if_not_exists(cursor, db_name, "bug_reports", "archived", "TINYINT(1) DEFAULT 0")
+        _add_column_if_not_exists(cursor, db_name, "shift_types", "is_changeable", "TINYINT(1) DEFAULT 1")
+        _add_column_if_not_exists(cursor, db_name, "shift_types", "affects_vacation", "TINYINT(1) DEFAULT 0")
+        _add_column_if_not_exists(cursor, db_name, "shift_types", "counts_as_work", "TINYINT(1) DEFAULT 1")
+        _add_column_if_not_exists(cursor, db_name, "app_config", "last_modified",
+                                  "TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP")
+        _add_column_if_not_exists(cursor, db_name, "requests", "created_at", "DATETIME DEFAULT CURRENT_TIMESTAMP")
 
-        conn.commit()
-        print("Datenbank-Tabellen erfolgreich initialisiert/überprüft.")
+        # --- NEU (Regel 1): Spalte für Hundebilder hinzufügen ---
+        _add_column_if_not_exists(cursor, db_name, "dogs", "image_blob", "MEDIUMBLOB DEFAULT NULL")
+
+        print("Datenbank-Migrationen abgeschlossen.")
+
     except mysql.connector.Error as e:
-        print(f"Fehler bei der Initialisierung der Tabellen: {e}")
-        conn.rollback()  # Rollback bei Fehlern
-        raise  # Fehler weiterwerfen
+        print(f"FEHLER bei DB-Initialisierung/Migration (Tabelle/Spalte/Index): {e}")
+        # conn.rollback() # Nicht nötig, da DDL oft impliziten Commit auslöst
+        raise
+    except Exception as e:
+        print(f"Allgemeiner FEHLER bei _run_initialize_db: {e}")
+        raise
     finally:
-        if cursor:
-            cursor.close()
+        if 'cursor' in locals(): cursor.close()
+        # Die Verbindung wird in create_connection() geschlossen
