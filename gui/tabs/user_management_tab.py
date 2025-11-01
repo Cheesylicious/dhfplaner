@@ -16,10 +16,17 @@ USER_MGMT_VISIBLE_COLUMNS_KEY = "USER_MGMT_VISIBLE_COLUMNS"
 
 
 class UserManagementTab(ttk.Frame):
-    def __init__(self, master, admin_window):
+    def __init__(self, master, admin_window, initial_data_cache=None):
+        """
+        Konstruktor für den UserManagementTab.
+        Akzeptiert optional vorgeladene Daten, um DB-Wartezeiten zu vermeiden (Regel 2).
+        """
         super().__init__(master)
         self.admin_window = admin_window
         self.current_user = admin_window.user_data
+
+        # Speichert die Rohdaten (entweder aus Cache or DB)
+        self.all_users_data = []
 
         self.all_columns = {
             "id": ("ID", 0),
@@ -53,13 +60,26 @@ class UserManagementTab(ttk.Frame):
         self._sort_desc = False
 
         self._create_widgets()
-        self.load_users()
+
+        # --- INNOVATION (Regel 1 & 2) ---
+        # Daten entweder aus dem Cache laden oder (als Fallback) aus der DB holen.
+        if initial_data_cache is not None:
+            print("[UserMgmtTab] Lade Daten aus initialem Cache.")
+            self.all_users_data = initial_data_cache
+            self._load_users_from_cache()  # Daten sortieren und anzeigen
+        else:
+            print("[UserMgmtTab] Initialer Cache leer. Lade aus DB (Fallback).")
+            self.refresh_data()  # Daten aus DB holen und anzeigen
+        # --- ENDE INNOVATION ---
 
     def _create_widgets(self):
         top_frame = ttk.Frame(self)
         top_frame.pack(fill="x", pady=10, padx=10)
 
-        ttk.Button(top_frame, text="🔄 Aktualisieren", command=self.load_users).pack(side="left", padx=5)
+        # --- KORREKTUR: Ruft refresh_data() statt load_users() auf ---
+        ttk.Button(top_frame, text="🔄 Aktualisieren", command=self.refresh_data).pack(side="left", padx=5)
+        # --- ENDE KORREKTUR ---
+
         ttk.Button(top_frame, text="➕ Mitarbeiter hinzufügen", command=self.add_user).pack(side="left", padx=5)
         ttk.Button(top_frame, text="📊 Spalten auswählen", command=self.open_column_chooser).pack(side="left", padx=5)
         # --- KORREKTUR: Button-Text angepasst ---
@@ -116,89 +136,110 @@ class UserManagementTab(ttk.Frame):
         self.tree.tag_configure('pending', foreground='#E67E22')  # Orange für Nicht-Freigegebene
         # --- ENDE NEU ---
 
-    def load_users(self):
+    def _load_users_from_cache(self):
+        """
+        (NEUE METHODE) Füllt die Treeview mit den Daten aus self.all_users_data.
+        Diese Methode greift nicht auf die Datenbank zu. (Regel 2)
+        """
         for i in self.tree.get_children():
             try:
                 self.tree.delete(i)
             except tk.TclError:
                 pass
 
-        try:
-            self.all_users_data = get_all_users_with_details()
-            if not self.all_users_data: return
+        if not self.all_users_data:
+            return
 
-            def sort_key(user_item):
-                value = user_item.get(self._sort_by)
-                if value is None or value == "":
-                    is_date_col = self._sort_by in ['entry_date', 'last_ausbildung', 'last_schiessen', 'archived_date',
-                                                    'geburtstag', 'last_seen']
-                    if self._sort_desc:
-                        return date.min if is_date_col else ""
-                    else:
-                        return date.max if is_date_col else "~~~~"
-                if isinstance(value, str): return value.lower()
-                if self._sort_by in ['entry_date', 'last_ausbildung', 'last_schiessen', 'archived_date', 'geburtstag']:
-                    try:
-                        if isinstance(value, datetime): return value.date()
-                        if isinstance(value, date): return value
-                        return datetime.strptime(str(value), '%Y-%m-%d').date()
-                    except:
-                        return date.min
-                if self._sort_by == 'last_seen':
-                    try:
-                        if isinstance(value, datetime): return value
-                        if isinstance(value, date): return datetime.combine(value, datetime.min.time())
-                        return datetime.strptime(str(value), '%Y-%m-%d %H:%M:%S')
-                    except:
-                        return datetime.min
+        def sort_key(user_item):
+            value = user_item.get(self._sort_by)
+            if value is None or value == "":
+                is_date_col = self._sort_by in ['entry_date', 'last_ausbildung', 'last_schiessen', 'archived_date',
+                                                'geburtstag', 'last_seen']
+                if self._sort_desc:
+                    return date.min if is_date_col else ""
+                else:
+                    return date.max if is_date_col else "~~~~"
+            if isinstance(value, str): return value.lower()
+            if self._sort_by in ['entry_date', 'last_ausbildung', 'last_schiessen', 'archived_date', 'geburtstag']:
                 try:
-                    if isinstance(value, (int, float)): return value
-                    return float(value)
+                    if isinstance(value, datetime): return value.date()
+                    if isinstance(value, date): return value
+                    return datetime.strptime(str(value), '%Y-%m-%d').date()
                 except:
-                    return float('-inf')
-
-            sorted_users = sorted(self.all_users_data, key=sort_key, reverse=self._sort_desc)
-            current_tree_columns = list(self.tree['columns'])
-            if not current_tree_columns: current_tree_columns = list(self.all_columns.keys())
-
-            for user in sorted_users:
-                values_to_insert = []
-                for col_key in current_tree_columns:
-                    value = user.get(col_key, "")
-                    if value is None: value = ""
-                    if col_key in ["is_approved", "is_archived"]:
-                        value = "Ja" if value == 1 else "Nein"
-                    elif col_key in ['entry_date', 'last_ausbildung', 'last_schiessen', 'geburtstag']:
-                        if isinstance(value, datetime):
-                            value = value.strftime('%Y-%m-%d')
-                        elif isinstance(value, date):
-                            value = value.strftime('%Y-%m-%d')
-                    elif col_key == 'last_seen':
-                        if isinstance(value, datetime): value = value.strftime('%Y-%m-%d %H:%M')
-                    elif col_key == 'archived_date':
-                        # --- KORREKTUR: Auch hier nur Datum anzeigen, wenn Datum gesetzt ---
-                        if isinstance(value, datetime):
-                            value = value.strftime('%Y-%m-%d')  # Nur Datum
-                        elif isinstance(value, date):
-                            value = value.strftime('%Y-%m-%d')
-                        else:
-                            value = ""  # Ansonsten leer
-                        # --- ENDE KORREKTUR ---
-                    values_to_insert.append(value)
-
-                # --- NEU: Tags für Hervorhebung bestimmen ---
-                user_tags = []
-                if user.get('is_archived') == 1:
-                    user_tags.append('archived')
-                elif user.get('is_approved') == 0:
-                    user_tags.append('pending')
-                # --- ENDE NEU ---
-
+                    return date.min
+            if self._sort_by == 'last_seen':
                 try:
-                    # --- MODIFIZIERT: tags=tuple(user_tags) hinzugefügt ---
-                    self.tree.insert("", "end", iid=user['id'], values=tuple(values_to_insert), tags=tuple(user_tags))
-                except tk.TclError as e:
-                    print(f"TclError User {user['id']}: {e}. Skip.")
+                    if isinstance(value, datetime): return value
+                    if isinstance(value, date): return datetime.combine(value, datetime.min.time())
+                    return datetime.strptime(str(value), '%Y-%m-%d %H:%M:%S')
+                except:
+                    return datetime.min
+            try:
+                if isinstance(value, (int, float)): return value
+                return float(value)
+            except:
+                return float('-inf')
+
+        sorted_users = sorted(self.all_users_data, key=sort_key, reverse=self._sort_desc)
+        current_tree_columns = list(self.tree['columns'])
+        if not current_tree_columns: current_tree_columns = list(self.all_columns.keys())
+
+        for user in sorted_users:
+            values_to_insert = []
+            for col_key in current_tree_columns:
+                value = user.get(col_key, "")
+                if value is None: value = ""
+                if col_key in ["is_approved", "is_archived"]:
+                    value = "Ja" if value == 1 else "Nein"
+                elif col_key in ['entry_date', 'last_ausbildung', 'last_schiessen', 'geburtstag']:
+                    if isinstance(value, datetime):
+                        value = value.strftime('%Y-%m-%d')
+                    elif isinstance(value, date):
+                        value = value.strftime('%Y-%m-%d')
+                elif col_key == 'last_seen':
+                    if isinstance(value, datetime): value = value.strftime('%Y-%m-%d %H:%M')
+                elif col_key == 'archived_date':
+                    # --- KORREKTUR: Auch hier nur Datum anzeigen, wenn Datum gesetzt ---
+                    if isinstance(value, datetime):
+                        value = value.strftime('%Y-%m-%d')  # Nur Datum
+                    elif isinstance(value, date):
+                        value = value.strftime('%Y-%m-%d')
+                    else:
+                        value = ""  # Ansonsten leer
+                    # --- ENDE KORREKTUR ---
+                values_to_insert.append(value)
+
+            # --- NEU: Tags für Hervorhebung bestimmen ---
+            user_tags = []
+            if user.get('is_archived') == 1:
+                user_tags.append('archived')
+            elif user.get('is_approved') == 0:
+                user_tags.append('pending')
+            # --- ENDE NEU ---
+
+            try:
+                # --- MODIFIZIERT: tags=tuple(user_tags) hinzugefügt ---
+                self.tree.insert("", "end", iid=user['id'], values=tuple(values_to_insert), tags=tuple(user_tags))
+            except tk.TclError as e:
+                print(f"TclError User {user['id']}: {e}. Skip.")
+
+    def refresh_data(self, data_cache=None):
+        """
+        (Ehemals load_users) Aktualisiert die Daten.
+        Nimmt optional einen Cache entgegen (Regel 2).
+        Wenn kein Cache übergeben wird, lädt sie aus der DB (Fallback).
+        """
+        try:
+            if data_cache is not None:
+                print("[UserMgmtTab] Refresh aus Cache.")
+                self.all_users_data = data_cache
+            else:
+                print("[UserMgmtTab] Refresh aus DB.")
+                # Fallback: Direkter DB-Aufruf, wenn kein Cache bereitgestellt wird
+                self.all_users_data = get_all_users_with_details()
+
+            # Daten sortieren und in Treeview laden (ohne DB-Zugriff)
+            self._load_users_from_cache()
 
         except Exception as e:
             messagebox.showerror("Fehler Laden", f"Benutzerdaten laden fehlgeschlagen:\n{e}", parent=self)
@@ -210,7 +251,8 @@ class UserManagementTab(ttk.Frame):
         if self._sort_by == col:
             self._sort_desc = not self._sort_desc
         else:
-            self._sort_by = col; self._sort_desc = False
+            self._sort_by = col;
+            self._sort_desc = False
         for c_key, (c_name, _) in self.all_columns.items():
             try:
                 self.tree.heading(c_key, text=c_name)
@@ -226,7 +268,10 @@ class UserManagementTab(ttk.Frame):
                 self.tree.heading(col, text=header_text + sort_indicator)
             except tk.TclError:
                 pass
-        self.load_users()
+
+        # --- KORREKTUR: Ruft _load_users_from_cache() auf (kein DB-Zugriff) ---
+        self._load_users_from_cache()
+        # --- ENDE KORREKTUR ---
 
     def open_column_chooser(self):
         visible_for_chooser = [key for key in self.visible_column_keys if key != 'id' or self.all_columns['id'][1] > 0]
@@ -265,7 +310,10 @@ class UserManagementTab(ttk.Frame):
                 self.tree.column(col_key, width=width, minwidth=minwidth, stretch=stretch, anchor=tk.W)
             except tk.TclError:
                 pass
-        self.load_users()
+
+        # --- KORREKTUR: Ruft _load_users_from_cache() auf (kein DB-Zugriff) ---
+        self._load_users_from_cache()
+        # --- ENDE KORREKTUR ---
 
     def add_user(self):
         edit_win = UserEditWindow(master=self, user_id=None, user_data=None, is_new=True,
@@ -288,7 +336,9 @@ class UserManagementTab(ttk.Frame):
             edit_win.grab_set()
         else:
             print(f"Warnung: User {user_id} nicht im Cache bei Doppelklick.")
-            self.load_users()
+            # --- KORREKTUR: Ruft refresh_data() statt load_users() auf ---
+            self.refresh_data()
+            # --- ENDE KORREKTUR ---
             user_data = next((user for user in self.all_users_data if user['id'] == user_id), None)
             if user_data:
                 edit_win = UserEditWindow(master=self, user_id=user_id, user_data=user_data, is_new=False,
@@ -300,7 +350,9 @@ class UserManagementTab(ttk.Frame):
 
     def on_user_saved(self):
         clear_user_order_cache();
-        self.load_users()
+        # --- KORREKTUR: Ruft refresh_data() statt load_users() auf ---
+        self.refresh_data()
+        # --- ENDE KORREKTUR ---
 
     def show_context_menu(self, event):
         iid = self.tree.identify_row(event.y)
@@ -327,7 +379,8 @@ class UserManagementTab(ttk.Frame):
                         pass
                 self.context_menu.tk_popup(event.x_root, event.y_root)
             else:
-                self.selected_user_id = None; self.selected_user_data = None
+                self.selected_user_id = None;
+                self.selected_user_data = None
         else:
             self.selected_user_id = None;
             self.selected_user_data = None
@@ -376,8 +429,12 @@ class UserManagementTab(ttk.Frame):
             if messagebox.askyesno("Freigabe", f"'{name}' freischalten?", parent=self):
                 ok, msg = approve_user(user_id, self.current_user['id'])
                 if ok:
-                    messagebox.showinfo("OK", msg,
-                                        parent=self); self.load_users(); self.admin_window.check_for_updates()
+                    messagebox.showinfo("OK", msg, parent=self)
+                    # --- KORREKTUR: AttributeError (Regel 1) ---
+                    self.refresh_data()
+                    if hasattr(self.admin_window, 'notification_manager'):
+                        self.admin_window.notification_manager.check_for_updates()
+                    # --- ENDE KORREKTUR ---
                 else:
                     messagebox.showerror("Fehler", msg, parent=self)
 
@@ -429,8 +486,11 @@ class UserManagementTab(ttk.Frame):
             if success:
                 messagebox.showinfo("Erfolg", message, parent=self)
                 clear_user_order_cache()
-                self.load_users()  # Lade neu, um das Datum anzuzeigen (wenn Spalte sichtbar)
-                self.admin_window.check_for_updates()
+                # --- KORREKTUR: AttributeError (Regel 1) ---
+                self.refresh_data()  # Lade neu, um das Datum anzuzeigen (wenn Spalte sichtbar)
+                if hasattr(self.admin_window, 'notification_manager'):
+                    self.admin_window.notification_manager.check_for_updates()
+                # --- ENDE KORREKTUR ---
             else:
                 messagebox.showerror("Fehler", message, parent=self)
 
@@ -444,8 +504,13 @@ class UserManagementTab(ttk.Frame):
             if messagebox.askyesno("Reaktivieren", f"'{name}' reaktivieren?", parent=self):
                 ok, msg = unarchive_user(user_id, self.current_user['id'])
                 if ok:
-                    messagebox.showinfo("OK", msg,
-                                        parent=self); clear_user_order_cache(); self.load_users(); self.admin_window.check_for_updates()
+                    messagebox.showinfo("OK", msg, parent=self)
+                    clear_user_order_cache()
+                    # --- KORREKTUR: AttributeError (Regel 1) ---
+                    self.refresh_data()
+                    if hasattr(self.admin_window, 'notification_manager'):
+                        self.admin_window.notification_manager.check_for_updates()
+                    # --- ENDE KORREKTUR ---
                 else:
                     messagebox.showerror("Fehler", msg, parent=self)
 
@@ -456,8 +521,13 @@ class UserManagementTab(ttk.Frame):
             if messagebox.askyesno("Löschen", f"'{name}' wirklich löschen?", icon='warning', parent=self):
                 ok, msg = delete_user(user_id, self.current_user['id'])
                 if ok:
-                    messagebox.showinfo("OK", msg,
-                                        parent=self); clear_user_order_cache(); self.load_users(); self.admin_window.check_for_updates()
+                    messagebox.showinfo("OK", msg, parent=self)
+                    clear_user_order_cache()
+                    # --- KORREKTUR: AttributeError (Regel 1) ---
+                    self.refresh_data()
+                    if hasattr(self.admin_window, 'notification_manager'):
+                        self.admin_window.notification_manager.check_for_updates()
+                    # --- ENDE KORREKTUR ---
                 else:
                     messagebox.showerror("Fehler", msg, parent=self)
 
@@ -476,9 +546,6 @@ class UserManagementTab(ttk.Frame):
             messagebox.showerror("Fehler", f"Fehler beim Prüfen der Freischaltungen:\n{e}", parent=self)
 
     # --- ENDE KORRIGIERTE FUNKTION ---
-
-    def refresh_data(self):
-        self.load_users()
 
 
 # --- Klasse ColumnChooser (unverändert) ---
@@ -524,4 +591,3 @@ class ColumnChooser(tk.Toplevel):
                 new_visible.append(key)
         self.callback(new_visible);
         self.destroy()
-

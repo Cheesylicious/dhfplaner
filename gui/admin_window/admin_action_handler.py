@@ -27,6 +27,7 @@ from ..tabs.shift_plan_tab import ShiftPlanTab
 # Importiere die DB-Funktionen, die hier benötigt werden
 from database.db_core import save_config_json, MIN_STAFFING_RULES_CONFIG_KEY
 
+
 class AdminActionHandler:
     def __init__(self, admin_window):
         """
@@ -35,7 +36,7 @@ class AdminActionHandler:
         :param admin_window: Die Instanz von MainAdminWindow.
         """
         self.admin_window = admin_window
-        self.tab_manager = admin_window.tab_manager # Referenz auf den TabManager
+        self.tab_manager = admin_window.tab_manager  # Referenz auf den TabManager
 
     # --- Dynamische Tab-Öffner ---
     # ... (open_request_lock_window bis open_shift_types_window unverändert) ...
@@ -65,8 +66,8 @@ class AdminActionHandler:
         Versucht, Jahr/Monat aus der zentralen Variable 'current_display_date'
         des Hauptfensters zu lesen, wenn der ShiftPlanTab aktiv ist.
         """
-        for_date = datetime.now() # Fallback-Datum
-        callback = self.tab_manager.refresh_all_tabs # Fallback-Callback
+        for_date = datetime.now()  # Fallback-Datum
+        callback = self.tab_manager.refresh_all_tabs  # Fallback-Callback
         show_info_message = True
 
         try:
@@ -94,17 +95,20 @@ class AdminActionHandler:
                         callback = current_widget.refresh_data
                     # Wenn keine Refresh-Methode -> Behalte globalen Callback
 
-                    show_info_message = False # Keine Info-Nachricht nötig
-                    print(f"[DEBUG] Öffne UserOrderWindow für spezifischen Monat (aus admin_window.current_display_date): {for_date.strftime('%Y-%m')}")
+                    show_info_message = False  # Keine Info-Nachricht nötig
+                    print(
+                        f"[DEBUG] Öffne UserOrderWindow für spezifischen Monat (aus admin_window.current_display_date): {for_date.strftime('%Y-%m')}")
                 else:
                     # current_display_date war nicht gesetzt oder kein gültiges Datumsobjekt
-                    print("[WARNUNG] ShiftPlanTab aktiv, aber admin_window.current_display_date ist ungültig oder nicht vorhanden. Verwende Fallback.")
+                    print(
+                        "[WARNUNG] ShiftPlanTab aktiv, aber admin_window.current_display_date ist ungültig oder nicht vorhanden. Verwende Fallback.")
                     # show_info_message bleibt True
 
                 # --- ENDE FINALE KORREKTUR ---
             else:
                 # Das aktuelle Widget ist kein ShiftPlanTab (oder noch der Platzhalter)
-                print(f"[DEBUG] Aktuelles Widget ist kein geladener ShiftPlanTab (Typ: {type(current_widget)}). Verwende Fallback.")
+                print(
+                    f"[DEBUG] Aktuelles Widget ist kein geladener ShiftPlanTab (Typ: {type(current_widget)}). Verwende Fallback.")
                 # show_info_message bleibt True
 
         except tk.TclError as e_tcl:
@@ -112,22 +116,23 @@ class AdminActionHandler:
             print(f"[WARNUNG] TclError beim Ermitteln des Tabs in open_user_order_window: {e_tcl}. Verwende Fallback.")
             # show_info_message bleibt True (Standard)
         except AttributeError as e_attr:
-             # Fängt Fehler ab, wenn 'current_display_date' nicht existiert
-             print(f"[WARNUNG] AttributeError in open_user_order_window: {e_attr}. Verwende Fallback.")
-             # show_info_message bleibt True
+            # Fängt Fehler ab, wenn 'current_display_date' nicht existiert
+            print(f"[WARNUNG] AttributeError in open_user_order_window: {e_attr}. Verwende Fallback.")
+            # show_info_message bleibt True
         except ValueError as e_val:
-             # Fängt Fehler bei der datetime-Erstellung ab
-             print(f"[WARNUNG] ValueError in open_user_order_window (Datum ungültig?): {e_val}. Verwende Fallback.")
-             # show_info_message bleibt True
+            # Fängt Fehler bei der datetime-Erstellung ab
+            print(f"[WARNUNG] ValueError in open_user_order_window (Datum ungültig?): {e_val}. Verwende Fallback.")
+            # show_info_message bleibt True
         except Exception as e:
             # Andere unerwartete Fehler
             print(f"Unerwarteter Fehler beim Öffnen des UserOrderWindow: {e}")
-            messagebox.showerror("Fehler", f"Konnte das Sortierfenster nicht korrekt vorbereiten:\n{e}", parent=self.admin_window)
+            messagebox.showerror("Fehler", f"Konnte das Sortierfenster nicht korrekt vorbereiten:\n{e}",
+                                 parent=self.admin_window)
             # Im Zweifel immer den Fallback verwenden, show_info_message bleibt True
 
         # Zeige die Info-Nachricht nur an, wenn wir den Fallback verwenden
         if show_info_message:
-             messagebox.showinfo("Info",
+            messagebox.showinfo("Info",
                                 "Sie bearbeiten die Standard-Sortierung (basierend auf heute).\n\n"
                                 "Um die Sortierung für einen bestimmten Monat zu sehen (inkl. zukünftiger/archivierter Mitarbeiter), "
                                 "wählen Sie bitte zuerst den entsprechenden Schichtplan-Tab aus und stellen Sie sicher, dass er vollständig geladen ist.",
@@ -135,7 +140,8 @@ class AdminActionHandler:
 
         # Öffne das Fenster mit dem ermittelten Datum und Callback
         # Der print-Befehl zeigt jetzt das Datum an, das tatsächlich verwendet wird
-        print(f"[DEBUG] Rufe UserOrderWindow auf mit for_date={for_date.strftime('%Y-%m-%d')} und callback={getattr(callback, '__name__', 'lambda/unknown')}")
+        print(
+            f"[DEBUG] Rufe UserOrderWindow auf mit for_date={for_date.strftime('%Y-%m-%d')} und callback={getattr(callback, '__name__', 'lambda/unknown')}")
         UserOrderWindow(self.admin_window, callback=callback, for_date=for_date)
 
     # ... (Restliche Methoden open_shift_order_window bis open_planning_assistant_settings unverändert) ...
@@ -145,50 +151,67 @@ class AdminActionHandler:
 
     def open_staffing_rules_window(self):
         """Öffnet das Einstellungsfenster für die Mindestbesetzung."""
+
         def save_and_refresh(new_rules):
             print("[DEBUG] Speichere Besetzungsregeln...")
             try:
                 if save_config_json(MIN_STAFFING_RULES_CONFIG_KEY, new_rules):
                     # Greife über data_manager auf die Regeln zu
                     self.admin_window.staffing_rules = new_rules
-                    messagebox.showinfo("Gespeichert", "Die Besetzungsregeln wurden erfolgreich aktualisiert.", parent=self.admin_window)
+                    messagebox.showinfo("Gespeichert", "Die Besetzungsregeln wurden erfolgreich aktualisiert.",
+                                        parent=self.admin_window)
                     self.tab_manager.refresh_specific_tab("Schichtplan")
                 else:
-                    messagebox.showerror("Fehler", "Die Besetzungsregeln konnten nicht in der Konfiguration gespeichert werden.", parent=self.admin_window)
+                    messagebox.showerror("Fehler",
+                                         "Die Besetzungsregeln konnten nicht in der Konfiguration gespeichert werden.",
+                                         parent=self.admin_window)
             except Exception as e:
                 print(f"[FEHLER] beim Speichern der Besetzungsregeln: {e}")
-                messagebox.showerror("Schwerer Speicherfehler", f"Speichern der Besetzungsregeln fehlgeschlagen:\n{e}", parent=self.admin_window)
+                messagebox.showerror("Schwerer Speicherfehler", f"Speichern der Besetzungsregeln fehlgeschlagen:\n{e}",
+                                     parent=self.admin_window)
 
-        staffing_window = MinStaffingWindow(self.admin_window, current_rules=self.admin_window.staffing_rules, callback=save_and_refresh)
+        staffing_window = MinStaffingWindow(self.admin_window, current_rules=self.admin_window.staffing_rules,
+                                            callback=save_and_refresh)
         staffing_window.focus_force()
 
     def open_holiday_settings_window(self):
         """Öffnet die Feiertagseinstellungen."""
         # --- ROBUSTERER ZUGRIFF AUF DATUM ---
-        year_to_edit = datetime.today().year # Fallback
+        year_to_edit = datetime.today().year  # Fallback
         try:
-             # Prüfe, ob das Attribut existiert und ein Datum ist
+            # Prüfe, ob das Attribut existiert und ein Datum ist
             current_date_obj = getattr(self.admin_window, 'current_display_date', None)
             if isinstance(current_date_obj, (date, datetime)):
-                 year_to_edit = current_date_obj.year
-        except Exception as e: # Fange generische Fehler ab, falls etwas Unerwartetes passiert
-             print(f"[WARNUNG] Fehler beim Zugriff auf current_display_date für HolidaySettingsWindow: {e}")
+                year_to_edit = current_date_obj.year
+        except Exception as e:  # Fange generische Fehler ab, falls etwas Unerwartetes passiert
+            print(f"[WARNUNG] Fehler beim Zugriff auf current_display_date für HolidaySettingsWindow: {e}")
         # --- ENDE ---
-        HolidaySettingsWindow(self.admin_window, year=year_to_edit, callback=self.tab_manager.refresh_all_tabs)
+
+        # --- KORREKTUR: Das 'app'-Argument (self.admin_window) wurde hinzugefügt ---
+        HolidaySettingsWindow(
+            self.admin_window,  # master
+            self.admin_window,  # app (dieses Argument fehlte)
+            year=year_to_edit,
+            callback=self.tab_manager.refresh_all_tabs
+        )
+        # --- ENDE KORREKTUR ---
 
     def open_event_settings_window(self):
         """Öffnet die Einstellungen für Sondertermine."""
         # --- ROBUSTERER ZUGRIFF AUF DATUM ---
-        year_to_edit = datetime.today().year # Fallback
+        year_to_edit = datetime.today().year  # Fallback
         try:
-             # Prüfe, ob das Attribut existiert und ein Datum ist
+            # Prüfe, ob das Attribut existiert und ein Datum ist
             current_date_obj = getattr(self.admin_window, 'current_display_date', None)
             if isinstance(current_date_obj, (date, datetime)):
-                 year_to_edit = current_date_obj.year
+                year_to_edit = current_date_obj.year
         except Exception as e:
-             print(f"[WARNUNG] Fehler beim Zugriff auf current_display_date für EventSettingsWindow: {e}")
+            print(f"[WARNUNG] Fehler beim Zugriff auf current_display_date für EventSettingsWindow: {e}")
         # --- ENDE ---
-        EventSettingsWindow(self.admin_window, year=year_to_edit, callback=self.tab_manager.refresh_all_tabs)
+
+        # (Hier war der Aufruf bereits korrekt und enthielt 'app')
+        EventSettingsWindow(self.admin_window, self.admin_window, year=year_to_edit,
+                            callback=self.tab_manager.refresh_all_tabs)
 
     def open_color_settings_window(self):
         """Öffnet die Farbeinstellungen."""

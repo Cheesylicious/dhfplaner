@@ -44,8 +44,13 @@ class ShiftPlanTab(ttk.Frame):
 
         # --- Ende DataManager Übernahme ---
 
-        self.action_handler = ShiftPlanActionHandler(self, app, self, None)
-        self.renderer = ShiftPlanRenderer(self, app, self.data_manager, self.action_handler)
+        # --- KORREKTUR: self.data_manager an den ActionHandler übergeben ---
+        # Zuvor stand hier fälschlicherweise 'self' als drittes Argument,
+        # was dem ActionHandler das ShiftPlanTab-Frame statt des DataManagers gab.
+        self.action_handler = ShiftPlanActionHandler(self, app, self.data_manager, None)
+        # --- ENDE KORREKTUR ---
+
+        self.renderer = ShiftPlanRenderer(self, bootloader_app, self.data_manager, self.action_handler)
         self.action_handler.renderer = self.renderer
         self.grid_widgets = self.renderer.grid_widgets
 

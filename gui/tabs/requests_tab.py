@@ -9,12 +9,24 @@ from ..dialogs.rejection_reason_dialog import RejectionReasonDialog
 
 
 class RequestsTab(ttk.Frame):
-    def __init__(self, master, app):
+    def __init__(self, master, app, initial_data_cache=None):
+        """
+        Konstruktor für den RequestsTab.
+        Akzeptiert optional vorgeladene Daten (pending_wishes), um DB-Wartezeiten zu vermeiden (Regel 2).
+        """
         super().__init__(master)
         self.app = app
-        self.all_requests_data = {}
+        self.all_requests_data = {}  # Wird jetzt als Cache (Dict) verwendet
         self.setup_ui()
-        self.refresh_requests()
+
+        # --- INNOVATION (Regel 1 & 2) ---
+        if initial_data_cache is not None:
+            print("[RequestsTab] Lade Daten aus initialem Cache.")
+            self._load_requests_from_cache(initial_data_cache)
+        else:
+            print("[RequestsTab] Initialer Cache leer. Lade aus DB (Fallback).")
+            self.refresh_data()  # Daten aus DB holen und anzeigen
+        # --- ENDE INNOVATION ---
 
     def setup_ui(self):
         main_frame = ttk.Frame(self, padding="10")
@@ -41,23 +53,62 @@ class RequestsTab(ttk.Frame):
         button_frame.pack(side="left", fill="y", padx=10, pady=5)
         ttk.Button(button_frame, text="Genehmigen", command=lambda: self.process_selection(True)).pack(pady=5, fill="x")
         ttk.Button(button_frame, text="Ablehnen", command=lambda: self.process_selection(False)).pack(pady=5, fill="x")
-        ttk.Button(button_frame, text="Aktualisieren", command=self.refresh_requests).pack(side="bottom", pady=10)
 
-    def refresh_requests(self):
+        # --- KORREKTUR: Ruft refresh_data() auf ---
+        ttk.Button(button_frame, text="Aktualisieren", command=self.refresh_data).pack(side="bottom", pady=10)
+        # --- ENDE KORREKTUR ---
+
+    def _load_requests_from_cache(self, requests_list):
+        """
+        (NEUE METHODE) Füllt die Treeview mit der übergebenen Request-Liste.
+        Diese Methode greift nicht auf die Datenbank zu. (Regel 2 & 4)
+        """
+        # Baum leeren
         for item in self.pending_requests_tree.get_children():
             self.pending_requests_tree.delete(item)
+
+        # Internen Cache (Dict) leeren und neu aufbauen
         self.all_requests_data.clear()
 
-        requests = get_pending_wunschfrei_requests()
-        for req in requests:
+        # Sortieren (z.B. nach Datum)
+        try:
+            sorted_requests = sorted(requests_list, key=lambda r: r.get('request_date', ''))
+        except Exception:
+            sorted_requests = requests_list  # Fallback
+
+        for req in sorted_requests:
             req_id = req['id']
+            # Internen Cache füllen, damit Bearbeitung funktioniert
             self.all_requests_data[req_id] = req
+
             user_name = f"{req['vorname']} {req['name']}"
             date_obj = datetime.strptime(req['request_date'], '%Y-%m-%d').strftime('%d.%m.%Y')
             req_type = "Frei" if req.get('requested_shift') == 'WF' else req.get('requested_shift')
             status = 'Ausstehend'
             values = (user_name, date_obj, req_type, status)
             self.pending_requests_tree.insert("", tk.END, iid=req_id, values=values)
+
+    def refresh_data(self, data_cache=None):
+        """
+        (Ehemals refresh_requests) Aktualisiert die Daten.
+        Nimmt optional einen Cache entgegen (Regel 2).
+        Wenn kein Cache übergeben wird, lädt sie aus der DB (Fallback).
+        """
+        try:
+            requests = []
+            if data_cache is not None:
+                print("[RequestsTab] Refresh aus Cache.")
+                requests = data_cache
+            else:
+                print("[RequestsTab] Refresh aus DB.")
+                # Fallback: Direkter DB-Aufruf
+                requests = get_pending_wunschfrei_requests()
+
+            # Daten in Treeview laden (ohne DB-Zugriff)
+            self._load_requests_from_cache(requests)
+
+        except Exception as e:
+            messagebox.showerror("Fehler Laden", f"Wunschanfragen laden fehlgeschlagen:\n{e}", parent=self)
 
     def _get_selected_request_id(self):
         selection = self.pending_requests_tree.selection()
@@ -72,7 +123,7 @@ class RequestsTab(ttk.Frame):
             return
 
         reason = self._ask_for_rejection_reason_if_needed(approve)
-        if reason is None:
+        if reason is None:  # Benutzer hat bei Ablehnung auf "Abbrechen" geklickt
             return
 
         self._update_request_status(request_id, approve, reason)
@@ -83,7 +134,7 @@ class RequestsTab(ttk.Frame):
             if dialog.result:
                 return dialog.reason
             else:
-                return None
+                return None  # Signalisiert Abbruch
         return ""
 
     def _update_request_status(self, request_id, approve, reason=""):
@@ -107,16 +158,24 @@ class RequestsTab(ttk.Frame):
                     messagebox.showerror("Fehler beim Eintragen", save_message, parent=self)
 
         messagebox.showinfo("Erfolg", message, parent=self)
-        self.refresh_requests()
 
-        shift_plan_tab = self.app.tab_frames.get("Schichtplan")
-        if shift_plan_tab:
-            shift_plan_tab.build_shift_plan_grid(self.app.current_display_date.year,
-                                                 self.app.current_display_date.month)
+        # --- KORREKTUR: Ruft refresh_data() auf (lädt aus DB neu) ---
+        self.refresh_data()
+        # --- ENDE KORREKTUR ---
+
+        # --- INNOVATION (Regel 1 & 4): Tab-Manager für Refresh nutzen ---
+        # Statt direkt auf den Schichtplan-Tab zuzugreifen,
+        # wird der Tab-Manager gebeten, den Schichtplan zu aktualisieren.
+        if hasattr(self.app, 'tab_manager'):
+            print("[RequestsTab] Benachrichtige Tab-Manager, Schichtplan zu aktualisieren.")
+            self.app.tab_manager.refresh_specific_tab("Schichtplan")
+        else:
+            print("[RequestsTab] Warnung: 'self.app.tab_manager' nicht gefunden.")
+        # --- ENDE INNOVATION ---
 
     def process_wunschfrei_by_id(self, request_id, approve):
         if request_id not in self.all_requests_data:
-            self.refresh_requests()
+            self.refresh_data()  # Lädt neu, wenn ID nicht im lokalen Cache ist
             if request_id not in self.all_requests_data:
                 messagebox.showerror("Fehler", "Antrag nicht gefunden. Bitte aktualisieren Sie die Ansicht.",
                                      parent=self)

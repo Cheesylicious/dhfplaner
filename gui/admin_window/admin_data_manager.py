@@ -31,8 +31,10 @@ class AdminDataManager:
         # Initialisiere die Datenattribute im Hauptfenster
         self.admin_window.shift_types_data = {}
         self.admin_window.staffing_rules = {}
-        self.admin_window.events = {}
-        self.admin_window.current_year_holidays = {}
+        # --- KORREKTUR: Diese Instanzvariablen werden nicht mehr benötigt ---
+        # self.admin_window.events = {}
+        # self.admin_window.current_year_holidays = {}
+        # --- ENDE KORREKTUR ---
         self.admin_window.shift_frequency = self.load_shift_frequency()
 
     def load_all_data(self):
@@ -60,21 +62,21 @@ class AdminDataManager:
         # Lade Feiertage und Events für das *aktuelle* Kalenderjahr beim Start
         current_year = date.today().year
         try:
-            self._load_holidays_for_year(current_year)  # Lädt self.admin_window.current_year_holidays
+            self._load_holidays_for_year(current_year)  # Lädt Feiertage in den globalen Cache
         except Exception as e_ho:
             print(f"[FEHLER] Feiertage für {current_year} konnten nicht geladen werden: {e_ho}")
             messagebox.showwarning("Ladefehler", f"Feiertage für {current_year} konnten nicht geladen werden:\n{e_ho}",
                                    parent=self.admin_window)
-            self.admin_window.current_year_holidays = {}
+            # self.admin_window.current_year_holidays = {} # Veraltet
 
         try:
-            self._load_events_for_year(current_year)  # Lädt self.admin_window.events
+            self._load_events_for_year(current_year)  # Lädt Events in den globalen Cache
         except Exception as e_ev:
             print(f"[FEHLER] Sondertermine für {current_year} konnten nicht geladen werden: {e_ev}")
             messagebox.showwarning("Ladefehler",
                                    f"Sondertermine für {current_year} konnten nicht geladen werden:\n{e_ev}",
                                    parent=self.admin_window)
-            self.admin_window.events = {}
+            # self.admin_window.events = {} # Veraltet
 
         print(f"[DEBUG] Basisdaten für {current_year} initial geladen.")
 
@@ -138,59 +140,88 @@ class AdminDataManager:
             self.admin_window.staffing_rules = defaults
 
     def _load_holidays_for_year(self, year):
-        """Lädt die Feiertage für ein spezifisches Jahr."""
+        """
+        Lädt die Feiertage für ein spezifisches Jahr in den globalen Cache
+        des HolidayManagers.
+        """
         try:
-            self.admin_window.current_year_holidays = HolidayManager.get_holidays_for_year(year)
-            print(f"[DEBUG] Feiertage für {year} geladen ({len(self.admin_window.current_year_holidays)} Einträge).")
+            # Ruft die statische Methode auf, um den Cache zu füllen
+            holidays = HolidayManager.get_holidays_for_year(year)
+            # --- KORREKTUR: Speichere nicht mehr in admin_window ---
+            # self.admin_window.current_year_holidays = holidays
+            print(f"[DEBUG] Feiertage für {year} in globalen Cache geladen ({len(holidays)} Einträge).")
         except Exception as e:
             print(f"[FEHLER] beim Laden der Feiertage für {year}: {e}")
             messagebox.showwarning("Fehler Feiertage", f"Feiertage für {year} konnten nicht geladen werden:\n{e}",
                                    parent=self.admin_window)
-            self.admin_window.current_year_holidays = {}
+            # self.admin_window.current_year_holidays = {} # Veraltet
 
     def _load_events_for_year(self, year):
-        """Lädt die Sondertermine (Events) für ein spezifisches Jahr."""
+        """
+        Lädt die Sondertermine (Events) für ein spezifisches Jahr in den globalen
+        Cache des EventManagers.
+        """
         try:
-            self.admin_window.events = EventManager.get_events_for_year(year)
-            print(f"[DEBUG] Sondertermine für {year} geladen ({len(self.admin_window.events)} Einträge).")
+            # Ruft die statische Methode auf, um den Cache zu füllen
+            events = EventManager.get_events_for_year(year)
+            # --- KORREKTUR: Speichere nicht mehr in admin_window ---
+            # self.admin_window.events = events
+            print(f"[DEBUG] Sondertermine für {year} in globalen Cache geladen ({len(events)} Einträge).")
         except Exception as e:
             print(f"[FEHLER] beim Laden der Sondertermine für {year}: {e}")
             messagebox.showwarning("Fehler Sondertermine",
                                    f"Sondertermine für {year} konnten nicht geladen werden:\n{e}",
                                    parent=self.admin_window)
-            self.admin_window.events = {}
+            # self.admin_window.events = {} # Veraltet
 
     def is_holiday(self, check_date):
-        """Prüft, ob ein gegebenes Datum ein Feiertag im aktuell geladenen Jahr ist."""
-        if not isinstance(check_date, date):
-            try:
-                if hasattr(check_date, 'date'):
-                    check_date = check_date.date()
-                else:
-                    check_date = date.fromisoformat(str(check_date))
-            except (TypeError, ValueError):
-                print(f"[WARNUNG] is_holiday: Ungültiges Datumformat erhalten: {check_date}")
-                return False
-
-        # TODO: Dynamisches Nachladen implementieren, falls das Jahr nicht übereinstimmt
-        target_year = check_date.year
-        # Aktuell: Prüft nur im Dictionary des geladenen Jahres
-        return check_date in self.admin_window.current_year_holidays
+        """
+        Prüft, ob ein gegebenes Datum ein Feiertag ist.
+        Greift jetzt direkt auf die statische Methode des HolidayManagers zu.
+        """
+        # --- KORREKTUR: Direkter Aufruf der statischen Methode ---
+        return HolidayManager.is_holiday(check_date)
+        # --- ALTER CODE (fehlerhaft bei Jahreswechsel): ---
+        # if not isinstance(check_date, date):
+        #     try:
+        #         if hasattr(check_date, 'date'):
+        #             check_date = check_date.date()
+        #         else:
+        #             check_date = date.fromisoformat(str(check_date))
+        #     except (TypeError, ValueError):
+        #         print(f"[WARNUNG] is_holiday: Ungültiges Datumformat erhalten: {check_date}")
+        #         return False
+        #
+        # # TODO: Dynamisches Nachladen implementieren, falls das Jahr nicht übereinstimmt
+        # target_year = check_date.year
+        # # Aktuell: Prüft nur im Dictionary des geladenen Jahres
+        # return check_date in self.admin_window.current_year_holidays
+        # --- ENDE KORREKTUR ---
 
     def get_event_type(self, current_date):
-        """Gibt den Typ des Sondertermins für ein Datum zurück, falls vorhanden."""
-        if not isinstance(current_date, date):
-            try:
-                if hasattr(current_date, 'date'):
-                    current_date = current_date.date()
-                else:
-                    current_date = date.fromisoformat(str(current_date))
-            except (TypeError, ValueError):
-                print(f"[WARNUNG] get_event_type: Ungültiges Datumformat erhalten: {current_date}")
-                return None
+        """
+        Gibt den Typ des Sondertermins für ein Datum zurück, falls vorhanden.
+        Greift jetzt direkt auf die statische Methode des EventManagers zu.
+        """
+        # --- KORREKTUR: Direkter Aufruf der statischen Methode ---
+        # Die EventManager.get_event_type Methode lädt das Jahr bei Bedarf
+        # dynamisch nach (genau wie HolidayManager.is_holiday).
+        return EventManager.get_event_type(current_date)
+        # --- ALTER CODE (fehlerhaft bei Jahreswechsel): ---
+        # if not isinstance(current_date, date):
+        #     try:
+        #         if hasattr(current_date, 'date'):
+        #             current_date = current_date.date()
+        #         else:
+        #             current_date = date.fromisoformat(str(current_date))
+        #     except (TypeError, ValueError):
+        #         print(f"[WARNUNG] get_event_type: Ungültiges Datumformat erhalten: {current_date}")
+        #         return None
+        #
+        # # TODO: Analog zu Feiertagen, ggf. dynamisches Nachladen
+        # return EventManager.get_event_type(current_date, self.admin_window.events)
+        # --- ENDE KORREKTUR ---
 
-        # TODO: Analog zu Feiertagen, ggf. dynamisches Nachladen
-        return EventManager.get_event_type(current_date, self.admin_window.events)
 
     def load_shift_frequency(self):
         """Lädt die Häufigkeit der zugewiesenen Schichten aus der DB-Konfiguration."""

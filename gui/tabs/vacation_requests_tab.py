@@ -13,12 +13,24 @@ from database.db_requests import (
 
 
 class VacationRequestsTab(ttk.Frame):
-    def __init__(self, master, app):
+    def __init__(self, master, app, initial_data_count=None):
+        """
+        Konstruktor für den VacationRequestsTab.
+        Akzeptiert optional die ANZAHL vorgeladener Anträge (Regel 2),
+        um den TypeError zu beheben.
+        HINWEIS: Der Tab lädt seine Details (die volle Liste) weiterhin selbst,
+        da der Bootloader nur den Zähler liefert.
+        """
         super().__init__(master)
         self.app = app
         self.admin_id = self.app.user_data['id']
+
+        # initial_data_count (aus dem Cache) wird hier nicht aktiv
+        # genutzt, aber die Annahme behebt den TypeError beim Laden.
+        print(f"[VacationTab] Initialisiert (Cache-Zähler: {initial_data_count})")
+
         self.setup_ui()
-        self.refresh_vacation_requests()
+        self.refresh_data()  # Lädt die vollen Daten aus der DB
 
     def setup_ui(self):
         main_frame = ttk.Frame(self, padding="10")
@@ -30,8 +42,11 @@ class VacationRequestsTab(ttk.Frame):
         ttk.Button(button_frame, text="Ablehnen", command=self.reject_selected).pack(side="left", padx=5)
         ttk.Button(button_frame, text="Stornieren", command=self.cancel_selected).pack(side="left", padx=5)
         ttk.Button(button_frame, text="Archivieren", command=self.archive_selected).pack(side="left", padx=5)
-        ttk.Button(button_frame, text="Aktualisieren", command=self.refresh_vacation_requests).pack(side="right",
-                                                                                                    padx=5)
+
+        # --- KORREKTUR: Ruft refresh_data() auf ---
+        ttk.Button(button_frame, text="Aktualisieren", command=self.refresh_data).pack(side="right",
+                                                                                       padx=5)
+        # --- ENDE KORREKTUR ---
 
         delete_button = ttk.Button(button_frame, text="Archivierte Anträge endgültig löschen",
                                    command=self.delete_selected_archived_requests)
@@ -50,22 +65,36 @@ class VacationRequestsTab(ttk.Frame):
         self.tree.tag_configure('Storniert', background='#E2E3E5')
         self.tree.tag_configure('Archiviert', foreground='grey')
 
-    def refresh_vacation_requests(self):
+    def refresh_data(self, data_cache=None):
+        """
+        (Ehemals refresh_vacation_requests) Aktualisiert die Daten.
+        Nimmt optional einen Cache entgegen (Regel 2), der hier aber (da es nur
+        ein Zähler ist) nicht verwendet wird. Lädt immer aus der DB.
+        """
+        if data_cache is not None:
+            # data_cache ist nur der ZÄHLER, wir brauchen die vollen Daten.
+            print("[VacationTab] Refresh (Cache ignoriert, da nur Zähler). Lade aus DB.")
+        else:
+            print("[VacationTab] Refresh aus DB.")
+
         for item in self.tree.get_children():
             self.tree.delete(item)
 
-        requests = get_all_vacation_requests_for_admin()
-        for req in requests:
-            start_date = datetime.strptime(req['start_date'], '%Y-%m-%d').strftime('%d.%m.%Y')
-            end_date = datetime.strptime(req['end_date'], '%Y-%m-%d').strftime('%d.%m.%Y')
+        try:
+            requests = get_all_vacation_requests_for_admin()
+            for req in requests:
+                start_date = datetime.strptime(req['start_date'], '%Y-%m-%d').strftime('%d.%m.%Y')
+                end_date = datetime.strptime(req['end_date'], '%Y-%m-%d').strftime('%d.%m.%Y')
 
-            tags = (req['status'],)
-            if req['archived']:
-                tags = ('Archiviert',)
+                tags = (req['status'],)
+                if req['archived']:
+                    tags = ('Archiviert',)
 
-            self.tree.insert('', 'end', iid=req['id'],
-                             values=(f"{req['vorname']} {req['name']}", start_date, end_date, req['status']),
-                             tags=tags)
+                self.tree.insert('', 'end', iid=req['id'],
+                                 values=(f"{req['vorname']} {req['name']}", start_date, end_date, req['status']),
+                                 tags=tags)
+        except Exception as e:
+            messagebox.showerror("Fehler Laden", f"Urlaubsanträge laden fehlgeschlagen:\n{e}", parent=self)
 
     def get_selected_request_ids(self):
         selected_items = self.tree.selection()
@@ -81,9 +110,12 @@ class VacationRequestsTab(ttk.Frame):
         if messagebox.askyesno("Bestätigen", f"{len(selected_ids)} Antrag/Anträge genehmigen und im Plan eintragen?"):
             for req_id in selected_ids:
                 approve_vacation_request(req_id, self.admin_id)
-            self.refresh_vacation_requests()
-            if "Schichtplan" in self.app.tab_frames:
-                self.app.tab_frames["Schichtplan"].refresh_plan()
+            self.refresh_data()
+
+            # --- INNOVATION (Regel 1 & 4): Tab-Manager für Refresh nutzen ---
+            if hasattr(self.app, 'tab_manager'):
+                self.app.tab_manager.refresh_specific_tab("Schichtplan")
+            # --- ENDE INNOVATION ---
 
     def reject_selected(self):
         selected_ids = self.get_selected_request_ids()
@@ -91,9 +123,12 @@ class VacationRequestsTab(ttk.Frame):
 
         for req_id in selected_ids:
             update_vacation_request_status(req_id, 'Abgelehnt')
-        self.refresh_vacation_requests()
-        if "Schichtplan" in self.app.tab_frames:
-            self.app.tab_frames["Schichtplan"].refresh_plan()
+        self.refresh_data()
+
+        # --- INNOVATION (Regel 1 & 4): Tab-Manager für Refresh nutzen ---
+        if hasattr(self.app, 'tab_manager'):
+            self.app.tab_manager.refresh_specific_tab("Schichtplan")
+        # --- ENDE INNOVATION ---
 
     def cancel_selected(self):
         selected_ids = self.get_selected_request_ids()
@@ -103,9 +138,12 @@ class VacationRequestsTab(ttk.Frame):
                                f"{len(selected_ids)} genehmigte(n) Antrag/Anträge stornieren und aus dem Plan entfernen?"):
             for req_id in selected_ids:
                 cancel_vacation_request(req_id, self.admin_id)
-            self.refresh_vacation_requests()
-            if "Schichtplan" in self.app.tab_frames:
-                self.app.tab_frames["Schichtplan"].refresh_plan()
+            self.refresh_data()
+
+            # --- INNOVATION (Regel 1 & 4): Tab-Manager für Refresh nutzen ---
+            if hasattr(self.app, 'tab_manager'):
+                self.app.tab_manager.refresh_specific_tab("Schichtplan")
+            # --- ENDE INNOVATION ---
 
     def archive_selected(self):
         selected_ids = self.get_selected_request_ids()
@@ -113,7 +151,7 @@ class VacationRequestsTab(ttk.Frame):
 
         for req_id in selected_ids:
             archive_vacation_request(req_id, self.admin_id)
-        self.refresh_vacation_requests()
+        self.refresh_data()
 
     def delete_selected_archived_requests(self):
         selected_ids = self.get_selected_request_ids()
@@ -136,6 +174,6 @@ class VacationRequestsTab(ttk.Frame):
             success, msg = delete_vacation_requests(archived_to_delete)
             if success:
                 messagebox.showinfo("Erfolg", msg, parent=self)
-                self.refresh_vacation_requests()
+                self.refresh_data()
             else:
                 messagebox.showerror("Fehler", msg, parent=self)

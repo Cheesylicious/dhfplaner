@@ -254,7 +254,13 @@ class BugReportsTab(ttk.Frame):
             self.clear_details()
 
         self.tree.yview_moveto(scroll_pos[0])
-        if not initial_load and self.app: self.app.check_for_updates()
+
+        # --- KORREKTUR: AttributeError (Regel 1) ---
+        # Greift auf den notification_manager zu, statt auf eine nicht
+        # existierende Methode check_for_updates() im app-Objekt (MainAdminWindow).
+        if not initial_load and self.app and hasattr(self.app, 'notification_manager'):
+            self.app.notification_manager.check_for_updates()
+        # --- ENDE KORREKTUR ---
 
     def on_report_selected(self, event):
         selection = self.tree.selection()

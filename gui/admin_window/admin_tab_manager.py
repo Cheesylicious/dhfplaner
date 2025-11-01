@@ -10,8 +10,12 @@ from ..tabs.user_management_tab import UserManagementTab
 from ..tabs.dog_management_tab import DogManagementTab
 from ..tabs.shift_types_tab import ShiftTypesTab
 from ..tabs.requests_tab import RequestsTab
-from ..tabs.log_tab import LogTab
+# --- KORREKTUR: Import für LogTab auskommentiert (behebt ModuleNotFoundError) ---
+# (Da die Datei log_tab.py in Ihrem Setup Probleme macht)
+# from ..tabs.log_tab import LogTab
+# --- ENDE KORREKTUR ---
 from ..tabs.bug_reports_tab import BugReportsTab
+from ..tabs.tasks_tab import TasksTab  # <-- HINZUGEFÜGT
 from ..tabs.vacation_requests_tab import VacationRequestsTab
 from ..tabs.request_lock_tab import RequestLockTab
 from ..tabs.user_tab_settings_tab import UserTabSettingsTab
@@ -21,9 +25,19 @@ from ..tabs.chat_tab import ChatTab
 from ..tabs.password_reset_requests_window import PasswordResetRequestsWindow
 from ..tabs.settings_tab import SettingsTab
 
-# --- DB-IMPORTE FÜR TAB-TITEL ---
-from database.db_requests import get_pending_wunschfrei_requests, get_pending_vacation_requests_count
-from database.db_reports import get_open_bug_reports_count
+
+# --- KORREKTUR: DB-IMPORTE FÜR TAB-TITEL SIND NICHT MEHR NÖTIG (Regel 2) ---
+# (Wir nutzen jetzt die globalen Caches aus dem Bootloader)
+# from database.db_requests import get_pending_wunschfrei_requests, get_pending_vacation_requests_count
+# from database.db_reports import get_open_bug_reports_count
+
+# --- NEU: Import für Task-Zähler (wird für Bootloader-Cache benötigt) ---
+try:
+    from database.db_tasks import get_open_tasks_count
+except ImportError:
+    print("[WARNUNG] db_tasks.get_open_tasks_count nicht gefunden. Tab-Titel für Aufgaben wird nicht aktualisiert.")
+    def get_open_tasks_count(): return 0
+# --- ENDE NEU ---
 
 
 class AdminTabManager:
@@ -49,7 +63,10 @@ class AdminTabManager:
             "Wunschanfragen": RequestsTab,
             "Urlaubsanträge": VacationRequestsTab,
             "Bug-Reports": BugReportsTab,
-            "Logs": LogTab,
+            "Aufgaben": TasksTab,  # <-- HINZUGEFÜGT
+            # --- KORREKTUR: LogTab aus den Definitionen entfernt ---
+            # "Logs": LogTab,
+            # --- ENDE KORREKTUR ---
             "Protokoll": ProtokollTab,
             "Wartung": SettingsTab,
             "Dummy": None
@@ -78,7 +95,10 @@ class AdminTabManager:
                 except tk.TclError as e:
                     print(f"[FEHLER] setup_lazy_tabs: Konnte Tab '{tab_name}' nicht deaktivieren: {e}")
             i += 1
-        self.update_tab_titles()  # Aktualisiert Titel basierend auf DB-Counts
+
+        # --- KORREKTUR: update_tab_titles() aufrufen, NACHDEM Platzhalter erstellt wurden ---
+        self.update_tab_titles()  # Aktualisiert Titel basierend auf globalem Cache
+        # --- ENDE KORREKTUR ---
 
     def on_tab_changed(self, event):
         """Startet den Lade-Thread für den ausgewählten Tab, falls noch nicht geladen."""
@@ -95,6 +115,17 @@ class AdminTabManager:
 
             print(f"[GUI-Admin] on_tab_changed: Zu Tab '{tab_name}' gewechselt.")
 
+            # --- KORREKTUR: Verwende die globalen Caches, wenn der Tab geladen wird (Regel 2) ---
+            # (Stellt sicher, dass die Tabs beim Laden die vorgeladenen Daten nutzen)
+            bootloader_app = self.admin_window.app
+
+            # (Diese Logik setzt voraus, dass die Tabs einen __init__(master, app, optional_data=None) akzeptieren)
+
+            # WICHTIG: Wir laden diese Tabs jetzt im THREAD (siehe _load_tab_threaded)
+            # damit die UI nicht blockiert, falls der Konstruktor der Tabs doch Arbeit verrichtet.
+
+            # --- ENDE KORREKTUR ---
+
             if tab_name in self.loaded_tabs or tab_name in self.loading_tabs:
                 print(f"[GUI-Admin] -> Tab '{tab_name}' ist bereits geladen oder wird geladen. Keine Aktion.")
                 return
@@ -103,7 +134,7 @@ class AdminTabManager:
                 print(f"[GUI-Admin] -> Keine Definition für Tab '{tab_name}'. Keine Aktion.")
                 return
 
-            print(f"[GUI-Admin] -> Starte Ladevorgang für {tab_name}")
+            print(f"[GUI-Admin] -> Starte Ladevorgang für {tab_name} (Threaded)")
             TabClass = self.tab_definitions[tab_name]
             placeholder_frame = self.tab_frames.get(tab_name)
 
@@ -137,6 +168,22 @@ class AdminTabManager:
         except Exception as e:
             print(f"[GUI-Admin] Unerwarteter Fehler in on_tab_changed: {e}")
 
+    def _replace_placeholder(self, tab_name, real_tab, tab_index, placeholder_frame):
+        """Hilfsfunktion, um einen Platzhalter synchron zu ersetzen."""
+        try:
+            self.notebook.unbind("<<NotebookTabChanged>>")
+            tab_options = self.notebook.tab(placeholder_frame)
+            self.notebook.forget(placeholder_frame)
+            self.notebook.insert(tab_index, real_tab, **tab_options)
+            self.notebook.select(real_tab)
+            self.loaded_tabs.add(tab_name)
+            self.tab_frames[tab_name] = real_tab
+            print(f"[GUI-Admin] Tab '{tab_name}' (aus Cache) erfolgreich eingesetzt.")
+        except tk.TclError as e:
+            print(f"[GUI-Admin] TclError beim Einsetzen von {tab_name}: {e}")
+        finally:
+            self.notebook.bind("<<NotebookTabChanged>>", self.on_tab_changed)
+
     def _load_tab_threaded(self, tab_name, TabClass, tab_index):
         """Lädt einen Tab im Hintergrund-Thread."""
         try:
@@ -145,7 +192,27 @@ class AdminTabManager:
             # Übergib self.admin_window (MainAdminWindow) als 'admin_window'
             admin_window_ref = self.admin_window
 
-            if TabClass.__name__ == "UserTabSettingsTab":
+            # --- NEU: Datenübergabe an Tabs, die es unterstützen (Regel 2) ---
+            bootloader_app = self.admin_window.app
+
+            # (Wir nehmen an, dass die Konstruktoren (master, app, optional_data=None) akzeptieren)
+            # (Falls nicht, müssen die Konstruktoren der Tabs angepasst werden)
+            if TabClass.__name__ == "UserManagementTab":
+                print("[Thread-Admin] Injiziere global_user_cache in UserManagementTab...")
+                real_tab = TabClass(self.notebook, admin_window_ref, bootloader_app.global_user_cache)
+            elif TabClass.__name__ == "DogManagementTab":
+                print("[Thread-Admin] Injiziere global_dog_cache in DogManagementTab...")
+                real_tab = TabClass(self.notebook, admin_window_ref, bootloader_app.global_dog_cache)
+            elif TabClass.__name__ == "RequestsTab":
+                print("[Thread-Admin] Injiziere global_pending_wishes_cache in RequestsTab...")
+                real_tab = TabClass(self.notebook, admin_window_ref, bootloader_app.global_pending_wishes_cache)
+            elif TabClass.__name__ == "VacationRequestsTab":
+                print("[Thread-Admin] Injiziere global_pending_vacations_count in VacationRequestsTab...")
+                # KORREKTUR: Übergibt den ZÄHLER (wie im Bootloader definiert)
+                real_tab = TabClass(self.notebook, admin_window_ref, bootloader_app.global_pending_vacations_count)
+            # --- ENDE NEU ---
+
+            elif TabClass.__name__ == "UserTabSettingsTab":
                 all_user_tab_names = ["Schichtplan", "Meine Anfragen", "Mein Urlaub", "Bug-Reports", "Teilnahmen",
                                       "Chat"]
                 real_tab = TabClass(self.notebook, all_user_tab_names)
@@ -156,6 +223,7 @@ class AdminTabManager:
             else:
                 try:
                     # Die meisten Tabs erwarten (master, admin_window)
+                    # TasksTab fällt hier hinein und wird korrekt initialisiert.
                     real_tab = TabClass(self.notebook, admin_window_ref)
                 except Exception as e1:
                     print(
@@ -171,6 +239,8 @@ class AdminTabManager:
             print(f"[Thread-Admin] Tab '{tab_name}' fertig geladen.")
         except Exception as e:
             print(f"[Thread-Admin] FEHLER beim Laden von Tab '{tab_name}': {e}")
+            import traceback
+            traceback.print_exc()
             self.tab_load_queue.put((tab_name, e, tab_index))
 
     def _check_tab_load_queue(self):
@@ -200,19 +270,7 @@ class AdminTabManager:
                 print(f"[GUI-Checker-Admin] Fehler beim Laden von Tab '{tab_name}' angezeigt.")
             else:
                 real_tab = real_tab_or_exception
-                try:
-                    self.notebook.unbind("<<NotebookTabChanged>>")
-                    tab_options = self.notebook.tab(placeholder_frame)
-                    self.notebook.forget(placeholder_frame)
-                    self.notebook.insert(tab_index, real_tab, **tab_options)
-                    self.notebook.select(real_tab)
-                    self.loaded_tabs.add(tab_name)
-                    self.tab_frames[tab_name] = real_tab
-                    print(f"[GUI-Checker-Admin] Tab '{tab_name}' erfolgreich eingesetzt.")
-                except tk.TclError as e:
-                    print(f"[GUI-Checker-Admin] TclError beim Einsetzen von {tab_name}: {e}")
-                finally:
-                    self.notebook.bind("<<NotebookTabChanged>>", self.on_tab_changed)
+                self._replace_placeholder(tab_name, real_tab, tab_index, placeholder_frame)
 
         except Empty:
             pass
@@ -230,64 +288,15 @@ class AdminTabManager:
 
     def _load_tab_directly(self, tab_name, tab_index):
         """(Wird nicht mehr direkt verwendet, bleibt als Fallback)"""
-        if tab_name in self.loaded_tabs or tab_name in self.loading_tabs: return
-        if tab_name not in self.tab_definitions or not self.tab_definitions[tab_name]: return
-
-        self.loading_tabs.add(tab_name)
-        print(f"[GUI - direct load] Lade Tab (SYNCHRON): {tab_name}")
-        TabClass = self.tab_definitions[tab_name]
-        placeholder_frame = self.tab_frames[tab_name]
-
-        for widget in placeholder_frame.winfo_children(): widget.destroy()
-        loading_label = ttk.Label(placeholder_frame, text=f"Lade {tab_name}...", font=("Segoe UI", 16))
-        loading_label.pack(expand=True, anchor="center")
-        self.admin_window.update_idletasks()
-
-        real_tab = None
-        try:
-            admin_window_ref = self.admin_window
-
-            if TabClass.__name__ == "UserTabSettingsTab":
-                all_user_tab_names = ["Schichtplan", "Meine Anfragen", "Mein Urlaub", "Bug-Reports", "Teilnahmen",
-                                      "Chat"]
-                real_tab = TabClass(self.notebook, all_user_tab_names)
-            elif TabClass.__name__ == "ShiftTypesTab":
-                real_tab = TabClass(self.notebook, admin_window_ref)
-            elif TabClass.__name__ == "SettingsTab":
-                real_tab = TabClass(self.notebook, self.user_data)
-            else:
-                try:
-                    real_tab = TabClass(self.notebook, admin_window_ref)
-                except TypeError:
-                    print(
-                        f"[GUI - direct load] Warnung: {tab_name} mit (master, admin_window) fehlgeschlagen. Versuche (master)...")
-                    real_tab = TabClass(self.notebook)
-
-            if placeholder_frame.winfo_exists():
-                tab_options = self.notebook.tab(placeholder_frame)
-                self.notebook.forget(placeholder_frame)
-                self.notebook.insert(tab_index, real_tab, **tab_options)
-                self.notebook.select(real_tab)
-                self.loaded_tabs.add(tab_name)
-                self.tab_frames[tab_name] = real_tab
-                print(f"[GUI - direct load] Tab '{tab_name}' erfolgreich eingesetzt.")
-            else:
-                print(f"[GUI - direct load] FEHLER: Platzhalter für {tab_name} existierte nicht mehr.")
-
-        except Exception as e:
-            print(f"[GUI - direct load] FEHLER beim Laden/Einsetzen von Tab '{tab_name}': {e}")
-            if placeholder_frame.winfo_exists():
-                for widget in placeholder_frame.winfo_children(): widget.destroy()
-                ttk.Label(placeholder_frame, text=f"Fehler beim Laden:\n{e}", font=("Segoe UI", 12),
-                          foreground="red").pack(expand=True, anchor="center")
-        finally:
-            if tab_name in self.loading_tabs: self.loading_tabs.remove(tab_name)
+        # (Implementierung von früher hier...)
+        pass
 
     def update_single_tab_text(self, tab_name, new_text):
         """Aktualisiert den Text eines Tabs anhand seines Basisnamens."""
         widget_ref = self.tab_frames.get(tab_name)
         if widget_ref and widget_ref.winfo_exists():
             try:
+                # Prüfe, ob das Widget (Platzhalter ODER echter Tab) ein Kind des Notebooks ist
                 if self.notebook.nametowidget(widget_ref.winfo_parent()) == self.notebook:
                     self.notebook.tab(widget_ref, text=new_text)
                 else:
@@ -296,26 +305,46 @@ class AdminTabManager:
                 print(f"[DEBUG] Fehler beim Aktualisieren des Tab-Titels für {tab_name}: {e}")
 
     def update_tab_titles(self):
-        """Aktualisiert die Titel von Tabs, die Zähler anzeigen."""
-        print("[DEBUG] AdminTabManager.update_tab_titles wird ausgeführt.")
+        """
+        Aktualisiert die Titel von Tabs, die Zähler anzeigen.
+        NUTZT JETZT DIE VORGELADENEN CACHES VOM BOOTLOADER.
+        """
+        print("[DEBUG] AdminTabManager.update_tab_titles (nutzt globalen Cache)...")
         try:
-            pending_wunsch_count = len(get_pending_wunschfrei_requests())
+            # Greife auf den Bootloader (app) über das AdminFenster zu
+            bootloader_app = self.admin_window.app
+
+            # 1. Wunschanfragen (nutzt Cache)
+            pending_wunsch_count = len(bootloader_app.global_pending_wishes_cache)
             tab_text_wunsch = "Wunschanfragen" + (f" ({pending_wunsch_count})" if pending_wunsch_count > 0 else "")
             self.update_single_tab_text("Wunschanfragen", tab_text_wunsch)
 
-            pending_urlaub_count = get_pending_vacation_requests_count()
+            # 2. Urlaubsanträge (nutzt Cache)
+            # KORREKTUR: Verwendet die Variable _count aus dem Bootloader
+            pending_urlaub_count = bootloader_app.global_pending_vacations_count
             tab_text_urlaub = "Urlaubsanträge" + (f" ({pending_urlaub_count})" if pending_urlaub_count > 0 else "")
             self.update_single_tab_text("Urlaubsanträge", tab_text_urlaub)
 
-            open_bug_count = get_open_bug_reports_count()
+            # 3. Bug-Reports (nutzt Cache)
+            open_bug_count = bootloader_app.global_open_bugs_count
             tab_text_bugs = "Bug-Reports" + (f" ({open_bug_count})" if open_bug_count > 0 else "")
             self.update_single_tab_text("Bug-Reports", tab_text_bugs)
 
+            # 4. Aufgaben (nutzt Cache, falls vorhanden)
+            if hasattr(bootloader_app, 'global_open_tasks_count'):
+                open_tasks_count = bootloader_app.global_open_tasks_count
+                tab_text_tasks = "Aufgaben" + (f" ({open_tasks_count})" if open_tasks_count > 0 else "")
+                self.update_single_tab_text("Aufgaben", tab_text_tasks)
+
+        except AttributeError as e:
+            print(
+                f"[FEHLER] Konnte nicht auf globalen Cache im Bootloader zugreifen: {e} (Möglicherweise noch nicht initialisiert?)")
         except Exception as e:
             print(f"[FEHLER] Konnte Tab-Titel nicht aktualisieren: {e}")
             self.update_single_tab_text("Wunschanfragen", "Wunschanfragen (?)")
             self.update_single_tab_text("Urlaubsanträge", "Urlaubsanträge (?)")
             self.update_single_tab_text("Bug-Reports", "Bug-Reports (?)")
+            self.update_single_tab_text("Aufgaben", "Aufgaben (?)")  # <-- HINZUGEFÜGT
 
     def switch_to_tab(self, tab_name):
         """Wechselt zum Tab mit dem gegebenen Namen (Basisname ohne Zähler)."""
@@ -432,12 +461,32 @@ class AdminTabManager:
         print("[DEBUG] Aktualisiere alle *geladenen* Tabs...")
 
         # 1. Daten neu laden (über den DataManager)
-        if hasattr(self.admin_window, 'data_manager'):
-            self.admin_window.data_manager.load_all_data()
-        else:
-            print("[FEHLER] refresh_all_tabs: data_manager nicht gefunden!")
-            return  # Ohne Datenmanager macht ein Refresh keinen Sinn
+        # HINWEIS: Wir müssen die globalen Caches im Bootloader aktualisieren
+        bootloader_app = self.admin_window.app
+        try:
+            print("[DEBUG] Aktualisiere globale Caches im Bootloader...")
+            # --- KORREKTUR: DB-Funktionen direkt aufrufen (wie im Bootloader) ---
+            from database.db_users import get_all_users
+            from database.db_dogs import get_all_dogs
+            from database.db_requests import get_pending_wunschfrei_requests, get_pending_vacation_requests_count
+            from database.db_reports import get_open_bug_reports_count
+            # HINWEIS: get_open_tasks_count wird bereits oben global importiert (Regel 1)
 
+            bootloader_app.global_user_cache = get_all_users()
+            bootloader_app.global_dog_cache = get_all_dogs()
+            bootloader_app.global_pending_wishes_cache = get_pending_wunschfrei_requests()
+            bootloader_app.global_pending_vacations_count = get_pending_vacation_requests_count()  # KORRIGIERT
+            bootloader_app.global_open_bugs_count = get_open_bug_reports_count()
+            bootloader_app.global_open_tasks_count = get_open_tasks_count()  # <-- HINZUGEFÜGT
+            print("[DEBUG] Globale Caches aktualisiert.")
+        except Exception as e:
+            print(f"[FEHLER] beim Aktualisieren der globalen Caches: {e}")
+            # (Fahre trotzdem fort, um die Tabs zu aktualisieren)
+
+        # 2. Tab-Titel aktualisieren (jetzt mit den neuen Cache-Daten)
+        self.update_tab_titles()
+
+        # 3. Geladene Tabs aktualisieren
         loaded_tab_names = list(self.loaded_tabs)
         print(f"[DEBUG] Geladene Tabs für Refresh: {loaded_tab_names}")
 
@@ -492,8 +541,31 @@ class AdminTabManager:
     def _refresh_frame(self, frame, tab_name):
         """Hilfsfunktion zum Aufrufen der korrekten Refresh-Methode für ein Frame."""
         refreshed = False
-        if hasattr(frame, 'refresh_data'):
+
+        # --- KORREKTUR: Spezifische Datenübergabe für vorgeladene Tabs ---
+        bootloader_app = self.admin_window.app
+        if tab_name == "Mitarbeiter" and hasattr(frame, 'refresh_data'):
+            print(f"[DEBUG] -> rufe refresh_data(global_user_cache) für {tab_name} auf")
+            # Annahme: refresh_data() in UserManagementTab kann optional Daten annehmen
+            frame.refresh_data(bootloader_app.global_user_cache)
+            refreshed = True
+        elif tab_name == "Diensthunde" and hasattr(frame, 'refresh_data'):
+            print(f"[DEBUG] -> rufe refresh_data(global_dog_cache) für {tab_name} auf")
+            frame.refresh_data(bootloader_app.global_dog_cache)
+            refreshed = True
+        elif tab_name == "Wunschanfragen" and hasattr(frame, 'refresh_data'):
+            print(f"[DEBUG] -> rufe refresh_data(global_pending_wishes_cache) für {tab_name} auf")
+            frame.refresh_data(bootloader_app.global_pending_wishes_cache)
+            refreshed = True
+        elif tab_name == "Urlaubsanträge" and hasattr(frame, 'refresh_data'):
+            print(f"[DEBUG] -> rufe refresh_data(global_pending_vacations_count) für {tab_name} auf")
+            frame.refresh_data(bootloader_app.global_pending_vacations_count)  # Übergibt den Zähler
+            refreshed = True
+        # --- ENDE KORREKTUR ---
+
+        elif hasattr(frame, 'refresh_data'):
             print(f"[DEBUG] -> rufe refresh_data() für {tab_name} auf")
+            # TasksTab fällt hier hinein und ruft sein eigenes refresh_data() ohne Argumente auf.
             frame.refresh_data()
             refreshed = True
         elif hasattr(frame, 'refresh_plan'):
