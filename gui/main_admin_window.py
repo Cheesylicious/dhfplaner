@@ -14,6 +14,10 @@ from .admin_window.admin_notification_manager import AdminNotificationManager
 from .admin_window.admin_utils import AdminUtils
 # -------------------------------
 
+# --- NEUER IMPORT FÜR THREADING ---
+from utils.threading_utils import ThreadManager
+# ----------------------------------
+
 # --- DB-IMPORTE FÜR LOGOUT ---
 from database.db_users import log_user_logout
 # -------------------------------
@@ -68,6 +72,12 @@ class MainAdminWindow(tk.Toplevel):
         # Utils zuerst, da andere Manager es nutzen könnten
         self.utils = AdminUtils(self)
 
+        # --- NEU: ThreadManager hier initialisieren ---
+        # Er muss nach 'self' (dem root-Fenster) und vor den Managern,
+        # die ihn verwenden (z.B. NotificationManager), initialisiert werden.
+        self.thread_manager = ThreadManager(self)
+        # -----------------------------------------------
+
         # DataManager (lädt shift_frequency beim Init)
         self.data_manager = AdminDataManager(self)
 
@@ -109,6 +119,7 @@ class MainAdminWindow(tk.Toplevel):
         self.protocol("WM_DELETE_WINDOW", self.on_close)
 
         # 4. Periodische Checks starten (über NotificationManager)
+        #    Diese werden nun intern den ThreadManager verwenden.
         self.notification_manager.start_checkers()
 
         # 5. Tab-Wechsel-Event binden (an TabManager)

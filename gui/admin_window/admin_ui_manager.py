@@ -47,7 +47,6 @@ class AdminUIManager:
         """Erstellt den Header-Bereich (Benachrichtigungen und Einstellungsmenü)."""
 
         # Frame für Benachrichtigungen (links)
-        # Speichere Referenz im Hauptfenster, damit NotificationManager darauf zugreifen kann
         self.admin_window.notification_frame = ttk.Frame(self.header_frame)
         self.admin_window.notification_frame.pack(side="left", fill="x", expand=True, padx=(0, 10))
         ttk.Label(self.admin_window.notification_frame, text="").pack()  # Platzhalter
@@ -58,12 +57,10 @@ class AdminUIManager:
         settings_menu = tk.Menu(settings_menubutton, tearoff=0)
         settings_menubutton["menu"] = settings_menu
 
-        # Hole Referenzen auf die Action-Handler und Tab-Manager
         action_handler = self.admin_window.action_handler
         tab_manager = self.admin_window.tab_manager
 
         # Menüeinträge hinzufügen
-        # Diese rufen jetzt Methoden im AdminActionHandler oder AdminTabManager auf
         settings_menu.add_command(label="Schichtarten", command=action_handler.open_shift_types_window)
         settings_menu.add_separator()
         settings_menu.add_command(label="Mitarbeiter-Sortierung", command=action_handler.open_user_order_window)
@@ -90,6 +87,10 @@ class AdminUIManager:
 
     def open_bug_report_dialog(self):
         """ Öffnet den Dialog zum Melden eines Bugs. """
-        # Der Callback muss im NotificationManager liegen, da er Header/Tabs aktualisiert
-        callback = self.admin_window.notification_manager.check_for_updates
+
+        # --- KORREKTUR: AttributeError ---
+        # Ruft die neue, nicht-blockierende Funktion 'check_for_updates_threaded' auf.
+        callback = self.admin_window.notification_manager.check_for_updates_threaded
+        # --- ENDE KORREKTUR ---
+
         BugReportDialog(self.admin_window, self.user_data['id'], callback)

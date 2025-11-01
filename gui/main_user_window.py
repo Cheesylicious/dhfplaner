@@ -9,6 +9,7 @@ import calendar
 # --- NEUE IMPORTE für Threading ---
 import threading
 from queue import Queue, Empty
+from utils.threading_utils import ThreadManager
 # ---------------------------------
 
 # --- WICHTIGE IMPORTE ---
@@ -22,7 +23,7 @@ from .tabs.chat_tab import ChatTab
 from .dialogs.bug_report_dialog import BugReportDialog
 from .dialogs.tutorial_window import TutorialWindow
 from .holiday_manager import HolidayManager
-from .event_manager import EventManager  # Importiert für get_event_type
+from .event_manager import EventManager
 from database.db_shifts import get_all_shift_types
 from database.db_requests import (get_unnotified_requests, mark_requests_as_notified,
                                   get_unnotified_vacation_requests_for_user, mark_vacation_requests_as_notified,
@@ -31,20 +32,17 @@ from database.db_reports import (get_unnotified_bug_reports_for_user, mark_bug_r
                                  get_reports_awaiting_feedback_for_user)
 from database.db_users import mark_tutorial_seen, log_user_logout
 from .tab_lock_manager import TabLockManager
-from database.db_core import load_config_json, load_shift_frequency, save_shift_frequency  # Angepasste Imports
+from database.db_core import load_config_json, load_shift_frequency, save_shift_frequency
 from database.db_chat import get_senders_with_unread_messages
-# --- NEUER IMPORT FÜR DB-GESTEUERTE REIHENFOLGE ---
 from .user_tab_order_manager import UserTabOrderManager as TabOrderManager
 
-# USER_TAB_ORDER_FILE = 'user_tab_order_config.json' # ENTFERNT
 DEFAULT_RULES = {"Daily": {}, "Sa-So": {}, "Fr": {}, "Mo-Do": {}, "Holiday": {}, "Colors": {}}
 
-
-# Die ursprüngliche Klasse TabOrderManager wurde entfernt.
 
 class TabOrderWindow(tk.Toplevel):
     """Fenster zum Anpassen der Reiter-Reihenfolge (Nutzt jetzt DB-Manager)."""
 
+    # (Diese Klasse bleibt unverändert)
     def __init__(self, master, callback, all_tab_names):
         super().__init__(master)
         self.callback = callback
@@ -62,11 +60,9 @@ class TabOrderWindow(tk.Toplevel):
         self.listbox.pack(fill='x', expand=True, pady=10)
 
         self.current_order = TabOrderManager.load_order()
-        # Stelle sicher, dass alle Tabs vorhanden sind, auch neue
         for tab in all_tab_names:
             if tab not in self.current_order:
                 self.current_order.append(tab)
-        # Entferne alte, nicht mehr existierende Tabs
         self.current_order = [tab for tab in self.current_order if tab in all_tab_names]
 
         for item in self.current_order:
@@ -93,7 +89,6 @@ class TabOrderWindow(tk.Toplevel):
     def on_drag(self, event):
         if self.drag_start_index is None:
             return
-
         current_index = self.listbox.nearest(event.y)
         if current_index != self.drag_start_index:
             item = self.listbox.get(self.drag_start_index)
@@ -109,7 +104,6 @@ class TabOrderWindow(tk.Toplevel):
 
     def save(self):
         new_order = list(self.listbox.get(0, tk.END))
-        # Nutzt TabOrderManager (jetzt DB-Manager)
         if TabOrderManager.save_order(new_order):
             self.callback(new_order)
             self.destroy()
@@ -123,6 +117,7 @@ class MainUserWindow(tk.Toplevel):
         super().__init__(master)
         self.app = app
         self.user_data = user_data
+        self.user_id = self.user_data['id']  # Hilfsvariable
         self.show_request_popups = True
         full_name = f"{self.user_data['vorname']} {self.user_data['name']}".strip()
         self.title(f"Planer - Angemeldet als {full_name}")
@@ -135,7 +130,7 @@ class MainUserWindow(tk.Toplevel):
         else:
             self.current_display_date = today.replace(month=today.month + 1, day=1)
 
-        # Basisdaten laden (passiert im Lade-Thread)
+        # Basisdaten laden (bleibt synchron, da für UI-Aufbau benötigt)
         self.shift_types_data = {}
         self.staffing_rules = self.load_staffing_rules()
         self.current_year_holidays = {}
@@ -146,14 +141,18 @@ class MainUserWindow(tk.Toplevel):
         self._load_events_for_year(self.current_display_date.year)
         print("[DEBUG] MainUserWindow.__init__: Basisdaten geladen.")
 
+        # --- NEU: ThreadManager initialisieren ---
+        self.thread_manager = ThreadManager(self)
+        # -----------------------------------------
+
         # --- UI-Gerüst aufbauen ---
-        self.setup_ui()  # Erstellt Header, leeres Notebook etc.
+        self.setup_ui()
         self.setup_footer()
 
         self.protocol("WM_DELETE_WINDOW", self.on_close)
 
         # --- Periodische Checks ---
-        self.after(500, self.run_periodic_checks)
+        self.start_periodic_checkers()  # NEU
 
         if not self.user_data.get('has_seen_tutorial'):
             self.show_tutorial()
@@ -163,16 +162,12 @@ class MainUserWindow(tk.Toplevel):
 
         if self.notebook.tabs():
             self.notebook.select(0)
-
-            # --- Expliziten Aufruf wieder hinzufügen ---
-            # Dieser Aufruf startet das Laden von Tab 0, ohne auf das Event
-            # zu warten (welches evtl. noch nicht ausgelöst wird).
             self.on_tab_changed(None)
-            # --- ENDE ---
 
         print("[DEBUG] MainUserWindow.__init__: Initialisierung abgeschlossen.")
 
-    # --- NEUE FUNKTIONEN FÜR TAB-THREADING ---
+    # --- FUNKTIONEN FÜR TAB-THREADING (Lazy Loading) ---
+    # (Dieser Block bleibt unverändert, er nutzt das alte Threading-Modell)
 
     def _load_tab_threaded(self, tab_name, TabClass, tab_index):
         """
@@ -181,24 +176,15 @@ class MainUserWindow(tk.Toplevel):
         """
         try:
             print(f"[Thread] Lade Tab: {tab_name}...")
-
-            # WICHTIG: Prüfen, welches Argument die Tab-Klasse erwartet
-            # (self = MainUserWindow, self.user_data = dict)
-
-            # --- KORREKTUR: "Mein Urlaub" benötigt jetzt auch 'self' (die app Instanz) ---
             if tab_name in ["Schichtplan", "Chat", "Bug-Reports", "Mein Urlaub"]:
                 real_tab = TabClass(self.notebook, self)
             else:
-                # --- ENDE KORREKTUR ---
-
-                # Fallback für Tabs, die nur user_data erwarten (wie MyRequestsTab)
                 try:
                     real_tab = TabClass(self.notebook, self.user_data)
                 except TypeError:
                     print(f"[FEHLER] Fallback-Instanziierung für {tab_name} fehlgeschlagen. Versuche mit 'self'.")
                     real_tab = TabClass(self.notebook, self)
 
-            # Ergebnis in die Queue legen
             self.tab_load_queue.put((tab_name, real_tab, tab_index))
             print(f"[Thread] Tab '{tab_name}' fertig geladen.")
         except Exception as e:
@@ -218,7 +204,6 @@ class MainUserWindow(tk.Toplevel):
 
             placeholder_frame = self.tab_frames[tab_name]
 
-            # Prüfen ob der Platzhalter noch existiert (wichtig bei schnellem Tab-Wechsel)
             if not placeholder_frame.winfo_exists():
                 print(f"[GUI-Checker] Platzhalter für {tab_name} existiert nicht mehr. Abbruch.")
                 if tab_name in self.loading_tabs:
@@ -230,26 +215,18 @@ class MainUserWindow(tk.Toplevel):
                           text=f"Fehler beim Laden:\n{real_tab}",
                           font=("Segoe UI", 12), foreground="red").pack(expand=True, anchor="center")
                 for widget in placeholder_frame.winfo_children():
-                    if isinstance(widget, ttk.Label) and "Lade" in widget.c_get("text"):
+                    if isinstance(widget, ttk.Label) and "Lade" in widget.cget("text"):
                         widget.destroy()
                 if tab_name in self.loading_tabs:
                     self.loading_tabs.remove(tab_name)
             else:
                 tab_options = self.notebook.tab(placeholder_frame)
 
-                # --- Kaskadeneffekt durch unbind/bind stoppen ---
                 self.notebook.unbind("<<NotebookTabChanged>>")
-
                 self.notebook.insert(placeholder_frame, real_tab, **tab_options)
                 self.notebook.forget(placeholder_frame)
-
-                # WICHTIG: Den neuen Tab explizit auswählen, damit der
-                # Fokus nicht auf dem nächsten Platzhalter landet.
                 self.notebook.select(real_tab)
-
-                # Binding wieder hinzufügen
                 self.notebook.bind("<<NotebookTabChanged>>", self.on_tab_changed)
-                # --- ENDE ---
 
                 self.loaded_tabs.add(tab_name)
                 if tab_name in self.loading_tabs:
@@ -260,6 +237,9 @@ class MainUserWindow(tk.Toplevel):
 
         except Empty:
             pass
+
+        if not self.winfo_exists():
+            return
 
         if not self.tab_load_queue.empty() or self.loading_tabs:
             self.after(100, self._check_tab_load_queue)
@@ -274,7 +254,7 @@ class MainUserWindow(tk.Toplevel):
         """
         try:
             selected_widget_name = self.notebook.select()
-            if not selected_widget_name:  # Kann passieren, wenn alle Tabs geschlossen werden
+            if not selected_widget_name:
                 return
             tab_index = self.notebook.index(selected_widget_name)
             tab_name = self.notebook.tab(tab_index, "text")
@@ -283,7 +263,6 @@ class MainUserWindow(tk.Toplevel):
 
         if tab_name in self.loaded_tabs or tab_name in self.loading_tabs:
             return
-
         if tab_name not in self.tab_definitions:
             return
 
@@ -292,30 +271,26 @@ class MainUserWindow(tk.Toplevel):
         TabClass = self.tab_definitions[tab_name]
         placeholder_frame = self.tab_frames[tab_name]
 
-        # 1. Prüfen, ob der Tab gesperrt ist. Wenn ja, nicht laden.
         if TabLockManager.is_tab_locked(tab_name):
             print(f"[LazyLoad] Tab '{tab_name}' ist gesperrt. Ladevorgang abgebrochen.")
-            self.loaded_tabs.add(tab_name)  # Als "geladen" markieren, um es nicht nochmal zu versuchen
+            self.loaded_tabs.add(tab_name)
             return
 
-        # 2. "Wird geladen..."-Nachricht anzeigen
-        # (Sicherstellen, dass nicht mehrere Labels gestapelt werden)
         if not any(isinstance(w, ttk.Label) for w in placeholder_frame.winfo_children()):
             ttk.Label(placeholder_frame, text=f"Lade {tab_name}...",
                       font=("Segoe UI", 16)).pack(expand=True, anchor="center")
 
-        # 3. Status auf "lädt" setzen
         self.loading_tabs.add(tab_name)
 
-        # 4. Hintergrund-Thread starten
         threading.Thread(
             target=self._load_tab_threaded,
             args=(tab_name, TabClass, tab_index),
             daemon=True
         ).start()
 
-        # 5. Den Queue-Checker starten (falls er nicht schon läuft)
         if not self.tab_load_checker_running:
+            if not self.winfo_exists():
+                return
             print("[GUI-Checker] Starte Checker-Loop.")
             self.tab_load_checker_running = True
             self.after(100, self._check_tab_load_queue)
@@ -323,7 +298,7 @@ class MainUserWindow(tk.Toplevel):
     # ----------------------------------------
 
     def setup_styles(self):
-        # ... (unverändert) ...
+        # (Unverändert)
         style = ttk.Style(self)
         try:
             style.theme_use('clam')
@@ -336,17 +311,17 @@ class MainUserWindow(tk.Toplevel):
         style.map('Logout.TButton', background=[('active', 'goldenrod')], foreground=[('active', 'black')])
 
     def on_close(self):
-        # ... (unverändert) ...
+        # (Unverändert)
         log_user_logout(self.user_data['id'], self.user_data['vorname'], self.user_data['name'])
         self.app.on_app_close()
 
     def logout(self):
-        # ... (unverändert) ...
+        # (Unverändert)
         log_user_logout(self.user_data['id'], self.user_data['vorname'], self.user_data['name'])
         self.app.on_logout(self)
 
     def setup_ui(self):
-        # ... (unverändert) ...
+        # (Unverändert)
         header_frame = ttk.Frame(self);
         header_frame.pack(fill="x", padx=10, pady=(5, 0))
         ttk.Button(header_frame, text="Tutorial", command=self.show_tutorial).pack(side="left", padx=(0, 5))
@@ -357,7 +332,6 @@ class MainUserWindow(tk.Toplevel):
         self.notebook = ttk.Notebook(self);
         self.notebook.pack(fill="both", expand=True, padx=10, pady=10)
 
-        # --- LAZY LOADING SETUP ---
         self.tab_definitions = {
             "Schichtplan": UserShiftPlanTab,
             "Chat": ChatTab,
@@ -368,18 +342,15 @@ class MainUserWindow(tk.Toplevel):
         self.tab_frames = {};
         self.loaded_tabs = set()
 
-        # --- NEU: Threading für Tabs ---
         self.loading_tabs = set()
         self.tab_load_queue = Queue()
         self.tab_load_checker_running = False
-        # -------------------------------
 
         self.setup_lazy_tabs()
 
     def setup_lazy_tabs(self):
-        # ... (unverändert) ...
+        # (Unverändert)
         print("[DEBUG] setup_lazy_tabs: Erstelle Platzhalter...")
-        # Lade die Reihenfolge über den DB-Manager
         saved_order = TabOrderManager.load_order()
         all_defined_tabs = self.tab_definitions.keys()
         final_order = [tab for tab in saved_order if tab in all_defined_tabs]
@@ -391,41 +362,148 @@ class MainUserWindow(tk.Toplevel):
             if TabLockManager.is_tab_locked(tab_name):
                 self.create_lock_overlay(frame)
 
+    # --- START: PERIODISCHE CHECKS (THREAD-BASIERT) ---
+
+    def start_periodic_checkers(self):
+        """Startet die beiden periodischen Checker-Schleifen."""
+        self.after(500, self.run_periodic_checks_threaded)
+        self.after(2000, self.check_chat_notifications_threaded)
+
+    # --- 1. Schleife: Allgemeine Benachrichtigungen (60 Sek.) ---
+
+    def run_periodic_checks_threaded(self):
+        """[GUI-Thread] Startet die Worker für die 60-Sekunden-Checks."""
+        if not self.winfo_exists(): return
+
+        print("[DEBUG] run_periodic_checks_threaded: Starte Worker...")
+        # --- KORREKTUR: 'args=' entfernt ---
+        self.thread_manager.start_worker(
+            self._fetch_periodic_data,
+            self._on_periodic_data_fetched,
+            self.user_id,
+            self.show_request_popups
+        )
+        # -----------------------------------
+
+    def _fetch_periodic_data(self, user_id, show_popups):
+        """
+        [WORKER-THREAD] Führt alle 60-Sekunden-DB-Abfragen aus.
+        """
+        results = {
+            "all_notifications_data": None,
+            "admin_requests_count": 0,
+            "bug_feedback_ids": []
+        }
+        try:
+            if show_popups:
+                unnotified_requests = get_unnotified_requests(user_id)
+                unnotified_vacation = get_unnotified_vacation_requests_for_user(user_id)
+                unnotified_reports = get_unnotified_bug_reports_for_user(user_id)
+                results["all_notifications_data"] = {
+                    "requests": unnotified_requests,
+                    "vacation": unnotified_vacation,
+                    "reports": unnotified_reports
+                }
+
+            results["admin_requests_count"] = get_pending_admin_requests_for_user(user_id)
+            results["bug_feedback_ids"] = get_reports_awaiting_feedback_for_user(user_id)
+
+            return results
+        except Exception as e:
+            print(f"[FEHLER] in _fetch_periodic_data (Thread): {e}")
+            return e
+
+    def _on_periodic_data_fetched(self, result, error):
+        """
+        [GUI-Thread] Verarbeitet die Ergebnisse der 60-Sekunden-Checks.
+        """
+        if not self.winfo_exists():
+            print("[DEBUG] _on_periodic_data_fetched: Fenster existiert nicht mehr.")
+            return
+
+        if error:
+            print(f"[FEHLER] _on_periodic_data_fetched: {error}")
+        elif isinstance(result, Exception):
+            print(f"[FEHLER] _on_periodic_data_fetched (von Thread): {result}")
+        elif result:
+            if self.show_request_popups:
+                self._process_all_notifications(result.get("all_notifications_data"))
+
+            self._update_admin_requests_ui(result.get("admin_requests_count", 0))
+            self._update_bug_feedback_ui(result.get("bug_feedback_ids", []))
+
+        self.after(60000, self.run_periodic_checks_threaded)
+
+    # --- 2. Schleife: Chat-Benachrichtigungen (10 Sek.) ---
+
+    def check_chat_notifications_threaded(self):
+        """[GUI-Thread] Startet den Worker für die 10-Sekunden-Chat-Checks."""
+        if not self.winfo_exists(): return
+
+        # --- KORREKTUR: 'args=' entfernt ---
+        self.thread_manager.start_worker(
+            get_senders_with_unread_messages,
+            self._on_chat_data_fetched,
+            self.user_id
+        )
+        # -----------------------------------
+
+    def _on_chat_data_fetched(self, result, error):
+        """[GUI-Thread] Verarbeitet das Ergebnis der Chat-Abfrage."""
+        if not self.winfo_exists():
+            print("[DEBUG] _on_chat_data_fetched: Fenster existiert nicht mehr.")
+            return
+
+        senders = result
+        if error:
+            print(f"[FEHLER] _on_chat_data_fetched: {error}")
+            senders = []
+        elif isinstance(result, Exception):
+            print(f"[FEHLER] _on_chat_data_fetched (von Thread): {result}")
+            senders = []
+
+        try:
+            for widget in self.chat_notification_frame.winfo_children():
+                widget.destroy()
+
+            if senders:
+                latest_sender_id = senders[0]['sender_id']
+                total_unread = sum(s['unread_count'] for s in senders)
+                action = lambda event=None: self.go_to_chat(latest_sender_id)
+                self.chat_notification_frame.pack(fill='x', side='top', ipady=5, before=self.notebook)
+                self.chat_notification_frame.bind("<Button-1>", action)
+                label_text = f"Sie haben {total_unread} neue Nachricht(en)! Hier klicken zum Anzeigen."
+                notification_label = tk.Label(self.chat_notification_frame, text=label_text, bg='tomato', fg='white',
+                                              font=('Segoe UI', 12, 'bold'), cursor="hand2")
+                notification_label.pack(side='left', padx=15, pady=5)
+                notification_label.bind("<Button-1>", action)
+                show_button = ttk.Button(self.chat_notification_frame, text="Anzeigen", command=action)
+                show_button.pack(side='right', padx=15)
+            else:
+                self.chat_notification_frame.pack_forget()
+        except Exception as e:
+            print(f"[FEHLER] bei _on_chat_data_fetched UI-Update: {e}")
+            if self.chat_notification_frame.winfo_ismapped():
+                self.chat_notification_frame.pack_forget()
+        finally:
+            self.after(10000, self.check_chat_notifications_threaded)
+
+    # --- Veraltete Funktionen ---
     def run_periodic_checks(self):
-        # ... (unverändert) ...
-        self.check_all_notifications()
-        self.check_for_admin_requests()
-        self.check_for_bug_feedback_requests()
-        self.check_chat_notifications()
-        self.after(60000, self.run_periodic_checks)
+        pass
 
     def check_chat_notifications(self):
-        # ... (unverändert) ...
-        for widget in self.chat_notification_frame.winfo_children():
-            widget.destroy()
-        senders = get_senders_with_unread_messages(self.user_data['id'])
-        if senders:
-            latest_sender_id = senders[0]['sender_id']
-            total_unread = sum(s['unread_count'] for s in senders)
-            action = lambda event=None: self.go_to_chat(latest_sender_id)
-            self.chat_notification_frame.pack(fill='x', side='top', ipady=5, before=self.notebook)
-            self.chat_notification_frame.bind("<Button-1>", action)
-            label_text = f"Sie haben {total_unread} neue Nachricht(en)! Hier klicken zum Anzeigen."
-            notification_label = tk.Label(self.chat_notification_frame, text=label_text, bg='tomato', fg='white',
-                                          font=('Segoe UI', 12, 'bold'), cursor="hand2")
-            notification_label.pack(side='left', padx=15, pady=5)
-            notification_label.bind("<Button-1>", action)
-            show_button = ttk.Button(self.chat_notification_frame, text="Anzeigen", command=action)
-            show_button.pack(side='right', padx=15)
-        else:
-            self.chat_notification_frame.pack_forget()
-        self.after(10000, self.check_chat_notifications)
+        pass
+
+    # --- ENDE: PERIODISCHE CHECKS (THREAD-BASIERT) ---
 
     def go_to_chat(self, user_id):
-        # ... (unverändert) ...
+        # (Unverändert)
         self.switch_to_tab("Chat")
 
         def _select_user_after_load():
+            if not self.winfo_exists(): return
+
             if "Chat" in self.loaded_tabs and hasattr(self.tab_frames["Chat"], "select_user"):
                 print(f"[DEBUG] Chat-Tab ist geladen, rufe select_user({user_id}) auf.")
                 self.tab_frames["Chat"].select_user(user_id)
@@ -438,7 +516,7 @@ class MainUserWindow(tk.Toplevel):
         _select_user_after_load()
 
     def switch_to_tab(self, tab_name):
-        # ... (unverändert) ...
+        # (Unverändert)
         if tab_name in self.tab_frames:
             frame = self.tab_frames[tab_name]
             self.notebook.select(frame)
@@ -446,7 +524,7 @@ class MainUserWindow(tk.Toplevel):
             print(f"[DEBUG] switch_to_tab: Tab '{tab_name}' nicht in self.tab_frames gefunden.")
 
     def create_lock_overlay(self, parent_frame):
-        # ... (unverändert) ...
+        # (Unverändert)
         overlay = tk.Frame(parent_frame, bg='gray90', relief='raised', borderwidth=2)
         overlay.place(relx=0, rely=0, relwidth=1, relheight=1, anchor='nw')
         msg_frame = ttk.Frame(overlay, style="Overlay.TFrame");
@@ -463,11 +541,11 @@ class MainUserWindow(tk.Toplevel):
         overlay.bind("<B1-Motion>", lambda e: "break")
 
     def get_tab(self, tab_name):
-        # ... (unverändert) ...
+        # (Unverändert)
         return self.tab_frames.get(tab_name)
 
     def setup_footer(self):
-        # ... (unverändert) ...
+        # (Unverändert)
         footer_frame = ttk.Frame(self, padding=5);
         footer_frame.pack(fill="x", side="bottom")
         ttk.Button(footer_frame, text="Abmelden", command=self.logout, style='Logout.TButton').pack(side="left",
@@ -476,22 +554,22 @@ class MainUserWindow(tk.Toplevel):
                    style='Bug.TButton').pack(side="right", padx=10, pady=5)
 
     def open_bug_report_dialog(self):
-        # ... (unverändert) ...
+        # (Unverändert)
         BugReportDialog(self, self.user_data['id'])
 
     def show_tutorial(self):
-        # ... (unverändert) ...
+        # (Unverändert)
         TutorialWindow(self);
         mark_tutorial_seen(self.user_data['id']);
         self.user_data['has_seen_tutorial'] = 1
 
     def open_tab_order_window(self):
-        # Ruft TabOrderWindow auf, das nun den DB-Manager verwendet.
+        # (Unverändert)
         all_tab_names = list(self.tab_definitions.keys());
         TabOrderWindow(self, self.reorder_tabs, all_tab_names)
 
     def reorder_tabs(self, new_order):
-        # ... (unverändert) ...
+        # (Unverändert)
         try:
             selected_tab_frame = self.notebook.nametowidget(self.notebook.select())
         except tk.TclError:
@@ -510,53 +588,142 @@ class MainUserWindow(tk.Toplevel):
         elif self.notebook.tabs():
             self.notebook.select(0)
 
+    # --- UI-Update-Funktionen (aufgeteilt) ---
+
+    def _update_admin_requests_ui(self, count):
+        """[GUI-Thread] Aktualisiert die Admin-Anfrage-Leiste."""
+        if not self.winfo_exists(): return
+        try:
+            for widget in self.admin_request_frame.winfo_children(): widget.destroy()
+
+            if count > 0:
+                self.admin_request_frame.pack(fill='x', side='top', ipady=5, before=self.notebook)
+                label_text = f"Sie haben {count} offene Schichtanfrage vom Admin!" if count > 1 else "Sie haben 1 offene Schichtanfrage vom Admin!"
+                action = lambda event=None: self.go_to_shift_plan()
+                notification_label = tk.Label(self.admin_request_frame, text=label_text, bg='orange', fg='black',
+                                              font=('Segoe UI', 12, 'bold'), cursor="hand2")
+                notification_label.pack(side='left', padx=15, pady=5);
+                notification_label.bind("<Button-1>", action);
+                self.admin_request_frame.bind("<Button-1>", action)
+                show_button = ttk.Button(self.admin_request_frame, text="Anzeigen", command=action);
+                show_button.pack(side='right', padx=15)
+            else:
+                self.admin_request_frame.pack_forget()
+        except Exception as e:
+            print(f"[FEHLER] _update_admin_requests_ui: {e}")
+            if self.admin_request_frame.winfo_ismapped():
+                self.admin_request_frame.pack_forget()
+
+    def _update_bug_feedback_ui(self, report_ids):
+        """[GUI-Thread] Aktualisiert die Bug-Feedback-Leiste."""
+        if not self.winfo_exists(): return
+        try:
+            for widget in self.bug_feedback_frame.winfo_children(): widget.destroy()
+
+            count = len(report_ids)
+            if count > 0:
+                first_report_id = report_ids[0];
+                action = lambda event=None: self.go_to_bug_reports(first_report_id)
+                self.bug_feedback_frame.pack(fill='x', side='top', ipady=5, before=self.notebook);
+                self.bug_feedback_frame.bind("<Button-1>", action)
+                label_text = f"Deine Rückmeldung wird für {count} Bug-Report(s) benötigt!"
+                notification_label = tk.Label(self.bug_feedback_frame, text=label_text, bg='deepskyblue', fg='white',
+                                              font=('Segoe UI', 12, 'bold'), cursor="hand2")
+                notification_label.pack(side='left', padx=15, pady=5);
+                notification_label.bind("<Button-1>", action)
+                show_button = ttk.Button(self.bug_feedback_frame, text="Anzeigen", command=action);
+                show_button.pack(side='right', padx=15)
+            else:
+                self.bug_feedback_frame.pack_forget()
+        except Exception as e:
+            print(f"[FEHLER] _update_bug_feedback_ui: {e}")
+            if self.bug_feedback_frame.winfo_ismapped():
+                self.bug_feedback_frame.pack_forget()
+
+    def _process_all_notifications(self, data):
+        """
+        [GUI-Thread] Verarbeitet die Popup-Benachrichtigungen.
+        """
+        if not data or not self.winfo_exists():
+            return
+
+        all_messages = [];
+        tabs_to_refresh = []
+
+        unnotified_requests = data.get("requests", [])
+        unnotified_vacation = data.get("vacation", [])
+        unnotified_reports = data.get("reports", [])
+
+        try:
+            if unnotified_requests:
+                message_lines = ["Sie haben Neuigkeiten zu Ihren 'Wunschfrei'-Anträgen:"];
+                notified_ids = [req['id'] for req in unnotified_requests]
+                for req in unnotified_requests:
+                    req_date = datetime.strptime(req['request_date'], '%Y-%m-%d').strftime('%d.%m.%Y')
+                    status_line = f"- Ihr Antrag für den {req_date} wurde {req['status']}."
+                    if req['status'] == 'Abgelehnt' and req.get(
+                            'rejection_reason'): status_line += f" Grund: {req['rejection_reason']}"
+                    message_lines.append(status_line)
+                all_messages.append("\n".join(message_lines));
+                mark_requests_as_notified(notified_ids);
+                tabs_to_refresh.append("Meine Anfragen")
+
+            if unnotified_vacation:
+                message_lines = ["Es gibt Neuigkeiten zu Ihren Urlaubsanträgen:"];
+                notified_ids = [req['id'] for req in unnotified_vacation]
+                for req in unnotified_vacation:
+                    start = datetime.strptime(req['start_date'], '%Y-%m-%d').strftime('%d.%m');
+                    end = datetime.strptime(req['end_date'], '%Y-%m-%d').strftime('%d.%m.%Y')
+                    message_lines.append(f"- Ihr Urlaub von {start} bis {end} wurde {req['status']}.")
+                all_messages.append("\n".join(message_lines));
+                mark_vacation_requests_as_notified(notified_ids);
+                tabs_to_refresh.append("Mein Urlaub")
+
+            if unnotified_reports:
+                message_lines = ["Es gibt Neuigkeiten zu Ihren Fehlerberichten:"];
+                notified_ids = [report['id'] for report in unnotified_reports]
+                for report in unnotified_reports:
+                    title = report['title'];
+                    status = report['status'];
+                    message_lines.append(f"- Ihr Bericht '{title[:30]}...' hat jetzt den Status: {status}.")
+                all_messages.append("\n".join(message_lines));
+                mark_bug_reports_as_notified(notified_ids);
+                tabs_to_refresh.append("Bug-Reports")
+
+            if all_messages and self.show_request_popups:
+                messagebox.showinfo("Benachrichtigungen", "\n\n".join(all_messages), parent=self)
+                if self.winfo_exists():
+                    if "Meine Anfragen" in tabs_to_refresh and "Meine Anfragen" in self.loaded_tabs:
+                        self.tab_frames["Meine Anfragen"].refresh_data()
+                    if "Mein Urlaub" in tabs_to_refresh and "Mein Urlaub" in self.loaded_tabs:
+                        self.tab_frames["Mein Urlaub"].refresh_data()
+                    if "Bug-Reports" in tabs_to_refresh and "Bug-Reports" in self.loaded_tabs:
+                        if hasattr(self.tab_frames["Bug-Reports"], 'load_reports'):
+                            self.tab_frames["Bug-Reports"].load_reports()
+        except Exception as e:
+            print(f"[FEHLER] _process_all_notifications: {e}")
+
+    # Veraltete Funktionen
     def check_for_admin_requests(self):
-        # ... (unverändert) ...
-        for widget in self.admin_request_frame.winfo_children(): widget.destroy()
-        count = get_pending_admin_requests_for_user(self.user_data['id'])
-        if count > 0:
-            self.admin_request_frame.pack(fill='x', side='top', ipady=5, before=self.notebook)
-            label_text = f"Sie haben {count} offene Schichtanfrage vom Admin!" if count > 1 else "Sie haben 1 offene Schichtanfrage vom Admin!"
-            action = lambda event=None: self.go_to_shift_plan()
-            notification_label = tk.Label(self.admin_request_frame, text=label_text, bg='orange', fg='black',
-                                          font=('Segoe UI', 12, 'bold'), cursor="hand2")
-            notification_label.pack(side='left', padx=15, pady=5);
-            notification_label.bind("<Button-1>", action);
-            self.admin_request_frame.bind("<Button-1>", action)
-            show_button = ttk.Button(self.admin_request_frame, text="Anzeigen", command=action);
-            show_button.pack(side='right', padx=15)
-        else:
-            self.admin_request_frame.pack_forget()
+        pass
 
     def check_for_bug_feedback_requests(self):
-        # ... (unverändert) ...
-        for widget in self.bug_feedback_frame.winfo_children(): widget.destroy()
-        report_ids = get_reports_awaiting_feedback_for_user(self.user_data['id']);
-        count = len(report_ids)
-        if count > 0:
-            first_report_id = report_ids[0];
-            action = lambda event=None: self.go_to_bug_reports(first_report_id)
-            self.bug_feedback_frame.pack(fill='x', side='top', ipady=5, before=self.notebook);
-            self.bug_feedback_frame.bind("<Button-1>", action)
-            label_text = f"Deine Rückmeldung wird für {count} Bug-Report(s) benötigt!"
-            notification_label = tk.Label(self.bug_feedback_frame, text=label_text, bg='deepskyblue', fg='white',
-                                          font=('Segoe UI', 12, 'bold'), cursor="hand2")
-            notification_label.pack(side='left', padx=15, pady=5);
-            notification_label.bind("<Button-1>", action)
-            show_button = ttk.Button(self.bug_feedback_frame, text="Anzeigen", command=action);
-            show_button.pack(side='right', padx=15)
-        else:
-            self.bug_feedback_frame.pack_forget()
+        pass
+
+    def check_all_notifications(self):
+        pass
 
     def go_to_shift_plan(self):
-        # ... (unverändert) ...
+        # (Unverändert)
         self.switch_to_tab("Schichtplan")
 
     def go_to_bug_reports(self, report_id=None):
-        # ... (unverändert) ...
+        # (Unverändert)
         self.switch_to_tab("Bug-Reports")
 
         def _select_report_after_load():
+            if not self.winfo_exists(): return
+
             if "Bug-Reports" in self.loaded_tabs and hasattr(self.tab_frames["Bug-Reports"], "select_report"):
                 self.tab_frames["Bug-Reports"].select_report(report_id)
             elif "Bug-Reports" in self.loading_tabs or "Bug-Reports" not in self.loaded_tabs:
@@ -565,80 +732,29 @@ class MainUserWindow(tk.Toplevel):
         if report_id:
             _select_report_after_load()
 
-    def check_all_notifications(self):
-        # ... (unverändert) ...
-        all_messages = [];
-        tabs_to_refresh = []
-        unnotified_requests = get_unnotified_requests(self.user_data['id'])
-        if unnotified_requests:
-            message_lines = ["Sie haben Neuigkeiten zu Ihren 'Wunschfrei'-Anträgen:"];
-            notified_ids = [req['id'] for req in unnotified_requests]
-            for req in unnotified_requests:
-                req_date = datetime.strptime(req['request_date'], '%Y-%m-%d').strftime('%d.%m.%Y')
-                status_line = f"- Ihr Antrag für den {req_date} wurde {req['status']}."
-                if req['status'] == 'Abgelehnt' and req.get(
-                        'rejection_reason'): status_line += f" Grund: {req['rejection_reason']}"
-                message_lines.append(status_line)
-            all_messages.append("\n".join(message_lines));
-            mark_requests_as_notified(notified_ids);
-            tabs_to_refresh.append("Meine Anfragen")
-        unnotified_vacation = get_unnotified_vacation_requests_for_user(self.user_data['id'])
-        if unnotified_vacation:
-            message_lines = ["Es gibt Neuigkeiten zu Ihren Urlaubsanträgen:"];
-            notified_ids = [req['id'] for req in unnotified_vacation]
-            for req in unnotified_vacation:
-                start = datetime.strptime(req['start_date'], '%Y-%m-%d').strftime('%d.%m');
-                end = datetime.strptime(req['end_date'], '%Y-%m-%d').strftime('%d.%m.%Y')
-                message_lines.append(f"- Ihr Urlaub von {start} bis {end} wurde {req['status']}.")
-            all_messages.append("\n".join(message_lines));
-            mark_vacation_requests_as_notified(notified_ids);
-            tabs_to_refresh.append("Mein Urlaub")
-        unnotified_reports = get_unnotified_bug_reports_for_user(self.user_data['id'])
-        if unnotified_reports:
-            message_lines = ["Es gibt Neuigkeiten zu Ihren Fehlerberichten:"];
-            notified_ids = [report['id'] for report in unnotified_reports]
-            for report in unnotified_reports:
-                title = report['title'];
-                status = report['status'];
-                message_lines.append(f"- Ihr Bericht '{title[:30]}...' hat jetzt den Status: {status}.")
-            all_messages.append("\n".join(message_lines));
-            mark_bug_reports_as_notified(notified_ids);
-            tabs_to_refresh.append("Bug-Reports")
-
-        if all_messages and self.show_request_popups:
-            messagebox.showinfo("Benachrichtigungen", "\n\n".join(all_messages), parent=self)
-            if self.winfo_exists():
-                if "Meine Anfragen" in tabs_to_refresh and "Meine Anfragen" in self.loaded_tabs:
-                    self.tab_frames["Meine Anfragen"].refresh_data()
-                if "Mein Urlaub" in tabs_to_refresh and "Mein Urlaub" in self.loaded_tabs:
-                    self.tab_frames["Mein Urlaub"].refresh_data()
-                if "Bug-Reports" in tabs_to_refresh and "Bug-Reports" in self.loaded_tabs:
-                    if hasattr(self.tab_frames["Bug-Reports"], 'load_reports'):
-                        self.tab_frames["Bug-Reports"].load_reports()
-
     # --- Datenladefunktionen (bleiben gleich) ---
     def _load_holidays_for_year(self, year):
-        # ... (unverändert) ...
+        # (Unverändert)
         self.current_year_holidays = HolidayManager.get_holidays_for_year(year)
 
     def _load_events_for_year(self, year):
-        # ... (unverändert) ...
+        # (Unverändert)
         self.events = EventManager.get_events_for_year(year)
 
     def is_holiday(self, check_date):
-        # ... (unverändert) ...
+        # (Unverändert)
         return check_date in self.current_year_holidays
 
     def get_event_type(self, current_date):
-        # ... (unverändert) ...
+        # (Unverändert)
         return EventManager.get_event_type(current_date, self.events)
 
     def load_shift_types(self):
-        # ... (unverändert) ...
+        # (Unverändert)
         self.shift_types_data = {st['abbreviation']: st for st in get_all_shift_types()}
 
     def get_contrast_color(self, hex_color):
-        # ... (unverändert) ...
+        # (Unverändert)
         if not hex_color or not hex_color.startswith('#') or len(hex_color) != 7: return 'black'
         try:
             r, g, b = int(hex_color[1:3], 16), int(hex_color[3:5], 16), int(hex_color[5:7], 16)
@@ -648,15 +764,15 @@ class MainUserWindow(tk.Toplevel):
             return 'black'
 
     def load_staffing_rules(self):
-        # ... (unverändert) ...
+        # (Unverändert)
         rules = load_config_json('MIN_STAFFING_RULES');
         return rules if rules and 'Colors' in rules else DEFAULT_RULES
 
     def load_shift_frequency(self):
-        # ... (unverändert) ...
+        # (Unverändert)
         freq_data = load_shift_frequency()
         return freq_data if freq_data else {}
 
     def save_shift_frequency(self):
-        # ... (unverändert) ...
+        # (Unverändert)
         pass
