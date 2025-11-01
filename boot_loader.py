@@ -33,6 +33,12 @@ from gui.login_window import LoginWindow
 from gui.main_admin_window import MainAdminWindow
 from gui.main_user_window import MainUserWindow
 
+# --- NEU (P1-P4): Import des neuen Preloading-Managers (Regel 4) ---
+from gui.preloading_manager import PreloadingManager
+
+
+# --- ENDE NEU ---
+
 
 class Application(tk.Tk):
     """
@@ -59,7 +65,11 @@ class Application(tk.Tk):
         # --- ENDE KORREKTUR ---
 
         self.prewarm_thread = None
-        self.preload_thread = None
+        self.preload_thread = None  # Dieser Thread lädt P1a und P3 (Originalfunktion)
+
+        # --- NEU (P1-P4): Instanz für den Post-Login Preloading-Manager (P1b, P2) ---
+        self.preloading_manager = None
+        # --- ENDE NEU ---
 
         # --- Kern-Caches (bereits optimiert) ---
         self.shift_types_data = {}
@@ -68,6 +78,7 @@ class Application(tk.Tk):
         self.global_events_data = {}  # Dieser Cache wird jetzt vom DM gefüllt
 
         # --- NEU: Globale Caches für andere Tabs (Regel 2: Performance) ---
+        # (Diese werden jetzt wieder im preload_common_data (P3) geladen)
         self.global_user_cache = []
         self.global_dog_cache = []
         self.global_pending_wishes_cache = []  # Hält die volle Liste
@@ -82,7 +93,7 @@ class Application(tk.Tk):
         self.prewarm_thread = threading.Thread(target=db_core.prewarm_connection_pool, daemon=True)
         self.prewarm_thread.start()
 
-        print("[Boot Loader] Starte Common-Data-Pre-Loading Thread...")
+        print("[Boot Loader] Starte Common-Data-Pre-Loading Thread (P1a + P3)...")
         self.preload_thread = threading.Thread(target=self.preload_common_data, daemon=True)
         self.preload_thread.start()
 
@@ -206,8 +217,9 @@ class Application(tk.Tk):
         """
         THREAD-FUNKTION: Lädt alle notwendigen Anwendungsdaten parallel
         zum DB-Pre-Warming. Lädt auch den Schichtplan für den nächsten Monat vor.
+        (DIES IST DIE "ORIGINALFUNKTION", DIE BEIBEHALTEN WIRD - P1a + P3)
         """
-        print("[Preload Thread] Starte Daten-Caching...")
+        print("[Preload Thread] Starte Daten-Caching (P1a + P3)...")
         start_time = time.time()
 
         while not db_core.is_db_initialized():
@@ -242,37 +254,37 @@ class Application(tk.Tk):
             # --- ENDE KORREKTUR ---
 
             if self.data_manager is None:
-                print("[Preload Thread] Instanziiere ShiftPlanDataManager...")
+                print("[Preload Thread] Instanziiere ShiftPlanDataManager (P5-Cache)...")
                 self.data_manager = ShiftPlanDataManager(self)
 
-            # --- KORREKTUR: Lade den ZIELMONAT (nächster Monat) ---
+            # --- KORREKTUR: Lade den ZIELMONAT (nächster Monat) (P1a) ---
             target_month = self.current_display_date.month
-            print(f"[Preload Thread] Lade Schichtplan (Zielmonat: {target_year}-{target_month:02d})...")
+            print(f"[Preload Thread] Lade Schichtplan (P1a: Zielmonat: {target_year}-{target_month:02d})...")
             self.data_manager.load_and_process_data(target_year, target_month)
             print(f"[Preload Thread] Schichtplan für {target_year}-{target_month:02d} vorgeladen.")
             # --- ENDE KORREKTUR ---
 
-            # --- NEU: Globale Daten für andere Tabs vorladen (Regel 2) (JETZT KORRIGIERT) ---
-            print("[Preload Thread] Lade globale Benutzerliste...")
+            # --- NEU: Globale Daten für andere Tabs vorladen (P3) (JETZT KORRIGIERT) ---
+            print("[Preload Thread] Lade globale Benutzerliste (P3)...")
             self.global_user_cache = get_all_users()  # KORRIGIERT (verwendet get_all_users)
             print(f"[Preload Thread] {len(self.global_user_cache)} Benutzer geladen.")
 
-            print("[Preload Thread] Lade globale Diensthundeliste...")
+            print("[Preload Thread] Lade globale Diensthundeliste (P3)...")
             self.global_dog_cache = get_all_dogs()
             print(f"[Preload Thread] {len(self.global_dog_cache)} Hunde geladen.")
 
-            print("[Preload Thread] Lade offene Wunschanfragen...")
+            print("[Preload Thread] Lade offene Wunschanfragen (P3)...")
             self.global_pending_wishes_cache = get_pending_wunschfrei_requests()
             print(f"[Preload Thread] {len(self.global_pending_wishes_cache)} offene Wünsche geladen.")
 
-            print("[Preload Thread] Lade Zähler für offene Urlaubsanträge...")
+            print("[Preload Thread] Lade Zähler für offene Urlaubsanträge (P3)...")
             self.global_pending_vacations_count = get_pending_vacation_requests_count()  # KORRIGIERT (verwendet _count Funktion)
             print(f"[Preload Thread] {self.global_pending_vacations_count} offene Urlaube gezählt.")
 
-            print("[Preload Thread] Lade Zähler für offene Bug-Reports...")
+            print("[Preload Thread] Lade Zähler für offene Bug-Reports (P3)...")
             self.global_open_bugs_count = get_open_bug_reports_count()
             print(f"[Preload Thread] {self.global_open_bugs_count} offene Bugs gezählt.")
-            # --- ENDE NEU ---
+            # --- ENDE NEU (P3) ---
 
         except Exception as e:
             # Fängt Fehler ab (z.B. den 'year_int'-Fehler, falls er erneut auftritt)
@@ -311,6 +323,20 @@ class Application(tk.Tk):
             self.login_window = None
             self.main_window.deiconify()
 
+            # --- NEU (P1b + P2): Starte den Post-Login PreloadingManager ---
+            print("[Boot Loader] Initialisiere Post-Login PreloadingManager (P1b, P2)...")
+            self.preloading_manager = PreloadingManager(
+                app=self,
+                data_manager=self.data_manager,
+                main_window=self.main_window
+            )
+            # Starte die Ladekaskade (P1b -> P2)
+            self.preloading_manager.start_initial_preload()
+
+            # Starte den Verarbeitungs-Loop für die UI-Queue (P2)
+            self.main_window.after(500, self.preloading_manager.process_ui_queue)
+            # --- ENDE NEU ---
+
         except Exception as e:
             print(f"[FEHLER] Kritisches Laden des Hauptfensters fehlgeschlagen: {e}")
             import traceback
@@ -327,10 +353,22 @@ class Application(tk.Tk):
 
     def on_logout(self):
         print("[Boot Loader] Logout eingeleitet.")
+
+        # --- NEU (P1-P4): Preloader stoppen ---
+        if self.preloading_manager:
+            self.preloading_manager.stop()
+            self.preloading_manager = None
+        # --- ENDE NEU ---
+
         if self.main_window:
             self.main_window.destroy()
         self.main_window = None
         self.current_user_data = None
+
+        # --- NEU (P5): Globalen Dienstplan-Cache leeren ---
+        if self.data_manager:
+            self.data_manager.clear_all_monthly_caches()
+        # --- ENDE NEU ---
 
         # --- KORREKTUR: Zieldatum beim Logout zurücksetzen ---
         today = date.today()
@@ -351,6 +389,13 @@ class Application(tk.Tk):
 
     def on_app_close(self):
         print("[Boot Loader] Anwendung wird beendet.")
+
+        # --- NEU (P1-P4): Preloader stoppen ---
+        if self.preloading_manager:
+            self.preloading_manager.stop()
+            self.preloading_manager = None
+        # --- ENDE NEU ---
+
         try:
             if self.main_window:
                 self.main_window.destroy()
@@ -364,4 +409,3 @@ class Application(tk.Tk):
     def run(self):
         print("[DEBUG] Application.run: Starte root.mainloop()...")
         self.mainloop()
-
