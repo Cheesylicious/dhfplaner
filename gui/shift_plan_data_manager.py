@@ -19,7 +19,7 @@ class ShiftPlanDataManager:
     """
     Verantwortlich für das Laden, Vorverarbeiten und Berechnen aller Daten,
     die für die Anzeige des Dienstplans benötigt werden (Staffing, Stunden, Konflikte).
-    NUTZT INNOVATIVE BATCH-ABFRAGEN (Regel 2).
+    NUTZT INNOVATIVE BATCH-ABFRAGEN (Regel 2) UND MEHRSTUFIGES CACHING (P5).
     """
 
     GENERATOR_CONFIG_KEY = "GENERATOR_SETTINGS_V1"
@@ -27,13 +27,17 @@ class ShiftPlanDataManager:
     def __init__(self, app):
         self.app = app
 
-        # --- NEU (Für Pre-Loading) ---
-        # Speichert, welcher Monat aktuell geladen ist
-        self.year = 0
-        self.month = 0
+        # --- NEU (Für P5: Multi-Monats-Cache) ---
+        # Dieser Cache speichert die kompletten Daten-Snapshots für bereits geladene Monate.
+        # Schlüssel: (year, month), Wert: dict mit allen relevanten Daten
+        self.monthly_caches = {}
         # --- ENDE NEU ---
 
-        # Caches für die Hauptdaten
+        # Speichert, welcher Monat aktuell *aktiv* ist (angezeigt wird)
+        self.year = 0
+        self.month = 0
+
+        # Caches für die *aktiven* Daten (des Monats self.year/self.month)
         self.shift_schedule_data = {}
         self.processed_vacations = {}
         self.wunschfrei_data = {}
@@ -63,13 +67,13 @@ class ShiftPlanDataManager:
         # ShiftLockManager Instanz
         self.shift_lock_manager = ShiftLockManager(app)
 
-    # --- NEU: Zentrale Cache-Löschfunktion (Regel 4) ---
-    def _clear_caches(self):
+    # --- NEU: Umbenannt von _clear_caches (Regel 4) ---
+    def _clear_active_caches(self):
         """
-        Setzt alle Caches zurück. Notwendig beim Laden eines neuen Monats,
-        um eine Vermischung von Daten zu verhindern.
+        Setzt alle *aktiven* Caches zurück. Notwendig beim Laden eines neuen Monats,
+        der noch nicht im globalen Cache (self.monthly_caches) ist.
         """
-        print("[DM] Caches werden zurückgesetzt...")
+        print("[DM] Aktive Caches werden zurückgesetzt...")
         self.shift_schedule_data = {}
         self.processed_vacations = {}
         self.wunschfrei_data = {}
@@ -85,6 +89,16 @@ class ShiftPlanDataManager:
 
         # WICHTIG: Setzt die Locks im Manager zurück (basierend auf Ihrer Logik)
         self.shift_lock_manager.locked_shifts = {}
+
+    # --- NEU: Globale Cache-Löschfunktion (P5) ---
+    def clear_all_monthly_caches(self):
+        """
+        Löscht den gesamten Multi-Monats-Cache (P5).
+        Nötig z.B. bei globalen Änderungen (User-Update, Schichtart-Update).
+        """
+        print("[DM Cache] Lösche gesamten Monats-Cache (P5)...")
+        self.monthly_caches = {}
+        self._clear_active_caches()
 
     # --- ENDE NEU ---
 
@@ -143,6 +157,8 @@ class ShiftPlanDataManager:
 
     def _get_shift_helper(self, user_id_str, date_obj, current_year, current_month):
         """ Holt die *Arbeits*-Schicht für einen User an einem Datum, berücksichtigt Vormonat-Cache. """
+        # HINWEIS: Greift weiterhin auf die *aktiven* Caches zu (self.shift_schedule_data etc.)
+        # Diese werden durch load_and_process_data korrekt gesetzt.
         date_str = date_obj.strftime('%Y-%m-%d')
 
         shift = self.shift_schedule_data.get(user_id_str, {}).get(date_str)
@@ -155,41 +171,80 @@ class ShiftPlanDataManager:
 
         return shift if shift not in ["", "FREI", None, "U", "X", "EU", "WF", "U?"] else ""
 
-    # --- INNOVATION: load_and_process_data nutzt jetzt die NEUE BATCH-FUNKTION ---
-    def load_and_process_data(self, year, month, progress_callback=None):
+    # --- INNOVATION: load_and_process_data nutzt jetzt die NEUE BATCH-FUNKTION UND CACHING (P5) ---
+    def load_and_process_data(self, year, month, progress_callback=None, force_reload=False):
         """
-        Führt den konsolidierten DB-Abruf im Worker-Thread durch. Ruft danach die volle Konfliktprüfung auf.
+        Führt den konsolidierten DB-Abruf im Worker-Thread durch ODER lädt aus dem P5-Cache.
+        Ruft danach die volle Konfliktprüfung auf.
+
+        Args:
+            year (int): Jahr
+            month (int): Monat
+            progress_callback (function, optional): Callback für Fortschrittsanzeige.
+            force_reload (bool, optional): Erzwingt das Neuladen von der DB, ignoriert den Cache.
         """
 
-        # --- NEU (Für Pre-Loading) ---
+        # --- NEU (P5) ---
         # Setzt den Status, welcher Monat geladen wird/ist
         self.year = year
         self.month = month
 
-        # Caches leeren, um Daten vom Vormonat (falls vorhanden) zu entfernen
-        self._clear_caches()
-
-        # --- ENDE NEU ---
+        cache_key = (year, month)
 
         def update_progress(value, text):
             if progress_callback: progress_callback(value, text)
+
+        # 1. PRÜFE GLOBALEN CACHE (P5)
+        if cache_key in self.monthly_caches and not force_reload:
+            print(f"[DM Cache] Lade Monat {year}-{month} aus dem P5-Cache.")
+            update_progress(50, "Lade Daten aus Cache...")
+
+            # Daten aus Cache in aktive Variablen kopieren
+            cached_data = self.monthly_caches[cache_key]
+            self.shift_schedule_data = cached_data['shift_schedule_data']
+            self.processed_vacations = cached_data['processed_vacations']
+            self.wunschfrei_data = cached_data['wunschfrei_data']
+            self.daily_counts = cached_data['daily_counts']
+            self.violation_cells = cached_data['violation_cells']
+            self._prev_month_shifts = cached_data['_prev_month_shifts']
+            self.previous_month_shifts = cached_data['previous_month_shifts']
+            self.processed_vacations_prev = cached_data['processed_vacations_prev']
+            self.wunschfrei_data_prev = cached_data['wunschfrei_data_prev']
+            self.next_month_shifts = cached_data['next_month_shifts']
+            self.cached_users_for_month = cached_data['cached_users_for_month']
+            self.shift_lock_manager.locked_shifts = cached_data['locked_shifts']
+
+            # Wichtig: Schichtzeiten (sollten global sein, aber zur Sicherheit)
+            # (Dieser Aufruf ist schnell, da er nur den globalen app-State prüft)
+            self._preprocess_shift_times()
+
+            update_progress(95, "Vorbereitung abgeschlossen.")
+
+            return self.shift_schedule_data, self.processed_vacations, self.wunschfrei_data, self.daily_counts
+
+        # 2. NICHT IM CACHE (ODER force_reload=True): Von DB laden
+
+        # Caches leeren, um Daten vom Vormonat (falls vorhanden) zu entfernen
+        # Nutzt die umbenannte Funktion (Regel 1)
+        self._clear_active_caches()
+        # --- ENDE NEU ---
 
         update_progress(10, "Lade alle Plandaten (Batch-Optimierung)...")
 
         first_day_current_month = date(year, month, 1)
         current_date_for_archive_check = datetime.combine(first_day_current_month, time(0, 0, 0))
 
-        # 1. EIN EINZIGER DB-AUFRUF (Ihre innovative Funktion)
+        # 2a. EIN EINZIGER DB-AUFRUF (Ihre innovative Funktion)
         batch_data = get_all_data_for_plan_display(year, month, current_date_for_archive_check)
 
         if batch_data is None:
             print("[FEHLER] get_all_data_for_plan_display gab None zurück.")
-            # Caches bleiben leer (wurden durch _clear_caches() geleert)
+            # Caches bleiben leer (wurden durch _clear_active_caches() geleert)
             raise Exception("Fehler beim Abrufen der Batch-Daten aus der Datenbank.")
 
         update_progress(60, "Verarbeite Schicht- und Antragsdaten...")
 
-        # 2. Daten in die Caches des DataManagers entpacken
+        # 2b. Daten in die *aktiven* Caches des DataManagers entpacken
 
         # Benutzer
         self.cached_users_for_month = batch_data.get('users', [])
@@ -251,12 +306,38 @@ class ShiftPlanDataManager:
 
         update_progress(95, "Vorbereitung abgeschlossen.")
 
+        # --- NEU (P5): Speichere die geladenen Daten im globalen Cache ---
+        print(f"[DM Cache] Speichere Monat {year}-{month} im P5-Cache.")
+        self.monthly_caches[cache_key] = {
+            'shift_schedule_data': self.shift_schedule_data,
+            'processed_vacations': self.processed_vacations,
+            'wunschfrei_data': self.wunschfrei_data,
+            'daily_counts': self.daily_counts,
+            'violation_cells': self.violation_cells.copy(),  # Wichtig: Set kopieren
+            '_prev_month_shifts': self._prev_month_shifts,
+            'previous_month_shifts': self.previous_month_shifts,
+            'processed_vacations_prev': self.processed_vacations_prev,
+            'wunschfrei_data_prev': self.wunschfrei_data_prev,
+            'next_month_shifts': self.next_month_shifts,
+            'cached_users_for_month': self.cached_users_for_month,
+            'locked_shifts': self.shift_lock_manager.locked_shifts,
+        }
+        # --- ENDE NEU ---
+
         return self.shift_schedule_data, self.processed_vacations, self.wunschfrei_data, self.daily_counts
 
     # --- ENDE METHODE ---
 
     def update_violations_incrementally(self, user_id, date_obj, old_shift, new_shift):
         """Aktualisiert das violation_cells Set gezielt nach einer Schichtänderung und gibt betroffene Zellen zurück."""
+
+        # --- NEU (P5): Inkrementelle Updates müssen den P5-Cache invalidieren ---
+        cache_key = (date_obj.year, date_obj.month)
+        if cache_key in self.monthly_caches:
+            print(f"[DM Cache] Entferne {cache_key} wegen inkrementellem Update aus P5-Cache.")
+            del self.monthly_caches[cache_key]
+        # --- ENDE NEU ---
+
         print(f"[DM-Incr] Update für User {user_id} am {date_obj}: '{old_shift}' -> '{new_shift}'")
         affected_cells = set()
         day = date_obj.day;
@@ -371,6 +452,16 @@ class ShiftPlanDataManager:
 
     def recalculate_daily_counts_for_day(self, date_obj, old_shift, new_shift):
         """Aktualisiert self.daily_counts für einen bestimmten Tag nach Schichtänderung."""
+
+        # --- NEU (P5): Inkrementelle Updates müssen den P5-Cache invalidieren ---
+        cache_key = (date_obj.year, date_obj.month)
+        if cache_key in self.monthly_caches:
+            print(f"[DM Cache] Entferne {cache_key} wegen Zählungs-Update aus P5-Cache.")
+            # Wir löschen den Cache, da diese Funktion von außerhalb aufgerufen werden könnte
+            # (z.B. durch shift_plan_actions) und die Daten inkonsistent werden.
+            del self.monthly_caches[cache_key]
+        # --- ENDE NEU ---
+
         date_str = date_obj.strftime('%Y-%m-%d')
         print(f"[DM Counts] Aktualisiere Zählung für {date_str}: '{old_shift}' -> '{new_shift}'")
         if date_str not in self.daily_counts:
@@ -405,6 +496,12 @@ class ShiftPlanDataManager:
 
     def _preprocess_shift_times(self):
         """ Konvertiert Schichtzeiten in Minuten-Intervalle für schnelle Überlappungsprüfung. """
+
+        # Diese Funktion muss nur einmal laufen, solange die Schicht-Typen geladen sind.
+        # Wir prüfen, ob sie schon geladen sind, um unnötige Arbeit zu vermeiden.
+        if self._preprocessed_shift_times:
+            return
+
         self._preprocessed_shift_times.clear()
         self._warned_missing_times.clear()
 
@@ -497,6 +594,8 @@ class ShiftPlanDataManager:
 
     def calculate_total_hours_for_user(self, user_id_str, year, month):
         """ Berechnet die geschätzten Gesamtstunden für einen Benutzer im Monat. """
+        # HINWEIS: Diese Funktion ist jetzt SEHR schnell, wenn der Monat im Cache ist,
+        # da self.shift_schedule_data etc. bereits die korrekten (aktiven) Daten halten.
         total_hours = 0.0;
         try:
             user_id_int = int(user_id_str)
@@ -558,6 +657,8 @@ class ShiftPlanDataManager:
 
     def update_violation_set(self, year, month):
         """ Prüft den *gesamten* Monat auf Konflikte (Ruhezeit, Hunde) und füllt self.violation_cells. """
+        # HINWEIS: Diese Funktion wird nur aufgerufen, wenn Daten neu von der DB geladen werden.
+        # Gecachte Monate haben bereits ein fertiges self.violation_cells Set.
         print(f"[DM-Full] Starte volle Konfliktprüfung für {year}-{month:02d}...")
         self.violation_cells.clear();
         days_in_month = calendar.monthrange(year, month)[1]

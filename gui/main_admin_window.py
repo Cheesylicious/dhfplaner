@@ -32,7 +32,7 @@ class MainAdminWindow(tk.Toplevel):
     def __init__(self, master, user_data, app):
         print("[DEBUG] MainAdminWindow.__init__: Start")
         super().__init__(master)
-        self.app = app  # Die Haupt-Applikationsinstanz
+        self.app = app  # Die Haupt-Applikationsinstanz (enthält PreloadingManager)
         self.user_data = user_data  # HIER WIRD ES GESPEICHERT
         self.user_id = user_data.get('id')
         self.current_user_id = user_data.get('id')
@@ -47,7 +47,11 @@ class MainAdminWindow(tk.Toplevel):
         self.events = {}
         today = date.today()
         days_in_month = calendar.monthrange(today.year, today.month)[1]
-        self.current_display_date = today.replace(day=1) + timedelta(days=days_in_month)
+
+        # HINWEIS: Dieses Datum wird vom Bootloader (P1a) gesetzt und
+        # anschließend vom shift_plan_tab (der es lädt) verwaltet.
+        self.current_display_date = self.app.current_display_date
+
         self.current_year_holidays = {}
         self.shift_frequency = defaultdict(int)  # Wird von DataManager geladen
 
@@ -102,6 +106,7 @@ class MainAdminWindow(tk.Toplevel):
         #    Dies MUSS erfolgen, BEVOR der erste Tab (Schichtplan) geladen wird,
         #    damit die Farben und Stundenberechnungen verfügbar sind.
         print("[DEBUG] MainAdminWindow.__init__: Lade Kerndaten (Schichten, Regeln)...")
+        # (Diese Daten kommen jetzt aus dem app-Cache, der im Bootloader gefüllt wurde)
         self.data_manager.load_all_data()
         print("[DEBUG] MainAdminWindow.__init__: Kerndaten geladen.")
         # --- ENDE KORREKTUR ---
@@ -155,7 +160,8 @@ class MainAdminWindow(tk.Toplevel):
         except Exception as e:
             print(f"[FEHLER] Konnte Logout nicht loggen: {e}")
         # Haupt-App informieren (schließt dieses Fenster)
-        self.app.on_logout(self)
+        # KORREKTUR: on_logout erwartet keine Argumente
+        self.app.on_logout()
 
     # --- KORREKTUR: PROXY-/DELEGATIONS-METHODEN ---
     # Diese Methoden fangen Aufrufe von älteren Modulen (z.B. Renderer)
@@ -202,4 +208,14 @@ class MainAdminWindow(tk.Toplevel):
 
     # (Weitere Proxy-Methoden können bei Bedarf hier hinzugefügt werden)
 
+    # --- NEU (P4): Proxy-Methode zum Auslösen des Preloaders ---
+    def trigger_shift_plan_preload(self, new_year, new_month):
+        """
+        Proxy-Methode (P4): Leitet den Blättern-Trigger an den PreloadingManager (auf self.app) weiter.
+        """
+        # Greift auf den Manager zu, der auf der Bootloader-Instanz (self.app) lebt
+        if hasattr(self.app, 'preloading_manager') and self.app.preloading_manager:
+            self.app.preloading_manager.trigger_shift_plan_preload(new_year, new_month)
+        else:
+            print("[WARNUNG MAW] PreloadingManager nicht auf app gefunden. P4-Trigger ignoriert.")
     # -------------------------------------------------------------------

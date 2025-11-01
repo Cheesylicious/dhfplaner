@@ -226,6 +226,12 @@ class ShiftPlanTab(ttk.Frame):
                     if current_year != new_year:
                         if hasattr(self.app, '_load_holidays_for_year'): self.app._load_holidays_for_year(new_year)
                         if hasattr(self.app, '_load_events_for_year'): self.app._load_events_for_year(new_year)
+
+                    # --- NEU (P4): Preloader beim Monatswechsel per Dialog triggern ---
+                    if hasattr(self.app, 'trigger_shift_plan_preload'):
+                        self.app.trigger_shift_plan_preload(new_year, new_month)
+                    # --- ENDE NEU ---
+
                     self.build_shift_plan_grid(new_year, new_month)  # Standard-Ladevorgang
                 dialog.destroy()
             except ValueError:
@@ -516,7 +522,7 @@ class ShiftPlanTab(ttk.Frame):
             self.canvas.config(scrollregion=self.canvas.bbox("all"))
 
     def show_previous_month(self):
-        # (unverändert)
+        # (Angepasst)
         self.clear_understaffing_results()
         current_date = self.app.current_display_date;
         first_day_of_current_month = current_date.replace(day=1)
@@ -528,10 +534,16 @@ class ShiftPlanTab(ttk.Frame):
             # (Prüfe self.app.app (Bootloader) für die Hilfsfunktionen)
             if hasattr(self.app.app, 'load_holidays_for_year'): self.app.app.load_holidays_for_year(new_year)
             if hasattr(self.app.app, 'load_events_for_year'): self.app.app.load_events_for_year(new_year)
+
+        # --- NEU (P4): Preloader beim Blättern triggern ---
+        if hasattr(self.app, 'trigger_shift_plan_preload'):
+            self.app.trigger_shift_plan_preload(new_year, new_month)
+        # --- ENDE NEU ---
+
         self.build_shift_plan_grid(new_year, new_month)  # Standard-Ladevorgang
 
     def show_next_month(self):
-        # (unverändert)
+        # (Angepasst)
         self.clear_understaffing_results()
         current_date = self.app.current_display_date;
         days_in_month = calendar.monthrange(current_date.year, current_date.month)[1]
@@ -541,6 +553,12 @@ class ShiftPlanTab(ttk.Frame):
         if current_date.year != new_year:
             if hasattr(self.app.app, 'load_holidays_for_year'): self.app.app.load_holidays_for_year(new_year)
             if hasattr(self.app.app, 'load_events_for_year'): self.app.app.load_events_for_year(new_year)
+
+        # --- NEU (P4): Preloader beim Blättern triggern ---
+        if hasattr(self.app, 'trigger_shift_plan_preload'):
+            self.app.trigger_shift_plan_preload(new_year, new_month)
+        # --- ENDE NEU ---
+
         self.build_shift_plan_grid(new_year, new_month)  # Standard-Ladevorgang
 
     def check_understaffing(self):

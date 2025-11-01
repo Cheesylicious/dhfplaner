@@ -104,7 +104,6 @@ class AdminTabManager:
             selected_tab_id = self.notebook.select()
             if not selected_tab_id: return
             tab_index = self.notebook.index(selected_tab_id)
-            current_widget_at_index = self.notebook.nametowidget(selected_tab_id)
 
             tab_info = self.notebook.tab(tab_index)
             if not tab_info: return
@@ -113,51 +112,90 @@ class AdminTabManager:
 
             print(f"[GUI-Admin] on_tab_changed: Zu Tab '{tab_name}' gewechselt.")
 
-            if tab_name in self.loaded_tabs or tab_name in self.loading_tabs:
-                print(f"[GUI-Admin] -> Tab '{tab_name}' ist bereits geladen oder wird geladen. Keine Aktion.")
-                return
-
-            if tab_name not in self.tab_definitions or self.tab_definitions[tab_name] is None:
-                print(f"[GUI-Admin] -> Keine Definition für Tab '{tab_name}'. Keine Aktion.")
-                return
-
-            print(f"[GUI-Admin] -> Starte Ladevorgang für {tab_name} (Threaded)")
-            TabClass = self.tab_definitions[tab_name]
-            placeholder_frame = self.tab_frames.get(tab_name)
-
-            if not placeholder_frame or not placeholder_frame.winfo_exists():
-                print(f"[GUI-Admin] FEHLER: Platzhalter-Frame für '{tab_name}' nicht gefunden oder bereits zerstört.")
-                return
-
-            is_placeholder = (placeholder_frame == current_widget_at_index)
-            if is_placeholder:
-                print(f"[GUI-Admin] -> Zeige Ladeanzeige in Platzhalter für '{tab_name}'.")
-                for widget in placeholder_frame.winfo_children(): widget.destroy()
-                ttk.Label(placeholder_frame, text=f"Lade {tab_name}...", font=("Segoe UI", 16)).pack(expand=True,
-                                                                                                     anchor="center")
-                self.admin_window.update_idletasks()
-
-            self.loading_tabs.add(tab_name)
-
-            # --- KORREKTUR: 'args=' als Keyword entfernt ---
-            # Argumente werden jetzt positional übergeben
-            self.thread_manager.start_worker(
-                self._load_tab_threaded,  # target_func
-                self._check_tab_load_queue,  # on_complete
-                tab_name,  # *args[0]
-                TabClass,  # *args[1]
-                tab_index  # *args[2]
-            )
-            # ----------------------------------------------
+            # --- NEU (Regel 4): Logik ausgelagert ---
+            # Ruft die Preload-Funktion auf, die prüft, ob geladen werden muss
+            self.preload_tab(tab_name, tab_index)
+            # --- ENDE NEU ---
 
         except (tk.TclError, IndexError) as e:
             print(f"[GUI-Admin] Fehler beim Ermitteln des Tabs in on_tab_changed: {e}")
         except Exception as e:
             print(f"[GUI-Admin] Unerwarteter Fehler in on_tab_changed: {e}")
 
+    # --- NEU (P2-Fix): Diese Funktion lädt, ohne den Tab zu wechseln ---
+    def preload_tab(self, tab_name, tab_index=None, force_select=False):
+        """
+        Löst das Laden eines Tabs aus, wenn er noch nicht geladen ist.
+        Wechselt den Tab NICHT, es sei denn force_select=True (wie bei on_tab_changed).
+        """
+        if tab_name in self.loaded_tabs or tab_name in self.loading_tabs:
+            if not force_select:  # Nur Log, wenn Preloader lädt
+                print(f"[GUI-Admin] -> Tab '{tab_name}' ist bereits geladen oder wird geladen. Keine Aktion.")
+            return
+
+        if tab_name not in self.tab_definitions or self.tab_definitions[tab_name] is None:
+            if not force_select:  # Nur Log, wenn Preloader lädt
+                print(f"[GUI-Admin] -> Keine Definition für Tab '{tab_name}'. Keine Aktion.")
+            return
+
+        print(f"[GUI-Admin] -> Starte Ladevorgang für {tab_name} (Threaded)")
+        TabClass = self.tab_definitions[tab_name]
+        placeholder_frame = self.tab_frames.get(tab_name)
+
+        if not placeholder_frame or not placeholder_frame.winfo_exists():
+            print(f"[GUI-Admin] FEHLER: Platzhalter-Frame für '{tab_name}' nicht gefunden oder bereits zerstört.")
+            return
+
+        # Finde den korrekten Index, falls nicht übergeben (wichtig für P2)
+        if tab_index is None:
+            try:
+                tab_index = self.notebook.index(placeholder_frame)
+            except tk.TclError:
+                print(f"[GUI-Admin] FEHLER: Konnte Index für Platzhalter {tab_name} nicht finden.")
+                return
+
+        # Zeige Ladeanzeige nur, wenn der Tab aktiv ausgewählt wurde (nicht bei P2)
+        if force_select:
+            try:
+                current_widget_at_index = self.notebook.nametowidget(self.notebook.select())
+                is_placeholder = (placeholder_frame == current_widget_at_index)
+                if is_placeholder:
+                    print(f"[GUI-Admin] -> Zeige Ladeanzeige in Platzhalter für '{tab_name}'.")
+                    for widget in placeholder_frame.winfo_children(): widget.destroy()
+                    ttk.Label(placeholder_frame, text=f"Lade {tab_name}...", font=("Segoe UI", 16)).pack(expand=True,
+                                                                                                         anchor="center")
+                    self.admin_window.update_idletasks()
+            except tk.TclError:
+                pass  # Widget existiert vielleicht nicht (sollte nicht passieren)
+
+        self.loading_tabs.add(tab_name)
+
+        # Starte den Worker-Thread
+        self.thread_manager.start_worker(
+            self._load_tab_threaded,  # target_func
+            self._check_tab_load_queue,  # on_complete
+            tab_name,  # *args[0]
+            TabClass,  # *args[1]
+            tab_index  # *args[2]
+        )
+
+    # --- ENDE NEU ---
+
     def _replace_placeholder(self, tab_name, real_tab, tab_index, placeholder_frame):
         """Hilfsfunktion, um einen Platzhalter synchron zu ersetzen."""
         try:
+            # --- NEU (P2-Fix): Prüfen, ob wir den Tab wechseln sollen ---
+            # Finde heraus, welcher Tab *aktuell* ausgewählt ist
+            is_preloading = False
+            try:
+                current_selected_index = self.notebook.index("current")
+                if current_selected_index != tab_index:
+                    is_preloading = True
+                    print(f"[Preloader P2] Ersetze Platzhalter für '{tab_name}' im Hintergrund.")
+            except Exception:
+                is_preloading = False  # Fallback
+            # --- ENDE NEU ---
+
             self.notebook.unbind("<<NotebookTabChanged>>")
 
             current_count = self.last_tab_counts.get(tab_name, 0)
@@ -165,7 +203,11 @@ class AdminTabManager:
 
             self.notebook.forget(placeholder_frame)
             self.notebook.insert(tab_index, real_tab, text=tab_text)
-            self.notebook.select(real_tab)
+
+            # --- NEU (P2-Fix): Wähle den Tab nur aus, wenn er nicht vorgeladen wird ---
+            if not is_preloading:
+                self.notebook.select(real_tab)
+            # --- ENDE NEU ---
 
             self.loaded_tabs.add(tab_name)
             self.tab_frames[tab_name] = real_tab

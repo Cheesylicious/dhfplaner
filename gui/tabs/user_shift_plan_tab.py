@@ -27,13 +27,19 @@ from gui.tooltip import Tooltip
 class UserShiftPlanTab(ttk.Frame):
     def __init__(self, master, app):
         super().__init__(master)
-        self.app = app
+        self.app = app  # app ist MainUserWindow
         self.grid_widgets = {}
         self.tooltips = {}
         self.shifts = {}
         self.wunschfrei_data = {}
         self.processed_vacations = {}
         self.setup_ui()
+
+        # HINWEIS: Das User-Tab nutzt (im Gegensatz zum Admin-Tab) nicht den
+        # vorgeladenen DataManager (P5), sondern lädt Daten (noch) direkt.
+        # Der Preloader (P1, P4) lädt jedoch im Hintergrund in den P5-Cache.
+        # Wenn der User blättert, wird der *nächste* Monat vorgeladen.
+
         self.build_shift_plan_grid(self.app.current_display_date.year, self.app.current_display_date.month)
 
     def _process_vacations(self, year, month):
@@ -64,8 +70,15 @@ class UserShiftPlanTab(ttk.Frame):
         nav_frame.pack(fill="x", pady=(0, 10))
         ttk.Button(nav_frame, text="< Voriger Monat", command=self.show_previous_month).pack(side="left")
         self.month_label_var = tk.StringVar()
-        ttk.Label(nav_frame, textvariable=self.month_label_var, font=("Segoe UI", 14, "bold"), anchor="center").pack(
-            side="left", expand=True, fill="x")
+
+        # --- NEU: Monats-Label klickbar gemacht (für Dialog) ---
+        self.month_label = ttk.Label(nav_frame, textvariable=self.month_label_var,
+                                     font=("Segoe UI", 14, "bold"),
+                                     anchor="center", cursor="hand2")
+        self.month_label.pack(side="left", expand=True, fill="x")
+        self.month_label.bind("<Button-1>", self._on_month_label_click)
+        # --- ENDE NEU ---
+
         ttk.Button(nav_frame, text="Nächster Monat >", command=self.show_next_month).pack(side="right")
         grid_container_frame = ttk.Frame(main_view_container)
         grid_container_frame.pack(fill="both", expand=True)
@@ -84,6 +97,79 @@ class UserShiftPlanTab(ttk.Frame):
         self.inner_frame.bind('<Configure>', lambda e: self.canvas.configure(scrollregion=self.canvas.bbox("all")))
         self.plan_grid_frame = ttk.Frame(self.inner_frame)
         self.plan_grid_frame.pack(fill="both", expand=True)
+
+    # --- NEU: Monats-Auswahl-Dialog (analog zu Admin-Seite) ---
+    def _on_month_label_click(self, event):
+        self._show_month_chooser_dialog()
+
+    def _show_month_chooser_dialog(self):
+        dialog = tk.Toplevel(self)
+        dialog.title("Monatsauswahl")
+        dialog.transient(self.app)  # self.app ist MainUserWindow
+        dialog.grab_set()
+        dialog.focus_set()
+
+        current_date = self.app.current_display_date
+        current_year = current_date.year
+        current_month = current_date.month
+        month_names_de = ["Januar", "Februar", "März", "April", "Mai", "Juni", "Juli",
+                          "August", "September", "Oktober", "November", "Dezember"]
+
+        start_year = date.today().year - 5
+        end_year = date.today().year + 5
+        years = [str(y) for y in range(start_year, end_year + 1)]
+
+        selected_month_var = tk.StringVar(value=month_names_de[current_month - 1])
+        selected_year_var = tk.StringVar(value=str(current_year))
+
+        ttk.Label(dialog, text="Monat auswählen:").pack(padx=10, pady=(10, 0))
+        month_combo = ttk.Combobox(dialog, textvariable=selected_month_var, values=month_names_de, state="readonly",
+                                   width=15)
+        month_combo.pack(padx=10, pady=(0, 10))
+
+        ttk.Label(dialog, text="Jahr auswählen:").pack(padx=10, pady=(10, 0))
+        year_combo = ttk.Combobox(dialog, textvariable=selected_year_var, values=years, state="readonly", width=15)
+        year_combo.pack(padx=10, pady=(0, 10))
+
+        def on_ok():
+            try:
+                new_month_index = month_names_de.index(selected_month_var.get())
+                new_month = new_month_index + 1
+                new_year = int(selected_year_var.get())
+                new_date = date(new_year, new_month, 1)
+
+                if new_date.year != current_date.year or new_date.month != current_date.month:
+                    self.app.current_display_date = new_date
+                    if current_year != new_year:
+                        self.app._load_holidays_for_year(new_year)
+                        self.app._load_events_for_year(new_year)
+
+                    # --- NEU (P4): Preloader beim Monatswechsel per Dialog triggern ---
+                    if hasattr(self.app, 'trigger_shift_plan_preload'):
+                        self.app.trigger_shift_plan_preload(new_year, new_month)
+                    # --- ENDE NEU ---
+
+                    self.build_shift_plan_grid(new_year, new_month)
+                dialog.destroy()
+            except ValueError:
+                messagebox.showerror("Fehler", "Ungültige Monats- oder Jahresauswahl.", parent=dialog)
+            except Exception as e:
+                messagebox.showerror("Schwerer Fehler", f"Ein unerwarteter Fehler ist aufgetreten:\n{e}", parent=dialog)
+
+        button_frame = ttk.Frame(dialog)
+        button_frame.pack(padx=10, pady=10)
+        ttk.Button(button_frame, text="Abbrechen", command=dialog.destroy).pack(side="left", padx=5)
+        ttk.Button(button_frame, text="OK", command=on_ok).pack(side="left", padx=5)
+
+        dialog.update_idletasks()
+        width = dialog.winfo_width()
+        height = dialog.winfo_height()
+        x = self.app.winfo_x() + (self.app.winfo_width() // 2) - (width // 2)
+        y = self.app.winfo_y() + (self.app.winfo_height() // 2) - (height // 2)
+        dialog.geometry(f'+{x}+{y}')
+        dialog.wait_window()
+
+    # --- ENDE NEU ---
 
     def build_shift_plan_grid(self, year, month):
         for widget in self.plan_grid_frame.winfo_children():
@@ -181,12 +267,16 @@ class UserShiftPlanTab(ttk.Frame):
                             if requested_shift == 'WF':
                                 display_shift = 'WF'
                             elif requested_shift == 'T/N':
-                                display_shift = 'T./N.?'
+                                display_shift = 'T./N.?'  # Hier war der Syntaxfehler
                             else:
                                 display_shift = f"{requested_shift}?"
                     elif "Akzeptiert" in status or "Genehmigt" in status:
                         if requested_shift == 'WF':
                             display_shift = 'X'
+                        # --- KORREKTUR: Fehlende Logik ergänzt ---
+                        else:
+                            display_shift = requested_shift
+                # --- ENDE KORREKTUR ---
 
                 frame = tk.Frame(self.plan_grid_frame, bd=1, relief="solid")
                 frame.grid(row=current_row, column=day + 1, sticky="nsew")
@@ -609,19 +699,37 @@ class UserShiftPlanTab(ttk.Frame):
             messagebox.showerror("Fehler", message, parent=self)
 
     def show_previous_month(self):
+        # (Angepasst)
         current_date = self.app.current_display_date
         self.app.current_display_date = (self.app.current_display_date.replace(day=1) - timedelta(days=1)).replace(
             day=1)
-        if current_date.year != self.app.current_display_date.year:
-            self.app._load_holidays_for_year(self.app.current_display_date.year)
-            self.app._load_events_for_year(self.app.current_display_date.year)
-        self.build_shift_plan_grid(self.app.current_display_date.year, self.app.current_display_date.month)
+        new_year, new_month = self.app.current_display_date.year, self.app.current_display_date.month
+
+        if current_date.year != new_year:
+            self.app._load_holidays_for_year(new_year)
+            self.app._load_events_for_year(new_year)
+
+        # --- NEU (P4): Preloader beim Blättern triggern ---
+        if hasattr(self.app, 'trigger_shift_plan_preload'):
+            self.app.trigger_shift_plan_preload(new_year, new_month)
+        # --- ENDE NEU ---
+
+        self.build_shift_plan_grid(new_year, new_month)
 
     def show_next_month(self):
+        # (Angepasst)
         current_date = self.app.current_display_date
         days_in_month = calendar.monthrange(self.app.current_display_date.year, self.app.current_display_date.month)[1]
         self.app.current_display_date = self.app.current_display_date.replace(day=1) + timedelta(days=days_in_month)
-        if current_date.year != self.app.current_display_date.year:
-            self.app._load_holidays_for_year(self.app.current_display_date.year)
-            self.app._load_events_for_year(self.app.current_display_date.year)
-        self.build_shift_plan_grid(self.app.current_display_date.year, self.app.current_display_date.month)
+        new_year, new_month = self.app.current_display_date.year, self.app.current_display_date.month
+
+        if current_date.year != new_year:
+            self.app._load_holidays_for_year(new_year)
+            self.app._load_events_for_year(new_year)
+
+        # --- NEU (P4): Preloader beim Blättern triggern ---
+        if hasattr(self.app, 'trigger_shift_plan_preload'):
+            self.app.trigger_shift_plan_preload(new_year, new_month)
+        # --- ENDE NEU ---
+
+        self.build_shift_plan_grid(new_year, new_month)

@@ -115,7 +115,7 @@ class MainUserWindow(tk.Toplevel):
     def __init__(self, master, user_data, app):
         print("[DEBUG] MainUserWindow.__init__: Start")
         super().__init__(master)
-        self.app = app
+        self.app = app  # Dies ist der Bootloader (Application)
         self.user_data = user_data
         self.user_id = self.user_data['id']  # Hilfsvariable
         self.show_request_popups = True
@@ -125,21 +125,27 @@ class MainUserWindow(tk.Toplevel):
         self.setup_styles()
 
         today = date.today()
-        if today.month == 12:
-            self.current_display_date = today.replace(year=today.year + 1, month=1, day=1)
-        else:
-            self.current_display_date = today.replace(month=today.month + 1, day=1)
+
+        # HINWEIS: Dieses Datum wird vom Bootloader (P1a) gesetzt und
+        # anschließend vom user_shift_plan_tab (der es lädt) verwaltet.
+        self.current_display_date = self.app.current_display_date
 
         # Basisdaten laden (bleibt synchron, da für UI-Aufbau benötigt)
-        self.shift_types_data = {}
-        self.staffing_rules = self.load_staffing_rules()
+        # (Diese werden jetzt aus dem Bootloader-Cache (self.app) geholt)
+        self.shift_types_data = self.app.shift_types_data
+        self.staffing_rules = self.app.staffing_rules
+
         self.current_year_holidays = {}
         self.events = {}
+
+        # (Diese laden wir weiterhin lokal, da sie User-spezifisch sein könnten)
         self.shift_frequency = self.load_shift_frequency()
-        self.load_shift_types()
+
+        # (Diese sind bereits im Bootloader geladen, wir rufen sie nur auf,
+        # um die Caches im Holiday/Event-Manager zu füllen, falls nötig)
         self._load_holidays_for_year(self.current_display_date.year)
         self._load_events_for_year(self.current_display_date.year)
-        print("[DEBUG] MainUserWindow.__init__: Basisdaten geladen.")
+        print("[DEBUG] MainUserWindow.__init__: Basisdaten referenziert.")
 
         # --- NEU: ThreadManager initialisieren ---
         self.thread_manager = ThreadManager(self)
@@ -318,7 +324,8 @@ class MainUserWindow(tk.Toplevel):
     def logout(self):
         # (Unverändert)
         log_user_logout(self.user_data['id'], self.user_data['vorname'], self.user_data['name'])
-        self.app.on_logout(self)
+        # KORREKTUR: on_logout erwartet keine Argumente
+        self.app.on_logout()
 
     def setup_ui(self):
         # (Unverändert)
@@ -743,30 +750,29 @@ class MainUserWindow(tk.Toplevel):
 
     def is_holiday(self, check_date):
         # (Unverändert)
-        return check_date in self.current_year_holidays
+        # Greift auf die statische Methode zu (wie im Bootloader)
+        return HolidayManager.is_holiday(check_date)
 
     def get_event_type(self, current_date):
         # (Unverändert)
-        return EventManager.get_event_type(current_date, self.events)
+        # Greift auf die statische Methode zu (wie im Bootloader)
+        year_events = EventManager.get_events_for_year(current_date.year)
+        return year_events.get(current_date.strftime('%Y-%m-%d'))
 
     def load_shift_types(self):
         # (Unverändert)
-        self.shift_types_data = {st['abbreviation']: st for st in get_all_shift_types()}
+        # Nutzt die bereits im Bootloader (self.app) geladenen Daten
+        self.shift_types_data = self.app.shift_types_data
 
     def get_contrast_color(self, hex_color):
         # (Unverändert)
-        if not hex_color or not hex_color.startswith('#') or len(hex_color) != 7: return 'black'
-        try:
-            r, g, b = int(hex_color[1:3], 16), int(hex_color[3:5], 16), int(hex_color[5:7], 16)
-            y = (r * 299 + g * 587 + b * 114) / 1000
-            return 'black' if y >= 128 else 'white'
-        except ValueError:
-            return 'black'
+        # Nutzt die Hilfsfunktion vom Bootloader (self.app)
+        return self.app.get_contrast_color(hex_color)
 
     def load_staffing_rules(self):
         # (Unverändert)
-        rules = load_config_json('MIN_STAFFING_RULES');
-        return rules if rules and 'Colors' in rules else DEFAULT_RULES
+        # Nutzt die bereits im Bootloader (self.app) geladenen Daten
+        return self.app.staffing_rules
 
     def load_shift_frequency(self):
         # (Unverändert)
@@ -776,3 +782,15 @@ class MainUserWindow(tk.Toplevel):
     def save_shift_frequency(self):
         # (Unverändert)
         pass
+
+    # --- NEU (P4): Proxy-Methode zum Auslösen des Preloaders ---
+    def trigger_shift_plan_preload(self, new_year, new_month):
+        """
+        Proxy-Methode (P4): Leitet den Blättern-Trigger an den PreloadingManager (auf self.app) weiter.
+        """
+        # Greift auf den Manager zu, der auf der Bootloader-Instanz (self.app) lebt
+        if hasattr(self.app, 'preloading_manager') and self.app.preloading_manager:
+            self.app.preloading_manager.trigger_shift_plan_preload(new_year, new_month)
+        else:
+            print("[WARNUNG MUW] PreloadingManager nicht auf app gefunden. P4-Trigger ignoriert.")
+    # -------------------------------------------------------------------
