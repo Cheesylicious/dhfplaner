@@ -104,7 +104,7 @@ class HolidayManager:
 
         # 1. Prüfe den Cache (Unverändert)
         if year_str in _holidays_cache:
-            print(f"[DEBUG] Lade Feiertage für {year_str} aus dem Cache.")
+            # print(f"[DEBUG] Lade Feiertage für {year_str} aus dem Cache.") # <--- KORREKTUR: Entfernt redundantes Logging (Regel 2)
             return _holidays_cache[year_str]
 
         # 2. Lade aus DB (Unverändert)

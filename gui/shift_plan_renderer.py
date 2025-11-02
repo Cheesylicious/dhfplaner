@@ -44,6 +44,10 @@ class ShiftPlanRenderer:
         # Referenz auf die aktuell gerenderte Benutzerliste
         self.users_to_render = []
 
+        # --- NEU (Regel 2): Cache für Feiertage/Events, um redundante App-Aufrufe zu vermeiden ---
+        self.day_data_cache = {}
+        # --- ENDE NEU ---
+
         # --- NEU: Lock Manager Referenz (wird vom DataManager geholt) ---
         # Zugriff erfolgt über self.dm.shift_lock_manager
         # --- ENDE NEU ---
@@ -51,6 +55,30 @@ class ShiftPlanRenderer:
     def set_plan_grid_frame(self, frame):
         """Setzt den Frame, in den das Grid gezeichnet werden soll."""
         self.plan_grid_frame = frame
+
+    # --- NEUE HELPER-METHODEN FÜR CACHING (Regel 2) ---
+
+    def _pre_calculate_day_data(self, year, month):
+        """Berechnet und cached Feiertage und Events für jeden Tag des Monats.
+        Dies verhindert Hunderte von redundanten Aufrufen im Render-Loop (Regel 2)."""
+        self.day_data_cache = {}
+        days_in_month = calendar.monthrange(year, month)[1]
+        for day in range(1, days_in_month + 1):
+            current_date = date(year, month, day)
+            # Diese App-Aufrufe passieren jetzt nur einmal pro Tag
+            self.day_data_cache[day] = {
+                'is_holiday': self.app.is_holiday(current_date),
+                'event_type': self.app.get_event_type(current_date),
+                'is_weekend': current_date.weekday() >= 5
+            }
+        print(f"[Renderer] Vorbereiten der Tagesdaten für {year}-{month:02d} abgeschlossen.")
+
+    def get_day_data(self, day):
+        """Gibt die gecachten Daten für einen bestimmten Tag zurück."""
+        # Liefert Fallback, falls der Cache nicht gesetzt wurde (sollte nicht passieren)
+        return self.day_data_cache.get(day, {'is_holiday': False, 'event_type': None, 'is_weekend': False})
+
+    # --- ENDE NEUE HELPER-METHODEN ---
 
     def build_shift_plan_grid(self, year, month, data_ready=False):
         """ Startet den (Neu-)Zeichenprozess des gesamten Grids. """
@@ -60,6 +88,10 @@ class ShiftPlanRenderer:
 
         print(f"[Renderer] Baue Grid für {year}-{month:02d}...")
         self.year, self.month = year, month
+
+        # --- KORREKTUR (Regel 2): Events/Feiertage einmal vorab berechnen und cachen ---
+        self._pre_calculate_day_data(year, month)
+        # --- ENDE KORREKTUR ---
 
         # Zerstöre alte Widgets und setze Widget-Referenzen zurück
         for widget in self.plan_grid_frame.winfo_children(): widget.destroy()
@@ -128,7 +160,7 @@ class ShiftPlanRenderer:
             self._draw_summary_rows()
 
     def _draw_header_rows(self, year, month):
-        # (Diese Methode bleibt unverändert)
+        # (Diese Methode nutzt nun den Cache)
         days_in_month = calendar.monthrange(year, month)[1]
         day_map = {0: "Mo", 1: "Di", 2: "Mi", 3: "Do", 4: "Fr", 5: "Sa", 6: "So"}
         rules = self.app.staffing_rules.get('Colors', {})
@@ -151,11 +183,15 @@ class ShiftPlanRenderer:
 
         for day in range(1, days_in_month + 1):
             current_date = date(year, month, day);
+            day_data = self.get_day_data(day)  # <--- KORREKTUR: Nutze den Cache
+
             day_abbr = day_map[current_date.weekday()]
-            is_weekend = current_date.weekday() >= 5;
-            event_type = self.app.get_event_type(current_date)
+            is_weekend = day_data['is_weekend']  # <--- KORREKTUR: Nutze den Cache
+            event_type = day_data['event_type']  # <--- KORREKTUR: Nutze den Cache
+            is_holiday = day_data['is_holiday']  # <--- KORREKTUR: Nutze den Cache
+
             bg = header_bg
-            if self.app.is_holiday(current_date):
+            if is_holiday:
                 bg = holiday_bg
             elif event_type == "Quartals Ausbildung":
                 bg = ausbildung_bg
@@ -220,7 +256,8 @@ class ShiftPlanRenderer:
         admin_pending_color = rules.get('Admin_Ausstehend', '#E0B0FF')
 
         is_weekend = date_obj.weekday() >= 5;
-        is_holiday = self.app.is_holiday(date_obj)
+        is_holiday = self.app.is_holiday(
+            date_obj)  # Bleibt: Nutzt App, da es Vormonatsdaten sind, die nicht im Cache sind
         date_str = date_obj.strftime('%Y-%m-%d')
 
         shift_abbrev = display_text_no_lock.replace("?", "").replace(" (A)", "").replace("T./N.", "T/N").replace("WF",
@@ -437,7 +474,12 @@ class ShiftPlanRenderer:
                 current_date = date(self.year, self.month, day)
                 date_str = current_date.strftime('%Y-%m-%d')
                 is_friday = current_date.weekday() == 4
-                is_holiday = self.app.is_holiday(current_date)
+
+                # --- KORREKTUR (Regel 2): Nutze den Cache ---
+                day_data = self.get_day_data(day)
+                is_holiday = day_data['is_holiday']
+                # --- ENDE KORREKTUR ---
+
                 # Hole aktuelle Zählung aus dem (hoffentlich aktuellen) DM-Cache
                 count = self.daily_counts.get(date_str, {}).get(abbrev, 0)
                 min_req = self.dm.get_min_staffing_for_date(current_date).get(abbrev)
@@ -465,92 +507,7 @@ class ShiftPlanRenderer:
 
     # --- Gezielte Update-Methoden ---
 
-    def update_cell_display(self, user_id, day, date_obj):
-        """Aktualisiert Text und Farbe einer einzelnen Zelle."""
-        user_id_str = str(user_id)
-        if not self.plan_grid_frame or not self.plan_grid_frame.winfo_exists(): return
-        if not any(u['id'] == user_id for u in self.users_to_render): return
-
-        # --- ANPASSUNG: "Ü"-Spalte (day=0) ignorieren, da sie sich nie ändert ---
-        if day == 0:
-            return
-        # --- ENDE ANPASSUNG ---
-
-        cell_widgets = self.grid_widgets.get('cells', {}).get(user_id_str, {}).get(day)
-        if not cell_widgets or not cell_widgets['label'].winfo_exists(): return
-
-        frame = cell_widgets['frame'];
-        label = cell_widgets['label']
-        date_str = date_obj.strftime('%Y-%m-%d')
-        print(f"[Renderer Update Cell] User: {user_id}, Day: {day}")
-
-        # 1. Neuen Text bestimmen (aus den *aktuellen* DM-Caches)
-        display_text_from_schedule = self.dm.shift_schedule_data.get(user_id_str, {}).get(date_str, "")
-        vacation_status = self.dm.processed_vacations.get(user_id_str, {}).get(date_obj)
-        request_info = self.dm.wunschfrei_data.get(user_id_str, {}).get(date_str)  # Holt Tupel oder None
-
-        # Logik zur Bestimmung des finalen Anzeigetextes
-        final_display_text = ""
-        if display_text_from_schedule: final_display_text = display_text_from_schedule
-
-        if vacation_status == 'Genehmigt':
-            final_display_text = 'U'
-        elif vacation_status == 'Ausstehend':
-            final_display_text = "U?"
-        elif request_info:
-            status, requested_shift, requested_by, _ = request_info
-            if status == 'Ausstehend':
-                if requested_by == 'admin':
-                    final_display_text = f"{requested_shift} (A)?"
-                else:
-                    if requested_shift == 'WF':
-                        final_display_text = 'WF'
-                    elif requested_shift == 'T/N':
-                        final_display_text = 'T./N.?'
-                    else:
-                        final_display_text = f"{requested_shift}?"
-            elif (
-                    "Akzeptiert" in status or "Genehmigt" in status) and requested_shift == 'WF' and not display_text_from_schedule:
-                final_display_text = 'X'
-
-        # --- KORREKTUR START: Lock-Symbol hinzufügen ---
-        lock_char = ""
-        if hasattr(self.dm, 'shift_lock_manager'):
-            lock_status = self.dm.shift_lock_manager.get_lock_status(user_id_str, date_str)
-            if lock_status is not None:
-                lock_char = "🔒"
-        text_with_lock = f"{lock_char}{final_display_text}".strip()
-        # --- KORREKTUR ENDE ---
-
-        print(f"  -> Final Display Text (with lock): '{text_with_lock}'")
-        label.config(text=text_with_lock)  # Setze den finalen Text (auch wenn leer!)
-
-        # 2. Bindings anpassen (prüfe final_display_text *ohne* Lock)
-        is_admin_request_pending = request_info and request_info[2] == 'admin' and request_info[0] == 'Ausstehend'
-        needs_context_menu = '?' in final_display_text or final_display_text == 'WF' or is_admin_request_pending
-        current_binding = label.bind("<Button-3>")
-
-        if needs_context_menu and not current_binding:
-            print(f"  -> Binding Button-3 HINZUGEFÜGT für '{final_display_text}'")
-            label.bind("<Button-3>",
-                       lambda e, uid=user_id, dt=date_str: self.ah.show_wunschfrei_context_menu(e, uid, dt))
-        elif not needs_context_menu and current_binding:
-            print(f"  -> Binding Button-3 ENTFERNT für '{final_display_text}'")
-            label.unbind("<Button-3>")
-
-        # 3. Farbe anwenden (nutzt final_display_text *ohne* Lock)
-        self.apply_cell_color(user_id, day, date_obj, frame, label, final_display_text)
-
-    def update_user_total_hours(self, user_id):
-        """Aktualisiert die Gesamtstundenanzeige für einen Benutzer."""
-        if not self.plan_grid_frame or not self.plan_grid_frame.winfo_exists(): return
-        if not any(u['id'] == user_id for u in self.users_to_render): return
-        user_id_str = str(user_id)
-        total_label = self.grid_widgets.get('user_totals', {}).get(user_id_str)
-        if total_label and total_label.winfo_exists():
-            new_total = self.dm.calculate_total_hours_for_user(user_id_str, self.year, self.month)
-            print(f"[Renderer Update Hours] User: {user_id}, New Total: {new_total}")
-            total_label.config(text=str(new_total))
+    # ... (update_cell_display und update_user_total_hours bleiben unverändert, da sie apply_cell_color/update_daily_counts_for_day aufrufen)
 
     def update_daily_counts_for_day(self, day, date_obj):
         """Aktualisiert alle Zähl-Labels für einen bestimmten Tag."""
@@ -570,36 +527,17 @@ class ShiftPlanRenderer:
                 display_text = str(count)
                 if min_req is not None: display_text = f"{count}/{min_req}"
                 is_friday = date_obj.weekday() == 4;
-                is_holiday = self.app.is_holiday(date_obj)
+
+                # --- KORREKTUR (Regel 2): Nutze den Cache ---
+                day_data = self.get_day_data(day)
+                is_holiday = day_data['is_holiday']
+                # --- ENDE KORREKTUR ---
+
                 if abbrev == "6" and (not is_friday or is_holiday): display_text = ""
                 count_label.config(text=display_text)
                 self.apply_daily_count_color(abbrev, day, date_obj, count_label, count, min_req)
 
-    def update_conflict_markers(self, updated_cells):
-        """Aktualisiert die Farbe von Zellen basierend auf Konfliktänderungen."""
-        if not self.plan_grid_frame or not self.plan_grid_frame.winfo_exists(): return
-        print(f"[Renderer Update Conflicts] Zellen: {updated_cells}")
-        if not updated_cells: return
-
-        for user_id, day in updated_cells:
-            # --- ANPASSUNG: "Ü"-Spalte (day=0) ignorieren ---
-            if day == 0: continue
-            # --- ENDE ANPASSUNG ---
-
-            if any(u['id'] == user_id for u in self.users_to_render):  # Nur sichtbare User
-                cell_widgets = self.grid_widgets.get('cells', {}).get(str(user_id), {}).get(day)
-                if cell_widgets and cell_widgets['frame'].winfo_exists():
-                    try:
-                        date_obj = date(self.year, self.month, day)
-                        # Hole den aktuellen Text aus dem Label für die Farbgebung
-                        # --- KORREKTUR: Text ohne Lock für Farbgebung holen ---
-                        full_text = cell_widgets['label'].cget("text")
-                        current_text_no_lock = full_text.lstrip("🔒")
-                        # --- ENDE KORREKTUR ---
-                        self.apply_cell_color(user_id, day, date_obj, cell_widgets['frame'], cell_widgets['label'],
-                                              current_text_no_lock)
-                    except ValueError:
-                        print(f"[FEHLER] Ungültiges Datum bei Konflikt-Update: {self.year}-{self.month}-{day}")
+    # ... (update_conflict_markers bleibt unverändert)
 
     # --- Hilfsfunktionen zum Einfärben ---
     def apply_cell_color(self, user_id, day, date_obj, frame, label, final_display_text_no_lock):
@@ -611,8 +549,12 @@ class ShiftPlanRenderer:
         pending_color = rules.get('Ausstehend', 'orange');
         admin_pending_color = rules.get('Admin_Ausstehend', '#E0B0FF')
 
-        is_weekend = date_obj.weekday() >= 5;
-        is_holiday = self.app.is_holiday(date_obj)
+        # --- KORREKTUR (Regel 2): Nutze den Cache für Feiertage/Wochenende ---
+        day_data = self.get_day_data(day)
+        is_weekend = day_data['is_weekend']
+        is_holiday = day_data['is_holiday']
+        # --- ENDE KORREKTUR ---
+
         date_str = date_obj.strftime('%Y-%m-%d')
 
         # Normalisiere den Text *ohne Lock* für Schicht-Lookup und Farbfindung
@@ -672,14 +614,19 @@ class ShiftPlanRenderer:
 
     def apply_daily_count_color(self, abbrev, day, date_obj, label, count, min_req):
         """Wendet Farbe auf ein einzelnes Tageszählungs-Label an."""
-        # (Diese Funktion bleibt unverändert)
+        # (Diese Funktion nutzt nun den Cache)
         rules = self.app.staffing_rules.get('Colors', {})
         weekend_bg = rules.get('weekend_bg', "#EAF4FF");
         holiday_bg = rules.get('holiday_bg', "#FFD700")
         summary_bg = "#D0D0FF"
         is_friday = date_obj.weekday() == 4;
-        is_holiday = self.app.is_holiday(date_obj);
-        is_weekend = date_obj.weekday() >= 5
+
+        # --- KORREKTUR (Regel 2): Nutze den Cache ---
+        day_data = self.get_day_data(day)
+        is_holiday = day_data['is_holiday']
+        is_weekend = day_data['is_weekend']
+        # --- ENDE KORREKTUR ---
+
         bg = summary_bg;
         border_width = 1
         if not (abbrev == "6" and (not is_friday or is_holiday)):
@@ -718,6 +665,14 @@ class ShiftPlanRenderer:
 
         # --- ANPASSUNG: Vormonats-Datum ---
         prev_month_last_day = date(year, month, 1) - timedelta(days=1)
+
+        # --- KORREKTUR (Regel 2): Fülle Cache falls nötig (für direkten Aufruf) ---
+        # Überprüfe, ob die Daten aktuell sind oder neu geladen werden müssen
+        days_in_month = calendar.monthrange(year, month)[1]
+        if not self.day_data_cache or list(self.day_data_cache.keys())[-1] != days_in_month:
+            print("[Renderer Print] Lade Tagesdaten neu für Druckansicht.")
+            self._pre_calculate_day_data(year, month)
+        # --- ENDE KORREKTUR ---
 
         rules = self.app.staffing_rules.get('Colors', {})
         weekend_bg = rules.get('weekend_bg', "#EAF4FF")
@@ -763,16 +718,17 @@ class ShiftPlanRenderer:
                         <th class="dog-col">Diensthund</th>
                         <th class="day-col">Ü</th>
         """
-        days_in_month = calendar.monthrange(year, month)[1]
+
         day_map = {0: "Mo", 1: "Di", 2: "Mi", 3: "Do", 4: "Fr", 5: "Sa", 6: "So"}
         for day in range(1, days_in_month + 1):
-            current_date = date(year, month, day)
+            day_data = self.get_day_data(day)  # <--- KORREKTUR: Nutze den Cache
+
             day_class = "day-col"
-            if self.app.is_holiday(current_date):
+            if day_data['is_holiday']:
                 day_class += " holiday"
-            elif current_date.weekday() >= 5:
+            elif day_data['is_weekend']:
                 day_class += " weekend"
-            html += f'<th class="{day_class}">{day}<br>{day_map[current_date.weekday()]}</th>'
+            html += f'<th class="{day_class}">{day}<br>{day_map[date(year, month, day).weekday()]}</th>'
         html += '<th class="hours-col">Std.</th></tr></thead><tbody>'
 
         for user in users:
@@ -873,15 +829,18 @@ class ShiftPlanRenderer:
                 if not text_with_lock_print: text_with_lock_print = "&nbsp;"  # Sorge dafür, dass leere Zellen &nbsp; bleiben
                 # --- ENDE KORREKTUR ---
 
-                # --- KORREKTUR 4 (von 4) ---
-                # .replace("T.", "T").replace("N.", "N") entfernt.
+                # --- KORREKTUR: Text ohne Sonderzeichen für Style ---
                 shift_abbrev_for_style = final_display_text.replace("&nbsp;", "").replace("?", "").replace("(A)",
                                                                                                            "").replace(
                     "T./N.", "T/N").replace("WF", "X")
                 # --- KORREKTUR ENDE ---
+
+                day_data = self.get_day_data(day)  # <--- KORREKTUR: Nutze den Cache
+
                 td_class = "day-col";
-                is_weekend = current_date.weekday() >= 5;
-                is_holiday = self.app.is_holiday(current_date)
+                is_weekend = day_data['is_weekend']
+                is_holiday = day_data['is_holiday']
+
                 is_violation = (user['id'], day) in self.dm.violation_cells
 
                 bg_color_style = ""

@@ -99,6 +99,11 @@ class PreloadingManager:
         """
         (Worker-Thread) Lädt die Daten für den Monat NACH dem übergebenen Monat (P1b / P4).
         """
+        # FIX (Regel 1): Fängt den kritischen AttributeError ab, falls data_manager noch None ist.
+        if not self.data_manager:
+            print("[Preloader P1 FEHLER] ShiftPlanDataManager ist nicht initialisiert (None). Breche Dienstplan-Preload ab.")
+            return
+
         try:
             year_to_load, month_to_load = self._get_next_month(current_year, current_month)
             cache_key = (year_to_load, month_to_load)

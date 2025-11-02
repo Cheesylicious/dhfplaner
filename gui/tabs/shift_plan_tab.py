@@ -76,7 +76,7 @@ class ShiftPlanTab(ttk.Frame):
 
             print(
                 f"[ShiftPlanTab] Nutze vorgeladene Monatsdaten ({current_app_date.year}-{current_app_date.month}) -> data_ready=True.")
-            # Starte das Rendering direkt mit den vorgeladenen Daten
+            # Starte das Rendering direkt mit den vorgeladenen Daten (dieser Aufruf ist jetzt nicht-blockierend)
             self.build_shift_plan_grid(current_app_date.year, current_app_date.month, data_ready=True)
         else:
             print(f"[ShiftPlanTab] Vorgeladene Daten ({self.data_manager.year}-{self.data_manager.month}) "
@@ -424,14 +424,11 @@ class ShiftPlanTab(ttk.Frame):
 
         if data_ready:
             # --- DATEN SIND BEREITS VORGELADEN (vom Bootloader) ---
-            print(f"[ShiftPlanTab] Starte sofortiges Rendering für {year}-{month} (data_ready=True).")
-            # Wir müssen sicherstellen, dass die UI für das Rendering bereit ist
-            # (insb. der Ladebalken weg ist, falls er noch da war)
-            self._create_progress_widgets()  # Erstellt, aber...
-            self.progress_frame.grid_forget()  # ...sofort versteckt.
+            print(f"[ShiftPlanTab] Starte asynchrones Rendering für {year}-{month} (data_ready=True, P1c).")
 
-            # Starte das Rendering direkt (synchron im UI-Thread)
-            self._render_grid(year, month)
+            # KORREKTUR (Regel 2): Entferne die redundante Erstellung/Versteckung des Progress-Widgets.
+            # Starte das Rendering asynchron, um die GUI freizugeben.
+            self.after(1, lambda: self._render_grid(year, month))
 
         else:
             # --- STANDARD-LADEVORGANG (z.B. Monatswechsel) ---
@@ -478,6 +475,7 @@ class ShiftPlanTab(ttk.Frame):
         self.update_idletasks()
 
         # Ruft den Renderer auf. data_ready=True, da der DM die Daten jetzt hält.
+        # Der Renderer selbst startet hier den nicht-blockierenden Zeichnungs-Prozess.
         self.renderer.build_shift_plan_grid(year, month, data_ready=True)
 
         # (Das _finalize_ui_after_render wird vom Renderer selbst aufgerufen)
@@ -522,7 +520,7 @@ class ShiftPlanTab(ttk.Frame):
             self.canvas.config(scrollregion=self.canvas.bbox("all"))
 
     def show_previous_month(self):
-        # (Angepasst)
+        # (unverändert)
         self.clear_understaffing_results()
         current_date = self.app.current_display_date;
         first_day_of_current_month = current_date.replace(day=1)
@@ -543,7 +541,7 @@ class ShiftPlanTab(ttk.Frame):
         self.build_shift_plan_grid(new_year, new_month)  # Standard-Ladevorgang
 
     def show_next_month(self):
-        # (Angepasst)
+        # (unverändert)
         self.clear_understaffing_results()
         current_date = self.app.current_display_date;
         days_in_month = calendar.monthrange(current_date.year, current_date.month)[1]

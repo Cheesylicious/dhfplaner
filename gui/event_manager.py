@@ -71,7 +71,7 @@ class EventManager:
 
         # 1. Prüfe den Cache
         if year_str in _events_cache:
-            print(f"[DEBUG] Lade Events für {year_str} aus dem Cache.")
+            # print(f"[DEBUG] Lade Events für {year_str} aus dem Cache.") # <--- KORREKTUR: Entfernt redundantes Logging (Regel 2)
             return _events_cache[year_str]
 
         # 2. Lade aus DB (oder migriere)
@@ -122,6 +122,7 @@ class EventManager:
 
         # Wenn kein Dictionary übergeben wurde, hole es für das Jahr
         if events_dict is None:
+            # Der Aufruf hier führt jetzt nicht mehr zu Log-Spam, da die Print-Anweisung oben entfernt wurde.
             events_dict = EventManager.get_events_for_year(current_date.year)
 
         return events_dict.get(date_str)
