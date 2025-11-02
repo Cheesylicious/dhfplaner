@@ -54,12 +54,11 @@ class Application(tk.Tk):
         self.main_window = None
         self.login_window = None
 
-        # --- KORREKTUR: Berechne den ZIELMONAT (nächster Monat) ---
-        # (Logik von MainAdminWindow hierher verschoben)
+        # --- KORREKTUR (Regel 2): Setze das ZIELMONAT auf den NÄCHSTEN Monat (N+1) ---
         today = date.today()
         first_day_current_month = today.replace(day=1)
         days_in_month = calendar.monthrange(first_day_current_month.year, first_day_current_month.month)[1]
-        # Setzt das Zieldatum auf den 1. des nächsten Monats
+        # Setzt das Zieldatum auf den 1. des nächsten Monats (N+1) für die initiale Anzeige
         self.current_display_date = first_day_current_month + timedelta(days=days_in_month)
         print(f"[Boot Loader] Ziel-Anzeigedatum initialisiert auf: {self.current_display_date}")
         # --- ENDE KORREKTUR ---
@@ -179,8 +178,6 @@ class Application(tk.Tk):
     def get_event_type(self, date_obj):
         """Gibt den Typ eines Sondertermins zurück (oder None)."""
         # (Gemäß der Verwendung in db_shifts.py)
-        # Wir müssen sicherstellen, dass die globalen Daten (jetzt im DM) geladen sind
-        # Aber der DM ruft DIESE Funktion auf...
         # KORREKTUR: Der EventManager wird statisch aufgerufen
         year_events = EventManager.get_events_for_year(date_obj.year)
         return year_events.get(date_obj.strftime('%Y-%m-%d'))
@@ -216,8 +213,8 @@ class Application(tk.Tk):
     def preload_common_data(self):
         """
         THREAD-FUNKTION: Lädt alle notwendigen Anwendungsdaten parallel
-        zum DB-Pre-Warming. Lädt auch den Schichtplan für den nächsten Monat vor.
-        (DIES IST DIE "ORIGINALFUNKTION", DIE BEIBEHALTEN WIRD - P1a + P3)
+        zum DB-Pre-Warming. Lädt den Schichtplan für den initialen Anzeigemonat vor (P1a)
+        und die Stammdaten (P3).
         """
         print("[Preload Thread] Starte Daten-Caching (P1a + P3)...")
         start_time = time.time()
@@ -257,8 +254,9 @@ class Application(tk.Tk):
                 print("[Preload Thread] Instanziiere ShiftPlanDataManager (P5-Cache)...")
                 self.data_manager = ShiftPlanDataManager(self)
 
-            # --- KORREKTUR: Lade den ZIELMONAT (nächster Monat) (P1a) ---
+            # --- KORREKTUR (P1a): Lade den initialen Anzeigemonat (N+1) ---
             target_month = self.current_display_date.month
+            # Da self.current_display_date jetzt der nächste Monat (N+1) ist, wird dieser hier vorgeladen.
             print(f"[Preload Thread] Lade Schichtplan (P1a: Zielmonat: {target_year}-{target_month:02d})...")
             self.data_manager.load_and_process_data(target_year, target_month)
             print(f"[Preload Thread] Schichtplan für {target_year}-{target_month:02d} vorgeladen.")
@@ -331,6 +329,7 @@ class Application(tk.Tk):
                 main_window=self.main_window
             )
             # Starte die Ladekaskade (P1b -> P2)
+            # P1b wird den N+2-Monat laden, da P1a den N+1-Monat (current_display_date) geladen hat.
             self.preloading_manager.start_initial_preload()
 
             # Starte den Verarbeitungs-Loop für die UI-Queue (P2)
@@ -370,10 +369,11 @@ class Application(tk.Tk):
             self.data_manager.clear_all_monthly_caches()
         # --- ENDE NEU ---
 
-        # --- KORREKTUR: Zieldatum beim Logout zurücksetzen ---
+        # --- KORREKTUR: Zieldatum beim Logout auf N+1 zurücksetzen ---
         today = date.today()
         first_day_current_month = today.replace(day=1)
         days_in_month = calendar.monthrange(first_day_current_month.year, first_day_current_month.month)[1]
+        # NEU: Setze das Zieldatum auf den NÄCHSTEN Monat (N+1)
         self.current_display_date = first_day_current_month + timedelta(days=days_in_month)
         # --- ENDE KORREKTUR ---
 
