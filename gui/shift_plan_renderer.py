@@ -1,3 +1,4 @@
+# python
 # gui/shift_plan_renderer.py
 import tkinter as tk
 from tkinter import ttk, messagebox
@@ -507,7 +508,89 @@ class ShiftPlanRenderer:
 
     # --- Gezielte Update-Methoden ---
 
-    # ... (update_cell_display und update_user_total_hours bleiben unverändert, da sie apply_cell_color/update_daily_counts_for_day aufrufen)
+    def update_cell_display(self, user_id, day, date_obj):
+        """Aktualisiert eine einzelne Zelle (inkl. 'Ü' für day==0)."""
+        user_id_str = str(user_id)
+        date_str = date_obj.strftime('%Y-%m-%d')
+
+        # Vormonat-Zelle (Ü)
+        if day == 0:
+            cell = self.grid_widgets.get('cells', {}).get(user_id_str, {}).get(0)
+            if not cell:
+                return
+            frame, label = cell['frame'], cell['label']
+            display = self._get_display_text_for_prev_month(user_id_str, date_obj)
+            if label.winfo_exists():
+                label.config(text=display)
+            self._apply_prev_month_cell_color(user_id, date_obj, frame, label, display)
+            return
+
+        # Aktueller Monat: Bestimme finalen Text (ohne Lock) wie beim Rendern
+        display_text_from_schedule = self.shifts_data.get(user_id_str, {}).get(date_str, "")
+        vacation_status = self.processed_vacations.get(user_id_str, {}).get(date_obj)
+        request_info = self.wunschfrei_data.get(user_id_str, {}).get(date_str)
+
+        final_display_text = ""
+        if display_text_from_schedule:
+            final_display_text = display_text_from_schedule
+
+        if vacation_status == 'Genehmigt':
+            final_display_text = 'U'
+        elif vacation_status == 'Ausstehend':
+            final_display_text = "U?"
+        elif request_info:
+            status, requested_shift, requested_by, _ = request_info
+            if status == 'Ausstehend':
+                if requested_by == 'admin':
+                    final_display_text = f"{requested_shift} (A)?"
+                else:
+                    if requested_shift == 'WF':
+                        final_display_text = 'WF'
+                    elif requested_shift == 'T/N':
+                        final_display_text = 'T./N.?'
+                    else:
+                        final_display_text = f"{requested_shift}?"
+            elif ("Akzeptiert" in status or "Genehmigt" in status) and requested_shift == 'WF' and not display_text_from_schedule:
+                final_display_text = 'X'
+
+        # Lock-Symbol ermitteln
+        lock_char = ""
+        if hasattr(self.dm, 'shift_lock_manager'):
+            lock_status = self.dm.shift_lock_manager.get_lock_status(user_id_str, date_str)
+            if lock_status is not None:
+                lock_char = "🔒"
+        text_with_lock = f"{lock_char}{final_display_text}".strip()
+
+        cell = self.grid_widgets.get('cells', {}).get(user_id_str, {}).get(day)
+        if not cell:
+            return
+        frame, label = cell['frame'], cell['label']
+
+        # Text aktualisieren und Farbe anwenden
+        if label.winfo_exists():
+            label.config(text=text_with_lock)
+        self.apply_cell_color(user_id, day, date_obj, frame, label, final_display_text)
+
+        # Bindings aktualisieren wie beim Initial-Render
+        is_admin_request_pending = request_info and request_info[2] == 'admin' and request_info[0] == 'Ausstehend'
+        needs_context_menu = '?' in final_display_text or final_display_text == 'WF' or is_admin_request_pending
+
+        label.bind("<Button-1>", lambda e, uid=user_id, d=day, y=self.year, m=self.month: self.ah.on_grid_cell_click(e, uid, d, y, m))
+        if needs_context_menu:
+            label.bind("<Button-3>", lambda e, uid=user_id, dt=date_str: self.ah.show_wunschfrei_context_menu(e, uid, dt))
+        else:
+            label.unbind("<Button-3>")
+
+
+    def update_user_total_hours(self, user_id):
+        """Aktualisiert das Stunden-Label für einen Benutzer."""
+        user_id_str = str(user_id)
+        label = self.grid_widgets.get('user_totals', {}).get(user_id_str)
+        if not label:
+            return
+        total_hours = self.dm.calculate_total_hours_for_user(user_id_str, self.year, self.month)
+        if label.winfo_exists():
+            label.config(text=str(total_hours))
 
     def update_daily_counts_for_day(self, day, date_obj):
         """Aktualisiert alle Zähl-Labels für einen bestimmten Tag."""
@@ -538,6 +621,91 @@ class ShiftPlanRenderer:
                 self.apply_daily_count_color(abbrev, day, date_obj, count_label, count, min_req)
 
     # ... (update_conflict_markers bleibt unverändert)
+    # python
+    def update_conflict_markers(self, affected_cells=None):
+        """
+        Aktualisiert Konflikt-/Violation-Markierungen im Grid.
+        - affected_cells: optional iterable von (user_id, day). Wenn None -> prüfe alle Zellen.
+        """
+        try:
+            if not self.plan_grid_frame or not self.plan_grid_frame.winfo_exists():
+                return
+
+            # Helper: Erzeuge Datum für aktuellen Tag bzw. Vormonat (day==0)
+            def _date_for(user_day):
+                if user_day == 0:
+                    return date(self.year, self.month, 1) - timedelta(days=1)
+                return date(self.year, self.month, user_day)
+
+            # Bestimme welche Zellen geprüft werden sollen
+            if affected_cells:
+                # Erwartet Liste/Tuple von (user_id, day)
+                iterator = affected_cells
+            else:
+                # Iteriere über alle gespeicherten Zellen
+                iterator = []
+                for user_id_str, days_map in self.grid_widgets.get('cells', {}).items():
+                    for day_key in days_map.keys():
+                        iterator.append((int(user_id_str), day_key))
+
+            for user_id, day in iterator:
+                user_id_str = str(user_id)
+                cell = self.grid_widgets.get('cells', {}).get(user_id_str, {}).get(day)
+                if not cell:
+                    continue
+                frame = cell.get('frame')
+                label = cell.get('label')
+                if not label or not frame:
+                    continue
+                if not label.winfo_exists() or not frame.winfo_exists():
+                    continue
+
+                # Vormonat ("Ü") -> separate Farb-/Rahmenlogik (keine Violation-Prüfung)
+                if day == 0:
+                    prev_date = _date_for(0)
+                    display = self._get_display_text_for_prev_month(user_id_str, prev_date)
+                    # update text (falls geändert) und Farbe anwenden
+                    label.config(text=display)
+                    self._apply_prev_month_cell_color(user_id, prev_date, frame, label, display)
+                    continue
+
+                # Aktueller Monat: rekonstruiere finalen Text (ohne Lock), wie in update_cell_display
+                date_obj = _date_for(day)
+                date_str = date_obj.strftime('%Y-%m-%d')
+                display_text_from_schedule = self.shifts_data.get(user_id_str, {}).get(date_str, "")
+                vacation_status = self.processed_vacations.get(user_id_str, {}).get(date_obj)
+                request_info = self.wunschfrei_data.get(user_id_str, {}).get(date_str)
+
+                final_display_text = ""
+                if display_text_from_schedule:
+                    final_display_text = display_text_from_schedule
+
+                if vacation_status == 'Genehmigt':
+                    final_display_text = 'U'
+                elif vacation_status == 'Ausstehend':
+                    final_display_text = 'U?'
+                elif request_info:
+                    status, requested_shift, requested_by, _ = request_info
+                    if status == 'Ausstehend':
+                        # zeige Anfrage-Sichtbarkeit analog zum Render
+                        if requested_shift == 'WF':
+                            final_display_text = 'WF'
+                        else:
+                            final_display_text = f"{requested_shift}?"
+                    elif (
+                            "Akzeptiert" in status or "Genehmigt" in status) and requested_shift == 'WF' and not display_text_from_schedule:
+                        final_display_text = 'X'
+
+                # Aktualisiere Label-Text (Lock bleibt unverändert hier, nur visuelle Marker)
+                # Falls Lock-Symbol nötig wäre, update_cell_display kümmert sich beim konkreten Zellen-Update.
+                label.config(text=label.cget('text'))  # no-op, stellt sicher widget existiert
+
+                # Wende Farb- / Rahmen-Logik an - apply_cell_color berücksichtigt Violation
+                self.apply_cell_color(user_id, day, date_obj, frame, label, final_display_text)
+
+        except Exception as e:
+            # Keine Exception nach oben werfen, nur Debug-Ausgabe
+            print(f"[Renderer] update_conflict_markers failed: {e}")
 
     # --- Hilfsfunktionen zum Einfärben ---
     def apply_cell_color(self, user_id, day, date_obj, frame, label, final_display_text_no_lock):
