@@ -6,6 +6,11 @@ from datetime import date, datetime, timedelta
 from .db_core import create_connection
 import mysql.connector
 import traceback
+# --- KORREKTUR: defaultdict importiert (wird für Locks benötigt) ---
+from collections import defaultdict
+
+
+# --- ENDE KORREKTUR ---
 
 
 def get_consolidated_month_data(year, month):
@@ -228,18 +233,27 @@ def get_all_data_for_plan_display(year, month, for_date):
                        """, (year, month))
 
         locks_result = cursor.fetchall()
-        # --- FEHLERBEHEBUNG FÜR DATUM (falls es als str kommt) ---
-        locks_dict = {}
+
+        # --- KORREKTUR: Falsche Datenstruktur für Locks ---
+        # Stellt sicher, dass die Struktur {user_id_str: {date_str: abbrev}} ist
+
+        locks_dict = defaultdict(dict)
         for row in locks_result:
+            user_id_str = str(row['user_id'])  # Wichtig: String-ID
             lock_date = row['shift_date']
+
             if not isinstance(lock_date, date):
                 try:
                     lock_date = datetime.strptime(str(lock_date), '%Y-%m-%d').date()
                 except (ValueError, TypeError):
+                    print(f"WARNUNG (neu): Ungültiges Datumsformat in Locks ignoriert: {row['shift_date']}")
                     continue
-            locks_dict[(row['user_id'], lock_date.strftime('%Y-%m-%d'))] = row['shift_abbrev']
-        result_data['locks'] = locks_dict
-        # --- ENDE FEHLERBEHEBUNG ---
+
+            date_str = lock_date.strftime('%Y-%m-%d')
+            locks_dict[user_id_str][date_str] = row['shift_abbrev']
+
+        result_data['locks'] = dict(locks_dict)  # Zurück zu normalem dict
+        # --- ENDE KORREKTUR ---
 
         # === 3. Abfrage: Schichtdaten (Logik aus get_consolidated_month_data) ===
         print("[Batch Load] 3/7: Lade Schichtdaten (Haupt, Vor-, Folgemonat)...")
