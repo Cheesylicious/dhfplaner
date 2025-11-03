@@ -63,10 +63,28 @@ class GeneratorRounds:
                 next_raw_shift = self.helpers.get_next_raw_shift(user_id_str, current_date_obj)
                 after_next_raw_shift = self.helpers.get_shift_after_next_raw_shift(user_id_str, current_date_obj)
 
-                # Regelprüfungen (Hard und Soft)
-                if user_dog and user_dog != '---' and user_dog in existing_dog_assignments and any(
-                        self.helpers.check_time_overlap_optimized(shift_abbrev, a['shift']) for a in
-                        existing_dog_assignments[user_dog]): skip_reason = "Dog"
+                # --- KORREKTUR (Regel 1): Diensthund-Logik ---
+                if user_dog and user_dog != '---' and user_dog in existing_dog_assignments:
+                    for assigned_dog_shift in existing_dog_assignments[user_dog]:
+                        assigned_shift = assigned_dog_shift['shift']
+
+                        # FIX: Explizite Prüfung auf identische Schicht,
+                        # da check_time_overlap_optimized('T.', 'T.')
+                        # fälschlicherweise False liefern könnte.
+                        if shift_abbrev == assigned_shift:
+                            skip_reason = "Dog (Same Shift)"
+                            break
+
+                            # Original-Prüfung auf Überlappung (z.B. T. vs 6)
+                        if self.helpers.check_time_overlap_optimized(shift_abbrev, assigned_shift):
+                            skip_reason = "Dog (Overlap)"
+                            break
+
+                    if skip_reason:
+                        # Wenn ein Grund gefunden wurde, brich die äußere
+                        # Schleife (über die Hunde) ab.
+                        pass  # (Wird nach der IF-Box geprüft)
+                # --- ENDE KORREKTUR ---
 
                 # N->T/6 Block
                 if not skip_reason and prev_shift == "N." and shift_abbrev in ["T.", "6"]: skip_reason = "N->T/6"
@@ -222,10 +240,24 @@ class GeneratorRounds:
                 one_day_ago_raw_shift = self.helpers.get_previous_raw_shift(user_id_str, prev_date_obj);
                 two_days_ago_shift = self.helpers.get_previous_shift(user_id_str, two_days_ago_obj)
 
-                # --- Hard Rules Prüfung (mit Lockerungen je Runde) ---
-                if user_dog and user_dog != '---' and user_dog in existing_dog_assignments and any(
-                        self.helpers.check_time_overlap_optimized(shift_abbrev, a['shift']) for a in
-                        existing_dog_assignments[user_dog]): skip_reason = "Dog"
+                # --- KORREKTUR (Regel 1): Diensthund-Logik ---
+                if user_dog and user_dog != '---' and user_dog in existing_dog_assignments:
+                    for assigned_dog_shift in existing_dog_assignments[user_dog]:
+                        assigned_shift = assigned_dog_shift['shift']
+
+                        # FIX: Explizite Prüfung auf identische Schicht
+                        if shift_abbrev == assigned_shift:
+                            skip_reason = "Dog (Same Shift)"
+                            break
+
+                            # Original-Prüfung auf Überlappung
+                        if self.helpers.check_time_overlap_optimized(shift_abbrev, assigned_shift):
+                            skip_reason = "Dog (Overlap)"
+                            break
+
+                    if skip_reason:
+                        pass
+                # --- ENDE KORREKTUR ---
 
                 # N->T/6 Block
                 if not skip_reason and prev_shift == "N." and shift_abbrev in ["T.", "6"]: skip_reason = "N->T/6"

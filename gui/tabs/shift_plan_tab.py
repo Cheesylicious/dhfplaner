@@ -70,22 +70,36 @@ class ShiftPlanTab(ttk.Frame):
         self.setup_ui()
         self.renderer.set_plan_grid_frame(self.plan_grid_frame)
 
-        # --- KORREKTUR: build_shift_plan_grid intelligent aufrufen ---
-        # (Logik bleibt unverändert)
+        # --- KORREKTUR: Race Condition (P1a vs P1b) beim Start beheben ---
+        # Die Optimierung (data_ready=True) beim Start führt zu einer Race Condition,
+        # wenn der P1b-Preloader (N+1) schneller ist als der GUI-Renderer (N).
+        # Der Renderer liest dann die aktiven Daten von N+1 (Konflikte, Daten)
+        # und wendet sie fälschlicherweise auf das N-Grid an.
+        #
+        # Wir erzwingen DAHER beim allerersten Start IMMER data_ready=False.
+        # Dies zwingt den DataManager (im GUI-Thread), den Monat N (2025-12)
+        # aus dem P5-Cache zu laden und *erneut* zu aktivieren, BEVOR der Renderer
+        # die Daten liest.
 
         current_app_date = self.app.current_display_date
 
-        if (self.data_manager.year == current_app_date.year and
-                self.data_manager.month == current_app_date.month and
-                self.data_manager.year != 0):
+        print(
+            f"[ShiftPlanTab] Erzwinge Neuladen (data_ready=False) für {current_app_date.year}-{current_app_date.month}, um Race Condition (P1b) zu vermeiden.")
+        self.build_shift_plan_grid(current_app_date.year, current_app_date.month, data_ready=False)
 
-            print(
-                f"[ShiftPlanTab] Nutze vorgeladene Monatsdaten ({current_app_date.year}-{current_app_date.month}) -> data_ready=True.")
-            self.build_shift_plan_grid(current_app_date.year, current_app_date.month, data_ready=True)
-        else:
-            print(f"[ShiftPlanTab] Vorgeladene Daten ({self.data_manager.year}-{self.data_manager.month}) "
-                  f"passen nicht zur Ansicht ({current_app_date.year}-{current_app_date.month}). Lade neu.")
-            self.build_shift_plan_grid(current_app_date.year, current_app_date.month)
+        # --- ALTE (FEHLERHAFTE) LOGIK: ---
+        # if (self.data_manager.year == current_app_date.year and
+        #         self.data_manager.month == current_app_date.month and
+        #         self.data_manager.year != 0):
+        #
+        #     print(
+        #         f"[ShiftPlanTab] Nutze vorgeladene Monatsdaten ({current_app_date.year}-{current_app_date.month}) -> data_ready=True.")
+        #     self.build_shift_plan_grid(current_app_date.year, current_app_date.month, data_ready=True)
+        # else:
+        #     print(f"[ShiftPlanTab] Vorgeladene Daten ({self.data_manager.year}-{self.data_manager.month}) "
+        #           f"passen nicht zur Ansicht ({current_app_date.year}-{current_app_date.month}). Lade neu.")
+        #     self.build_shift_plan_grid(current_app_date.year, current_app_date.month)
+        # --- ENDE KORREKTUR ---
 
     def _prepare_shift_menu_items(self):
         # (unverändert)
@@ -311,7 +325,7 @@ class ShiftPlanTab(ttk.Frame):
             traceback.print_exc()
 
     def _on_generate_plan(self):
-        # (unverändert)
+        # (Angepasst: Übergibt locked_shifts_cache)
         year = self.app.current_display_date.year
         month = self.app.current_display_date.month
         month_str = self.month_label_var.get()
@@ -338,6 +352,11 @@ class ShiftPlanTab(ttk.Frame):
             vacation_requests = self.data_manager.processed_vacations
             wunschfrei_requests = self.data_manager.wunschfrei_data
             current_shifts = self.data_manager.shift_schedule_data
+
+            # --- KORREKTUR (Regel 1): Gesicherte Schichten laden ---
+            locked_shifts = self.data_manager.locked_shifts_cache
+            # --- ENDE KORREKTUR ---
+
             live_shifts_data = {uid: day_data.copy() for uid, day_data in current_shifts.items()}
             first_day_of_target_month = date(year, month, 1)
             date_for_user_filter = datetime.combine(first_day_of_target_month, time(0, 0, 0))
@@ -367,12 +386,14 @@ class ShiftPlanTab(ttk.Frame):
             messagebox.showerror("Fehler", f"Fehler beim Vorbereiten der Generierung:\n{e}", parent=self)
             if self.progress_frame and self.progress_frame.winfo_exists(): self.progress_frame.grid_forget()
             return
+
         generator = ShiftPlanGenerator(
             app=self.app,
             data_manager=self.data_manager,
             year=year, month=month, all_users=all_users, user_data_map=user_data_map,
             vacation_requests=vacation_requests, wunschfrei_requests=wunschfrei_requests,
             live_shifts_data=live_shifts_data,
+            locked_shifts_data=locked_shifts,  # <-- NEU (Regel 1)
             holidays_in_month=holidays_in_month,
             progress_callback=self._safe_update_progress,
             completion_callback=self._on_generation_complete

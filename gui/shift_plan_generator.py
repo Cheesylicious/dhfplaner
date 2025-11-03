@@ -57,6 +57,7 @@ class ShiftPlanGenerator:
 
     def __init__(self, app, data_manager, year, month, all_users, user_data_map,
                  vacation_requests, wunschfrei_requests, live_shifts_data,
+                 locked_shifts_data,  # <-- NEU (Regel 1)
                  holidays_in_month, progress_callback, completion_callback):
         self.app = app
         self.data_manager = data_manager
@@ -67,6 +68,7 @@ class ShiftPlanGenerator:
         self.vacation_requests = vacation_requests
         self.wunschfrei_requests = wunschfrei_requests
         self.initial_live_shifts_data = live_shifts_data
+        self.locked_shifts_data = locked_shifts_data  # <-- NEU (Regel 1)
         self.live_shifts_data = {}
         self.holidays_in_month = holidays_in_month
         self.progress_callback = progress_callback
@@ -250,6 +252,13 @@ class ShiftPlanGenerator:
                         1]  # Entpacke sicher
                     if wf_status in ['Approved', 'Genehmigt',
                                      'Akzeptiert'] and wf_shift == "": is_unavailable_day = True  # Nur ganztägig blockiert hier
+
+                # --- NEU (Regel 1): Prüfe auf gesicherte Schichten ---
+                if not is_unavailable_day:
+                    if self.locked_shifts_data.get(user_id_str, {}).get(date_str) is not None:
+                        is_unavailable_day = True
+                # --- ENDE NEU ---
+
                 if is_unavailable_day: continue
 
                 for shift_abbrev in shifts_to_check:
@@ -314,6 +323,12 @@ class ShiftPlanGenerator:
                         unavailable_reasons[
                             uid_str] = f"WF({target_shift_abbrev})"  # DEBUG
 
+            # --- NEU (Regel 1): Prüfe auf gesicherte Schichten ---
+            if self.locked_shifts_data.get(uid_str, {}).get(date_str) is not None:
+                users_unavailable_on_target_day.add(uid_str)
+                unavailable_reasons[uid_str] = "Gesichert 🔒"  # DEBUG
+            # --- ENDE NEU ---
+
         # Jeden Mitarbeiter gegen harte Regeln prüfen
         for user_dict in self.all_users:
             user_id_int = user_dict.get('id');
@@ -344,13 +359,6 @@ class ShiftPlanGenerator:
 
             # N->T/6 Block
             if not skip_reason and prev_shift == "N." and target_shift_abbrev in ["T.", "6"]: skip_reason = "N->T/6"
-
-            # --- KORREKTUR: N. -> QA/S Block entfernt ---
-            # (Da der Generator nur T/N/6 plant, ist diese Regel hier nicht relevant,
-            # aber die N->QA/S-Regel in generator_rounds.py ist wichtig, falls sich
-            # self.shifts_to_plan ändert.)
-            # if not skip_reason and prev_shift == "N." and target_shift_abbrev in ["QA", "S"]: skip_reason = "N->QA/S"
-            # --- ENDE KORREKTUR ---
 
             if not skip_reason and target_shift_abbrev == "T." and one_day_ago_raw_shift in self.free_shifts_indicators and two_days_ago_shift == "N.": skip_reason = "N-F-T"
             if not skip_reason and target_shift_abbrev in user_pref.get('shift_exclusions',
@@ -403,6 +411,11 @@ class ShiftPlanGenerator:
                 if wf_status in ['Approved', 'Genehmigt', 'Akzeptiert'] and (
                         wf_shift == "" or wf_shift == critical_shift_abbrev): users_unavailable_this_call.add(uid_str)
 
+            # --- NEU (Regel 1): Prüfe auf gesicherte Schichten ---
+            if self.locked_shifts_data.get(uid_str, {}).get(date_str) is not None:
+                users_unavailable_this_call.add(uid_str)
+            # --- ENDE NEU ---
+
         while assigned_count < needed_count and search_attempts < len(
                 self.all_users) + 1:  # Kandidaten suchen und zuweisen
             search_attempts += 1;
@@ -423,18 +436,22 @@ class ShiftPlanGenerator:
                 prev_shift = self.helpers.get_previous_shift(user_id_str, prev_date_obj);
                 one_day_ago_raw_shift = self.helpers.get_previous_raw_shift(user_id_str, prev_date_obj);
                 two_days_ago_shift = self.helpers.get_previous_shift(user_id_str, two_days_ago_obj)
-                if user_dog and user_dog != '---' and user_dog in dogs_assigned_on_critical_date and any(
-                        self.helpers.check_time_overlap_optimized(critical_shift_abbrev, a['shift']) for a in
-                        dogs_assigned_on_critical_date[user_dog]): skip_reason = "Dog"
+
+                # --- KORREKTUR (Regel 1): Diensthund-Logik ---
+                if user_dog and user_dog != '---' and user_dog in dogs_assigned_on_critical_date:
+                    for assigned_dog_shift in dogs_assigned_on_critical_date[user_dog]:
+                        assigned_shift = assigned_dog_shift['shift']
+                        if critical_shift_abbrev == assigned_shift:
+                            skip_reason = "Dog (Same Shift)"
+                            break
+                        if self.helpers.check_time_overlap_optimized(critical_shift_abbrev, assigned_shift):
+                            skip_reason = "Dog (Overlap)"
+                            break
+                # --- ENDE KORREKTUR ---
 
                 # N->T/6 Block
                 if not skip_reason and prev_shift == "N." and critical_shift_abbrev in ["T.",
                                                                                         "6"]: skip_reason = "N->T/6"
-
-                # --- KORREKTUR: N. -> QA/S Block entfernt ---
-                # (Da QA/S nicht von dieser Funktion geplant werden (nur T/N/6),
-                # ist die Regel hier nicht nötig.)
-                # --- ENDE KORREKTUR ---
 
                 if not skip_reason and critical_shift_abbrev == "T." and one_day_ago_raw_shift in self.free_shifts_indicators and two_days_ago_shift == "N.": skip_reason = "N-F-T"
                 if not skip_reason and critical_shift_abbrev in user_pref.get('shift_exclusions',
@@ -448,8 +465,6 @@ class ShiftPlanGenerator:
                 max_hours_check = max_hours_override if max_hours_override is not None else self.MAX_MONTHLY_HOURS
                 if not skip_reason and current_hours + hours_for_this_shift > max_hours_check: skip_reason = "MaxHrs"
 
-                # NEU: Harte Prüfung auf Vermeidungs-Partner (wird im Scoring behandelt,
-                # aber sicherheitshalber auch hier, falls Prio 1 = Harte Regel sein soll)
                 if not skip_reason and user_id_int in self.avoid_priority_map:
                     for prio, avoid_id in self.avoid_priority_map[user_id_int]:
                         if prio == 1 and avoid_id in assignments_on_critical_date.get(critical_shift_abbrev, set()):
@@ -462,17 +477,8 @@ class ShiftPlanGenerator:
             if not possible_candidates: print(
                 f"      [Pre-Plan] Keine Kandidaten in Versuch {search_attempts} für {critical_shift_abbrev} am {date_str}."); break
 
-            # Hier müsste man ggf. auch das Avoid-Scoring anwenden,
-            # aber Pre-Planung nimmt nur den mit den wenigsten Stunden.
-            # Wir verlassen uns darauf, dass das Scoring in der Hauptrunde greift.
-            # Für die Vorplanung fügen wir *keine* volle Score-Berechnung hinzu.
-
             possible_candidates.sort(key=lambda x: x['hours']);
             chosen_user = possible_candidates[0]
-
-            # --- ÄNDERUNG: Pre-Plan speichert jetzt auch NUR IN-MEMORY ---
-            # success, msg = save_shift_entry(chosen_user['id'], date_str, critical_shift_abbrev)  # Speichern
-            # if success:  # Live-Daten updaten
 
             assigned_count += 1;
             user_id_int = chosen_user['id'];
@@ -486,35 +492,53 @@ class ShiftPlanGenerator:
             if critical_shift_abbrev in ['T.', '6']: live_shift_counts_ratio[user_id_int]['T_OR_6'] += 1;
             if critical_shift_abbrev == 'N.': live_shift_counts_ratio[user_id_int]['N_DOT'] += 1;
             live_shift_counts[user_id_int][critical_shift_abbrev] += 1;
-            assignments_on_critical_date[critical_shift_abbrev].add(user_id_int)  # NEU: Update für nächsten Loop
+            assignments_on_critical_date[critical_shift_abbrev].add(user_id_int)
             print(
                 f"      [Pre-Plan] OK (In-Memory): User {user_id_int} -> {critical_shift_abbrev} @ {date_str}. (Hrs: {live_user_hours[user_id_int]:.1f})")
             if user_dog and user_dog != '---': dogs_assigned_on_critical_date[user_dog].append(
                 {'user_id': user_id_int, 'shift': critical_shift_abbrev})
 
-            # --- ÄNDERUNG: Else-Block entfernt ---
-            # else:
-            #     print(f"      [Pre-Plan] DB ERROR User {chosen_user['id']}: {msg}");
-            #     users_unavailable_this_call.add(
-            #         chosen_user['id_str'])
-            # --- ENDE ÄNDERUNG ---
-
         return assigned_count
 
-    # _generate Methode bleibt unverändert zum vorherigen Vorschlag
     def _generate(self):
-        """ Führt die eigentliche Generierungslogik aus (jetzt OHNE Pre-Planning). """
+        """ Führt die eigentliche Generierungslogik aus. """
         try:
             self._update_progress(0, "Initialisiere Planung...")
             days_in_month = calendar.monthrange(self.year, self.month)[1]
 
             # --- Initialisierung der Live-Daten ---
+
+            # --- NEU (Regel 1 & 4): Berücksichtige gesicherte Schichten ---
             self.live_shifts_data = defaultdict(dict)
+            # 1. Lade die normalen Schichten
             for user_id_str, day_data in self.initial_live_shifts_data.items():
                 self.live_shifts_data[user_id_str] = day_data.copy()
+
+            # 2. Überschreibe (oder füge hinzu) die gesicherten Schichten
+            # (Diese haben Vorrang)
+            if self.locked_shifts_data:
+                print("[Generator] Wende gesicherte Schichten (Locks) an...")
+                for user_id_str, date_data in self.locked_shifts_data.items():
+                    if user_id_str not in self.live_shifts_data:
+                        self.live_shifts_data[user_id_str] = {}
+                    for date_str, locked_shift in date_data.items():
+                        # Prüfe, ob das Datum im aktuellen Monat liegt (wichtig!)
+                        try:
+                            lock_date_obj = datetime.strptime(date_str, '%Y-%m-%d').date()
+                            if lock_date_obj.year == self.year and lock_date_obj.month == self.month:
+                                # Überschreibe nur, wenn die gesicherte Schicht
+                                # nicht "leer" ist (obwohl das nie passieren sollte)
+                                if locked_shift:
+                                    self.live_shifts_data[user_id_str][date_str] = locked_shift
+                        except ValueError:
+                            continue  # Ungültiges Datum im Lock-Cache ignorieren
+            # --- ENDE NEU ---
+
             self.live_user_hours = defaultdict(float)
             live_shift_counts = defaultdict(lambda: defaultdict(int))
             live_shift_counts_ratio = defaultdict(lambda: defaultdict(int))
+
+            # WICHTIG: Diese Schleife muss *nach* dem Laden der Locks laufen
             for user_id_str, day_data in self.live_shifts_data.items():
                 try:
                     user_id_int = int(user_id_str)
@@ -532,16 +556,11 @@ class ShiftPlanGenerator:
                     if shift in ['T.', '6']: live_shift_counts_ratio[user_id_int]['T_OR_6'] += 1
                     if shift == 'N.': live_shift_counts_ratio[user_id_int]['N_DOT'] += 1
 
-                    # KORREKTUR: Zähle T/N/6
-                    if shift in self.shifts_to_plan:  # self.shifts_to_plan = ["6", "T.", "N."]
+                    if shift in self.shifts_to_plan:
                         live_shift_counts[user_id_int][shift] += 1
             # --- Ende Initialisierung ---
 
-            # --- ÄNDERUNG: 'save_count' wird nicht mehr verwendet ---
-            # save_count = 0
-
-            # --- KEINE PRE-PLANNING PHASE MEHR ---
-            self._update_progress(10, "Starte Hauptplanung...")  # Start bei 10%
+            self._update_progress(10, "Starte Hauptplanung...")
 
             total_steps = days_in_month * len(self.shifts_to_plan)
             current_step = 0
@@ -550,75 +569,27 @@ class ShiftPlanGenerator:
             for day in range(1, days_in_month + 1):
                 current_date_obj = date(self.year, self.month, day)
                 date_str = current_date_obj.strftime('%Y-%m-%d')
-                users_unavailable_today = set();
-                existing_dog_assignments = defaultdict(list);
-                assignments_today_by_shift = defaultdict(set)
-
-                # VORDURCHLAUF (Jetzt korrigiert, um feste Schichten auszuschließen)
-                for user_id_int, user_data in self.user_data_map.items():
-                    user_id_str = str(user_id_int);
-                    user_dog = user_data.get('diensthund');
-                    is_unavailable, is_working = False, False
-                    existing_shift = self.live_shifts_data.get(user_id_str, {}).get(date_str)
-
-                    # Regel 1: Urlaub/WF (ganztägig) macht User unavailable für die Planung.
-                    if self.vacation_requests.get(user_id_str, {}).get(current_date_obj) in ['Approved', 'Genehmigt']:
-                        is_unavailable = True
-                    elif date_str in self.wunschfrei_requests.get(user_id_str, {}):
-                        wf_entry = self.wunschfrei_requests[user_id_str][date_str]
-                        wf_status, wf_shift = None, None
-                        if isinstance(wf_entry, tuple) and len(wf_entry) >= 1: wf_status = wf_entry[0]
-                        if wf_status in ['Approved', 'Genehmigt', 'Akzeptiert']:
-                            # Nur ganztägige WF blockieren, wenn wf_shift leer ist
-                            if not wf_entry[1]: is_unavailable = True
-
-                    # Regel 2: Bereits vorhandene feste Schichten blockieren den Tag für die GENERIERUNG
-                    if existing_shift:
-                        # Wenn die Schicht KEIN normaler Freischicht-Indikator ist (also T., N., QA, S, U, etc.)
-                        # UND sie KEIN "FREI" oder "" ist, blockiert sie die Zelle.
-
-                        # KORREKTUR: Nutzt self.fixed_shifts_indicators
-                        if existing_shift in self.fixed_shifts_indicators:
-                            is_unavailable = True  # User hat bereits einen festen Eintrag (X, QA, S, U, EU, WF, U?, 24)
-
-                        is_working = True  # Egal ob fest oder nicht, es ist ein Eintrag
-                        assignments_today_by_shift[existing_shift].add(user_id_int)
-
-                    if is_unavailable or is_working:
-                        users_unavailable_today.add(user_id_str)
-
-                    if is_working and user_dog and user_dog != '---':
-                        existing_dog_assignments[user_dog].append({'user_id': user_id_int, 'shift': existing_shift})
 
                 # --- KORREKTE MINDESTBESETZUNG LOGIK (SONDERTERMINE IGNORIEREN) ---
                 try:
-                    # 1. Lade die Besetzung (die T/N/6 an Event-Tagen fälschlich auf 0 setzen könnte)
                     min_staffing_today = self.data_manager.get_min_staffing_for_date(current_date_obj)
-
-                    # 2. Prüfe, ob ein Event (S/QA) T/N/6 überschrieben hat
                     is_event_day = False
                     if min_staffing_today:
                         if min_staffing_today.get('S', 0) > 0 or min_staffing_today.get('QA', 0) > 0:
                             is_event_day = True
-
-                    # 3. Wenn Event-Tag, lade die Basis-Regeln (Wochentag/Feiertag)
                     if is_event_day:
                         base_staffing_rules = self.app.staffing_rules
                         is_holiday_today = current_date_obj in self.holidays_in_month
                         base_staffing_today = {}
-
                         if is_holiday_today and 'holiday_staffing' in base_staffing_rules:
                             base_staffing_today = base_staffing_rules['holiday_staffing'].copy()
                         else:
                             weekday_str = str(current_date_obj.weekday())
                             if weekday_str in base_staffing_rules.get('weekday_staffing', {}):
                                 base_staffing_today = base_staffing_rules['weekday_staffing'][weekday_str].copy()
-
-                        # 4. Überschreibe T/N/6 im Event-Staffing mit den Basis-Regeln
-                        for shift in self.shifts_to_plan:  # ["6", "T.", "N."]
+                        for shift in self.shifts_to_plan:
                             if shift in base_staffing_today:
                                 min_staffing_today[shift] = base_staffing_today[shift]
-
                 except Exception as staffing_err:
                     min_staffing_today = {};
                     print(f"[WARN] Staffing Error {date_str}: {staffing_err}")
@@ -628,19 +599,69 @@ class ShiftPlanGenerator:
                 # Schleife: Schichten (self.shifts_to_plan ist jetzt ["6", "T.", "N."])
                 for shift_abbrev in self.shifts_to_plan:
                     current_step += 1;
-                    # --- ÄNDERUNG: Progress-Skala angepasst (10-95%) ---
                     progress_perc = int(10 + (current_step / total_steps) * 85);
                     self._update_progress(progress_perc, f"Plane {shift_abbrev} für {date_str}...")
+
+                    # --- NEUER VORDURCHLAUF (pro Schicht) ---
+                    users_unavailable_today = set();
+                    existing_dog_assignments = defaultdict(list);
+                    assignments_today_by_shift = defaultdict(set)
+
+                    for user_id_int, user_data in self.user_data_map.items():
+                        user_id_str = str(user_id_int);
+                        user_dog = user_data.get('diensthund');
+                        is_unavailable, is_working = False, False
+
+                        existing_shift = self.live_shifts_data.get(user_id_str, {}).get(date_str)
+
+                        # --- NEU (Regel 1): Explizite Prüfung auf Schichtsicherung ---
+                        is_locked = self.locked_shifts_data.get(user_id_str, {}).get(date_str) is not None
+
+                        # Regel 1: Urlaub/WF (ganztägig)
+                        if self.vacation_requests.get(user_id_str, {}).get(current_date_obj) in ['Approved',
+                                                                                                 'Genehmigt']:
+                            is_unavailable = True
+                        elif date_str in self.wunschfrei_requests.get(user_id_str, {}):
+                            wf_entry = self.wunschfrei_requests[user_id_str][date_str]
+                            wf_status, wf_shift = None, None
+                            if isinstance(wf_entry, tuple) and len(wf_entry) >= 1: wf_status = wf_entry[0]
+                            if wf_status in ['Approved', 'Genehmigt', 'Akzeptiert']:
+                                if not wf_entry[1]:
+                                    is_unavailable = True  # Ganztägig
+                                elif wf_entry[1] == shift_abbrev:
+                                    is_unavailable = True  # Blockiert diese Schicht
+
+                        # Regel 2: Bereits vorhandene Schichten
+                        if existing_shift:
+                            is_working = True
+                            assignments_today_by_shift[existing_shift].add(user_id_int)
+
+                            # Blockiere, wenn fest (QA, S, U...)
+                            if existing_shift in self.fixed_shifts_indicators:
+                                is_unavailable = True
+
+                            # --- NEU (Regel 1): Blockiere, wenn gesichert (T, N, 6...) ---
+                            elif is_locked:
+                                is_unavailable = True
+
+                            # Blockiere, wenn eine *andere* Schicht geplant wird
+                            elif existing_shift != shift_abbrev:
+                                is_unavailable = True
+
+                        if is_unavailable:
+                            users_unavailable_today.add(user_id_str)
+                        elif is_working:
+                            users_unavailable_today.add(user_id_str)
+
+                        if is_working and user_dog and user_dog != '---':
+                            existing_dog_assignments[user_dog].append({'user_id': user_id_int, 'shift': existing_shift})
+                    # --- ENDE NEUER VORDURCHLAUF ---
 
                     # Logik für "6" Schicht
                     is_friday_6 = shift_abbrev == '6' and current_date_obj.weekday() == 4;
                     is_holiday_6 = shift_abbrev == '6' and current_date_obj in self.holidays_in_month
                     if shift_abbrev == '6' and not (is_friday_6 or is_holiday_6): continue
 
-                    # (Die Prüfung auf QA/S ist nicht mehr nötig, da sie nicht in self.shifts_to_plan sind)
-
-                    # HIER IST DER ZENTRALE PUNKT:
-                    # min_staffing_today enthält jetzt T/N (Basis oder Event-überschrieben)
                     required_count = min_staffing_today.get(shift_abbrev, 0);
                     if required_count <= 0: continue
 
@@ -650,47 +671,92 @@ class ShiftPlanGenerator:
                     print(
                         f"   -> Need {needed_now} for '{shift_abbrev}' @ {date_str} (Req:{required_count}, Has:{current_assigned_count})")
 
-                    # Runde 1 (Aufruf ohne critical_shifts)
-                    assigned_in_round_1 = self.rounds.run_fair_assignment_round(shift_abbrev, current_date_obj,
-                                                                                users_unavailable_today,
-                                                                                existing_dog_assignments,
-                                                                                assignments_today_by_shift,
-                                                                                self.live_user_hours, live_shift_counts,
-                                                                                live_shift_counts_ratio, needed_now,
-                                                                                days_in_month)
-                    # --- ÄNDERUNG: 'save_count' entfernt ---
-                    # save_count += assigned_in_round_1
+                    # --- KORREKTUR (Regel 1): `while`-Schleife (Fix 2) ---
+                    while needed_now > 0:
+                        assigned_this_loop = 0
 
-                    # Runden 2, 3, 4 (unverändert)
-                    current_assigned_count = len(assignments_today_by_shift.get(shift_abbrev, set()));
-                    needed_after_fair = required_count - current_assigned_count
-                    if needed_after_fair > 0 and self.generator_fill_rounds >= 1: assigned_in_round_2 = self.rounds.run_fill_round(
-                        shift_abbrev, current_date_obj, users_unavailable_today, existing_dog_assignments,
-                        assignments_today_by_shift, self.live_user_hours, live_shift_counts, live_shift_counts_ratio,
-                        needed_after_fair,
-                        round_num=2); current_assigned_count += assigned_in_round_2  # save_count entfernt
-                    needed_after_round_2 = required_count - current_assigned_count
-                    if needed_after_round_2 > 0 and self.generator_fill_rounds >= 2: assigned_in_round_3 = self.rounds.run_fill_round(
-                        shift_abbrev, current_date_obj, users_unavailable_today, existing_dog_assignments,
-                        assignments_today_by_shift, self.live_user_hours, live_shift_counts, live_shift_counts_ratio,
-                        needed_after_round_2,
-                        round_num=3); current_assigned_count += assigned_in_round_3  # save_count entfernt
-                    needed_after_round_3 = required_count - current_assigned_count
-                    if needed_after_round_3 > 0 and self.generator_fill_rounds >= 3: assigned_in_round_4 = self.rounds.run_fill_round(
-                        shift_abbrev, current_date_obj, users_unavailable_today, existing_dog_assignments,
-                        assignments_today_by_shift, self.live_user_hours, live_shift_counts, live_shift_counts_ratio,
-                        needed_after_round_3,
-                        round_num=4); current_assigned_count += assigned_in_round_4  # save_count entfernt
+                        # Runde 1 (Fair)
+                        assigned_in_round_1 = self.rounds.run_fair_assignment_round(
+                            shift_abbrev, current_date_obj,
+                            users_unavailable_today,
+                            existing_dog_assignments,
+                            assignments_today_by_shift,
+                            self.live_user_hours, live_shift_counts,
+                            live_shift_counts_ratio,
+                            1,  # HIER: Harte 1
+                            days_in_month
+                        )
+                        assigned_this_loop += assigned_in_round_1
 
-                    # Endgültige Prüfung
-                    final_assigned_count = current_assigned_count
+                        # Runden 2, 3, 4 (Fill)
+                        if assigned_this_loop == 0 and self.generator_fill_rounds >= 1:
+                            assigned_in_round_2 = self.rounds.run_fill_round(
+                                shift_abbrev, current_date_obj, users_unavailable_today, existing_dog_assignments,
+                                assignments_today_by_shift, self.live_user_hours, live_shift_counts,
+                                live_shift_counts_ratio,
+                                1, round_num=2  # HIER: Harte 1
+                            )
+                            assigned_this_loop += assigned_in_round_2
+
+                        if assigned_this_loop == 0 and self.generator_fill_rounds >= 2:
+                            assigned_in_round_3 = self.rounds.run_fill_round(
+                                shift_abbrev, current_date_obj, users_unavailable_today, existing_dog_assignments,
+                                assignments_today_by_shift, self.live_user_hours, live_shift_counts,
+                                live_shift_counts_ratio,
+                                1, round_num=3  # HIER: Harte 1
+                            )
+                            assigned_this_loop += assigned_in_round_3
+
+                        if assigned_this_loop == 0 and self.generator_fill_rounds >= 3:
+                            assigned_in_round_4 = self.rounds.run_fill_round(
+                                shift_abbrev, current_date_obj, users_unavailable_today, existing_dog_assignments,
+                                assignments_today_by_shift, self.live_user_hours, live_shift_counts,
+                                live_shift_counts_ratio,
+                                1, round_num=4  # HIER: Harte 1
+                            )
+                            assigned_this_loop += assigned_in_round_4
+
+                        if assigned_this_loop == 0:
+                            break
+
+                        # --- KORREKTUR (Regel 1): State-Update (Fix 3 & 4) ---
+                        # Aktualisiere die Vordurchlauf-Variablen für den
+                        # nächsten Durchlauf der *while*-Schleife.
+
+                        newly_assigned_id = None
+                        current_assigned_ids_str = {str(uid) for uid in
+                                                    assignments_today_by_shift.get(shift_abbrev, set())}
+
+                        for user_id_str in current_assigned_ids_str:
+                            if user_id_str not in users_unavailable_today:
+                                newly_assigned_id = int(user_id_str)
+                                break
+
+                        if newly_assigned_id:
+                            newly_assigned_id_str = str(newly_assigned_id)
+                            users_unavailable_today.add(newly_assigned_id_str)
+
+                            user_data = self.user_data_map.get(newly_assigned_id)
+                            if user_data:
+                                user_dog = user_data.get('diensthund')
+                                if user_dog and user_dog != '---':
+                                    existing_dog_assignments[user_dog].append(
+                                        {'user_id': newly_assigned_id, 'shift': shift_abbrev}
+                                    )
+                        # --- ENDE State-Update ---
+
+                        current_assigned_count = len(assignments_today_by_shift.get(shift_abbrev, set()))
+                        needed_now = required_count - current_assigned_count
+
+                    # --- ENDE KORREKTUR (Regel 1) ---
+
+                    final_assigned_count = len(assignments_today_by_shift.get(shift_abbrev, set()))
                     if final_assigned_count < required_count: print(
                         f"   -> [WARNUNG] Mindestbesetzung für '{shift_abbrev}' an {date_str} NICHT erreicht (Req: {required_count}, Assigned: {final_assigned_count}).")
 
             # --- NEU: Batch-Speichern am Ende aller Schleifen ---
             self._update_progress(95, "Speichere Plan in Datenbank...")
 
-            # HIER: Der innovative Teil. Alle DB-Schreibvorgänge in einem Batch.
             success, saved_count_batch, error_msg_batch = save_generation_batch_to_db(
                 self.live_shifts_data,
                 self.year,
@@ -702,23 +768,20 @@ class ShiftPlanGenerator:
                 if self.completion_callback:
                     err_msg = f"Fehler beim Batch-Speichern:\n{error_msg_batch}"
                     self.app.after(100, lambda: self.completion_callback(False, 0, err_msg))
-                return  # Beende die Funktion bei Fehler
+                return
 
-            # --- ENDE NEU ---
+                # --- ENDE NEU ---
 
-            # Abschluss
             self._update_progress(100, "Generierung abgeschlossen.")
             final_hours_list = sorted(self.live_user_hours.items(), key=lambda item: item[1], reverse=True)
             print("Finale Stunden nach Generierung:", [(uid, f"{h:.1f}") for uid, h in final_hours_list])
 
-            # KORREKTUR: Debug-Ausgabe angepasst
             print("Finale Schichtzählungen (T./N./6):")
             for user_id_int in sorted(self.live_user_hours.keys()):
                 counts = live_shift_counts[user_id_int];
                 print(
                     f"  User {user_id_int}: T:{counts.get('T.', 0)}, N:{counts.get('N.', 0)}, 6:{counts.get('6', 0)}")
 
-            # --- ÄNDERUNG: Callback nutzt jetzt 'saved_count_batch' ---
             if self.completion_callback:
                 self.app.after(100, lambda sc=saved_count_batch: self.completion_callback(True, sc, None))
 
