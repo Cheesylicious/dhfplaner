@@ -2,6 +2,8 @@
 # REFRACTORED (Regel 4): Dient als Fassade und delegiert
 # die Logik an spezialisierte Helfer-Klassen.
 # KORRIGIERT: Behebt "Renderer nicht verfügbar" durch spätere Initialisierung.
+# KORRIGIERT (Regel 4): Behebt "Menü kann nicht erstellt werden",
+# indem die Menü-Erstellung hierher verschoben wird (Just-in-Time).
 
 import tkinter as tk
 from tkinter import ttk, messagebox
@@ -33,7 +35,7 @@ class ShiftPlanActionHandler:
         # Die Helfer werden erst initialisiert, wenn set_renderer aufgerufen wird.
 
         self.tab = master_tab
-        self.app = app_instance
+        self.app = app_instance  # MainAdminWindow
 
         # Kompatibilität für alte Init-Signatur in ShiftPlanTab
         # In unserem Fall ist shift_plan_tab_oder_dm der data_manager
@@ -94,6 +96,43 @@ class ShiftPlanActionHandler:
         config = load_config_json(SHIFT_MENU_CONFIG_KEY)
         return config if config is not None else {}
 
+    # --- NEUE METHODE (Refactoring Regel 4) ---
+    def _build_shift_menu_items(self):
+        """
+        Erstellt die Menü-Einträge "Just-in-Time", um Start-Fehler zu vermeiden.
+        (Ehemals in ShiftPlanTab._prepare_shift_menu_items)
+        """
+        try:
+            # self.app = MainAdminWindow, self.app.app = BootLoader
+
+            # Schicht-Definitionen kommen vom Bootloader (self.app.app)
+            all_abbrevs = list(self.app.app.shift_types_data.keys())
+            menu_config = self._menu_config_cache  # Bereits in __init__ geladen
+
+            # --- KORREKTUR: shift_frequency kommt von MainAdminWindow (self.app) ---
+            shift_frequency = self.app.shift_frequency
+            # --- ENDE KORREKTUR ---
+
+        except AttributeError as e:
+            print(f"[FEHLER] ActionHandler kann Menü nicht bauen, App-Daten fehlen: {e}")
+            # Fallback, falls App-Daten noch nicht geladen sind (sollte nie passieren)
+            return [("Fehler: App-Daten nicht geladen", None)]
+
+        sorted_abbrevs = sorted(all_abbrevs, key=lambda s: shift_frequency.get(s, 0), reverse=True)
+        prepared_items = []
+
+        for abbrev in sorted_abbrevs:
+            if menu_config.get(abbrev, True):  # Prüft die Menü-Config
+                shift_info = self.app.app.shift_types_data.get(abbrev)
+                if shift_info:
+                    name = shift_info.get('name', abbrev)
+                    count = shift_frequency.get(abbrev, 0)
+                    label_text = f"{abbrev} ({name})" + (f"  (Bisher {count}x)" if count > 0 else "")
+                    prepared_items.append((abbrev, label_text))
+        return prepared_items
+
+    # --- ENDE NEUE METHODE ---
+
     # --- Prüf- und Delegationsmethoden ---
 
     def _check_helpers_initialized(self):
@@ -150,6 +189,12 @@ class ShiftPlanActionHandler:
             print("[WARNUNG] Klick empfangen, aber Helfer sind noch nicht bereit.")
             return
 
+        # --- KORREKTUR: Tag 0 (Ü-Zelle) abfangen ---
+        if day == 0:
+            print("[ActionHandler] Klick auf 'Ü'-Zelle ignoriert.")
+            return
+        # --- ENDE KORREKTUR ---
+
         date_obj = date(year, month, day);
         date_str = date_obj.strftime('%Y-%m-%d')
         context_menu = tk.Menu(self.tab, tearoff=0)
@@ -160,30 +205,27 @@ class ShiftPlanActionHandler:
 
         # 2. Normale Schicht-Auswahl (Nur wenn nicht gesperrt)
         if not lock_status:
-            if not hasattr(self.tab, '_menu_item_cache') or not self.tab._menu_item_cache:
-                if hasattr(self.tab, '_prepare_shift_menu_items'):
-                    try:
-                        # Ruft die Menü-Vorbereitung im ShiftPlanTab auf
-                        self.tab._menu_item_cache = self.tab._prepare_shift_menu_items()
-                    except Exception as e:
-                        print(f"Cache-Fehler: {e}");
-                        messagebox.showerror("Fehler", "Menü init failed.", parent=self.tab);
-                        return
-                else:
-                    messagebox.showerror("Fehler", "Menü kann nicht erstellt werden.", parent=self.tab);
-                    return
+            # --- KORREKTUR (Regel 4): Menü "Just-in-Time" erstellen ---
+            # Entfernt die alte, fehlerhafte Cache-Prüfung von ShiftPlanTab
 
-            # Füge Menü-Items hinzu
-            if hasattr(self.tab, '_menu_item_cache') and self.tab._menu_item_cache:
-                for abbrev, label_text in self.tab._menu_item_cache:
-                    context_menu.add_command(label=label_text,
-                                             # Ruft den ShiftHandler auf
-                                             command=lambda u=user_id, d=date_str,
-                                                            s=abbrev: self.shift_handler.save_shift_entry_and_refresh(u,
-                                                                                                                      d,
-                                                                                                                      s))
-            else:
+            menu_items = self._build_shift_menu_items()  # Ruft die NEUE interne Methode auf
+
+            if not menu_items:
                 context_menu.add_command(label="Fehler Schichtladen", state="disabled")
+
+            for abbrev, label_text in menu_items:
+                # Prüfe, ob ein Fehler beim Laden aufgetreten ist (Fallback)
+                if abbrev == "Fehler: App-Daten nicht geladen":
+                    context_menu.add_command(label=abbrev, state="disabled")
+                    break
+
+                context_menu.add_command(label=label_text,
+                                         # Ruft den ShiftHandler auf
+                                         command=lambda u=user_id, d=date_str,
+                                                        s=abbrev: self.shift_handler.save_shift_entry_and_refresh(u,
+                                                                                                                  d,
+                                                                                                                  s))
+            # --- ENDE KORREKTUR ---
 
             context_menu.add_separator();
             context_menu.add_command(label="FREI",
@@ -233,4 +275,4 @@ class ShiftPlanActionHandler:
     # _update_dm_wunschfrei_cache -> ActionUpdateHandler
     # _set_shift_lock_status -> ActionShiftHandler
     # handle_request_... (alle) -> ActionRequestHandler
-    # _refresh_requests_tab_if_loaded -> ActionRequestHandler
+

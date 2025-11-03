@@ -20,6 +20,10 @@ from ..dialogs.generator_settings_window import \
     GeneratorSettingsWindow
 # --- Import des Generators ---
 from gui.shift_plan_generator import ShiftPlanGenerator
+# --- NEUER IMPORT (Regel 2 & 4): Latenz-Problem beheben ---
+# (Wird für _on_key_press benötigt, auch wenn es in ShiftPlanTab
+# nur via data_manager aufgerufen wird)
+from gui.planning_assistant import PlanningAssistant
 
 
 class ShiftPlanTab(ttk.Frame):
@@ -60,9 +64,30 @@ class ShiftPlanTab(ttk.Frame):
 
         # --- ENDE KORREKTUR ---
 
+        # --- NEU (Für Tastatur-Shortcuts) ---
+        # Definiert, welche Taste welches Kürzel auslöst.
+        # (Leerzeichen ' ' für "FREI")
+        self.shortcut_map = {
+            't': 'T.',
+            'n': 'N.',
+            '6': '6',
+            'f': '',  # 'f' für FREI
+            ' ': '',  # 'Leertaste' für FREI
+            'x': 'X',
+            'u': 'U',
+            's': 'S',
+            'q': 'QA',
+        }
+        # --- ENDE NEU ---
+
         self.grid_widgets = self.renderer.grid_widgets
 
-        self._menu_item_cache = self._prepare_shift_menu_items()
+        # --- KORREKTUR (AttributeError): Menü-Vorbereitung ---
+        # self._menu_item_cache = self._prepare_shift_menu_items()
+        # -> ENTFERNT. Das Menü wird jetzt "Just-in-Time" im
+        #    ActionHandler erstellt, wenn es benötigt wird.
+        # --- ENDE KORREKTUR ---
+
         self.progress_frame = None
         self.progress_bar = None
         self.status_label = None
@@ -88,39 +113,13 @@ class ShiftPlanTab(ttk.Frame):
         self.build_shift_plan_grid(current_app_date.year, current_app_date.month, data_ready=False)
 
         # --- ALTE (FEHLERHAFTE) LOGIK: ---
-        # if (self.data_manager.year == current_app_date.year and
-        #         self.data_manager.month == current_app_date.month and
-        #         self.data_manager.year != 0):
-        #
-        #     print(
-        #         f"[ShiftPlanTab] Nutze vorgeladene Monatsdaten ({current_app_date.year}-{current_app_date.month}) -> data_ready=True.")
-        #     self.build_shift_plan_grid(current_app_date.year, current_app_date.month, data_ready=True)
-        # else:
-        #     print(f"[ShiftPlanTab] Vorgeladene Daten ({self.data_manager.year}-{self.data_manager.month}) "
-        #           f"passen nicht zur Ansicht ({current_app_date.year}-{current_app_date.month}). Lade neu.")
-        #     self.build_shift_plan_grid(current_app_date.year, current_app_date.month)
+        # (Auskommentiert, siehe oben)
         # --- ENDE KORREKTUR ---
 
-    def _prepare_shift_menu_items(self):
-        # (unverändert)
-        all_abbrevs = list(self.app.shift_types_data.keys())
-        menu_config = {}
-        if self.action_handler:
-            menu_config = self.action_handler._menu_config_cache
-        else:
-            print("[WARNUNG] ActionHandler nicht bereit für Menü-Vorbereitung.")
-        shift_frequency = self.app.shift_frequency
-        sorted_abbrevs = sorted(all_abbrevs, key=lambda s: shift_frequency.get(s, 0), reverse=True)
-        prepared_items = []
-        for abbrev in sorted_abbrevs:
-            if menu_config.get(abbrev, True):
-                shift_info = self.app.shift_types_data.get(abbrev)
-                if shift_info:
-                    name = shift_info.get('name', abbrev);
-                    count = shift_frequency.get(abbrev, 0)
-                    label_text = f"{abbrev} ({name})" + (f"  (Bisher {count}x)" if count > 0 else "")
-                    prepared_items.append((abbrev, label_text))
-        return prepared_items
+    # --- KORREKTUR (AttributeError): Menü-Vorbereitung ---
+    # Die Funktion _prepare_shift_menu_items() wird entfernt.
+    # Sie wird in den ShiftPlanActionHandler verschoben (Regel 4).
+    # --- ENDE KORREKTUR ---
 
     def setup_ui(self):
         # (unverändert)
@@ -189,6 +188,11 @@ class ShiftPlanTab(ttk.Frame):
 
         self.canvas.bind('<Configure>', _configure_inner_frame);
         self.inner_frame.bind('<Configure>', _configure_scrollregion)
+
+        # --- NEU (Für Tastatur-Shortcuts) ---
+        self._bind_keyboard_shortcuts()
+        # --- ENDE NEU ---
+
         footer_frame = ttk.Frame(main_view_container);
         footer_frame.pack(fill="x", pady=(10, 0))
         check_frame = ttk.Frame(footer_frame);
@@ -241,8 +245,11 @@ class ShiftPlanTab(ttk.Frame):
                 if new_date.year != current_date.year or new_date.month != current_date.month:
                     self.app.current_display_date = new_date
                     if current_year != new_year:
-                        if hasattr(self.app, '_load_holidays_for_year'): self.app._load_holidays_for_year(new_year)
-                        if hasattr(self.app, '_load_events_for_year'): self.app._load_events_for_year(new_year)
+                        # --- KORREKTUR: Greife auf Bootloader.app zu ---
+                        if hasattr(self.app.app, '_load_holidays_for_year'): self.app.app._load_holidays_for_year(
+                            new_year)
+                        if hasattr(self.app.app, '_load_events_for_year'): self.app.app._load_events_for_year(new_year)
+                        # --- ENDE KORREKTUR ---
 
                     if hasattr(self.app, 'trigger_shift_plan_preload'):
                         self.app.trigger_shift_plan_preload(new_year, new_month)
@@ -367,6 +374,12 @@ class ShiftPlanTab(ttk.Frame):
                 if self.progress_frame and self.progress_frame.winfo_exists(): self.progress_frame.grid_forget()
                 return
             user_data_map = {user['id']: user for user in all_users}
+
+            # --- KORREKTUR: user_data_map im DataManager aktualisieren ---
+            # (Wichtig für PlanningAssistant, falls dieser vor dem Generator läuft)
+            self.data_manager.user_data_map = user_data_map
+            # --- ENDE KORREKTUR ---
+
             holidays_in_month = set()
             if hasattr(self.app.app, 'holiday_manager'):  # Prüfe Bootloader
                 year_holidays = self.app.app.holiday_manager.holidays.get(str(year), {})
@@ -388,7 +401,7 @@ class ShiftPlanTab(ttk.Frame):
             return
 
         generator = ShiftPlanGenerator(
-            app=self.app,
+            app=self.app.app,  # Übergib den Bootloader (für shift_types etc.)
             data_manager=self.data_manager,
             year=year, month=month, all_users=all_users, user_data_map=user_data_map,
             vacation_requests=vacation_requests, wunschfrei_requests=wunschfrei_requests,
@@ -474,8 +487,13 @@ class ShiftPlanTab(ttk.Frame):
         # (unverändert)
         error_message = None
         try:
-            self.data_manager.load_and_process_data(year, month, self._safe_update_progress)
-            self.after(1, lambda: self._render_grid(year, month))
+            # --- KORREKTUR: Rückgabewert prüfen ---
+            success = self.data_manager.load_and_process_data(year, month, self._safe_update_progress)
+            if success:
+                self.after(1, lambda: self._render_grid(year, month))
+            else:
+                raise Exception("load_and_process_data hat 'False' zurückgegeben.")
+            # --- ENDE KORREKTUR ---
         except Exception as e:
             print(f"FEHLER beim Laden der Daten im Thread: {e}")
             error_message = f"Fehler beim Laden der Daten:\n{e}"
@@ -583,7 +601,8 @@ class ShiftPlanTab(ttk.Frame):
                                  parent=self);
             return
         shifts_to_check_data = get_ordered_shift_abbrevs(include_hidden=False)
-        shifts_to_check = [item['abbreviation'] for item in shifts_to_check_data if item.get('check_for_understaffing')]
+        shifts_to_check = [item['abbreviation'] for item in shifts_to_check_data if
+                           item.get('check_for_understaffing')]
         understaffing_found = False
         self.understaffing_result_frame.pack(fill="x", pady=5, before=self.lock_button.master)
         for day in range(1, days_in_month + 1):
@@ -596,8 +615,10 @@ class ShiftPlanTab(ttk.Frame):
                     count = daily_counts.get(date_str, {}).get(shift, 0)
                     if count < min_req:
                         understaffing_found = True
+                        # --- KORREKTUR: Greife auf Bootloader.app zu ---
                         shift_name = self.app.app.shift_types_data.get(shift, {}).get('name',
                                                                                       shift)
+                        # --- ENDE KORREKTUR ---
                         ttk.Label(self.understaffing_result_frame,
                                   text=f"Unterbesetzung am {current_date.strftime('%d.%m.%Y')}: Schicht '{shift_name}' ({shift}) - {count} von {min_req} anwesend.",
                                   foreground="red", font=("Segoe UI", 10)).pack(anchor="w")
@@ -644,3 +665,80 @@ class ShiftPlanTab(ttk.Frame):
             if hasattr(self.app, 'refresh_antragssperre_views'): self.app.refresh_antragssperre_views()
         else:
             messagebox.showerror("Fehler", "Der Status konnte nicht gespeichert werden.", parent=self)
+
+    # --- NEUE METHODEN (Für Tastatur-Shortcuts) ---
+
+    def _bind_keyboard_shortcuts(self):
+        """Bindet Tastatur-Events an das Canvas, um Shortcuts zu ermöglichen."""
+        # Wir binden an das Canvas, da es den Hauptfokus beim Scrollen hat
+        # und die Events an die inneren Widgets (Labels) weitergibt.
+        self.canvas.bind("<Key>", self._on_key_press)
+
+        # WICHTIG: Damit das Canvas Tastatur-Events empfangen kann,
+        # muss es den Fokus erhalten können. Wir setzen den Fokus,
+        # wenn die Maus das Canvas betritt.
+        self.canvas.bind("<Enter>", lambda e: self.canvas.focus_set())
+
+    def _on_key_press(self, event):
+        """Verarbeitet einen Tastendruck als Schicht-Shortcut."""
+
+        # 1. Prüfen, ob eine Taste gedrückt wurde, die wir kennen
+        key = event.keysym.lower()
+        if key not in self.shortcut_map:
+            # Ignoriere Tasten wie "Shift", "Control" oder "a"
+            return
+
+            # 2. Ziel-Schicht ermitteln
+        target_shift_abbrev = self.shortcut_map[key]
+
+        # 3. Renderer fragen, wo die Maus ist
+        if not self.renderer:
+            return
+
+        coords = self.renderer.get_hovered_cell_coords()
+        if not coords:
+            # Maus ist nicht über einer gültigen Zelle
+            return
+
+        user_id, day = coords
+
+        # 4. Datum ermitteln
+        try:
+            # --- KORREKTUR (AttributeError) ---
+            # 'self' (ShiftPlanTab) hat nicht .year oder .month
+            # Wir müssen self.renderer (oder self.data_manager) fragen
+            if day == 0:  # "Ü"-Zelle
+                date_obj = date(self.renderer.year, self.renderer.month, 1) - timedelta(days=1)
+            else:
+                date_obj = date(self.renderer.year, self.renderer.month, day)
+            # --- ENDE KORREKTUR ---
+        except ValueError:
+            return  # Ungültiges Datum (z.B. 31. Feb)
+
+        # 5. Gültigkeit PRÜFEN (Regel 2: Keine DB-Latenz!)
+        # Wir nutzen den PlanningAssistant (via DataManager)
+        if not hasattr(self.data_manager, 'get_conflicts_for_shift'):
+            print("[FEHLER] PlanningAssistant-Funktion nicht im DataManager gefunden.")
+            return
+
+        conflicts = self.data_manager.get_conflicts_for_shift(user_id, date_obj, target_shift_abbrev)
+
+        if conflicts:
+            # Zeige den ersten Konflikt an (optional)
+            print(f"Shortcut blockiert: {conflicts[0]}")
+            # Mache ein "Ping"-Geräusch, um ungültige Eingabe zu signalisieren
+            self.bell()
+            return
+
+        # 6. Aktion AUSFÜHREN
+        # --- KORREKTUR (AttributeError) ---
+        # Rufe die korrekte Funktion 'save_shift_entry_and_refresh'
+        # aus dem ActionHandler auf (die auch das Menü verwendet).
+        print(f"[Shortcut] Weise zu: U:{user_id} D:{day} -> '{target_shift_abbrev}'")
+        self.action_handler.save_shift_entry_and_refresh(
+            user_id,
+            date_obj.strftime('%Y-%m-%d'),  # Die Funktion erwartet einen String
+            target_shift_abbrev
+        )
+        # --- ENDE KORREKTUR ---
+

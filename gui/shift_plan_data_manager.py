@@ -14,6 +14,8 @@ from gui.shift_lock_manager import ShiftLockManager
 # Importiere die Helfer aus dem neuen Unterordner
 from .data_manager.dm_violation_manager import ViolationManager
 from .data_manager.dm_helpers import DataManagerHelpers
+# --- NEUER IMPORT (Regel 2 & 4): Latenz-Problem beheben ---
+from gui.planning_assistant import PlanningAssistant
 
 
 # --- ENDE NEUE IMPORTE ---
@@ -46,6 +48,11 @@ class ShiftPlanDataManager:
         self.locked_shifts_cache = {}
         self.cached_users_for_month = []
 
+        # --- NEU: user_data_map (wird für PlanningAssistant benötigt) ---
+        # Stellt sicher, dass die User-Metadaten immer verfügbar sind
+        self.user_data_map = {}
+        # --- ENDE NEU ---
+
         # Aktive Caches (Konflikte)
         self.violation_cells = set()
 
@@ -60,6 +67,10 @@ class ShiftPlanDataManager:
         # Wichtig: 'self' (die DataManager-Instanz) wird übergeben
         self.vm = ViolationManager(self)  # Violation Manager
         self.helpers = DataManagerHelpers(self)  # Helpers (Stunden, Config, etc.)
+
+        # --- NEU (Regel 2 & 4): Latenz-Problem beheben ---
+        # Initialisiert den Assistenten für sofortige UI-Validierung
+        self.planning_assistant = PlanningAssistant(self)
         # --- ENDE NEU ---
 
         # ShiftLockManager (greift jetzt auf self.locked_shifts_cache zu)
@@ -82,6 +93,8 @@ class ShiftPlanDataManager:
         self.wunschfrei_data_prev = {}
         self.next_month_shifts = {}
         self.cached_users_for_month = []
+
+        # self.user_data_map wird NICHT geleert, da es App-global ist
 
         # Hinweis: Die Helfer-Caches (z.B. in vm._preprocessed_shift_times)
         # werden *nicht* geleert, da sie global gültig sind (z.B. Schichtzeiten).
@@ -187,11 +200,19 @@ class ShiftPlanDataManager:
             self.cached_users_for_month = cached_data['cached_users_for_month']
             self.locked_shifts_cache = cached_data.get('locked_shifts', {})
 
+            # --- NEU: user_data_map aus Cache laden ---
+            # (Wichtig für PlanningAssistant, falls App neu gestartet wurde)
+            if 'user_data_map' in cached_data:
+                self.user_data_map = cached_data['user_data_map']
+            # --- ENDE NEU ---
+
             # Schichtzeiten-Cache (global) sicherstellen (delegiert)
             self.vm.preprocess_shift_times()
 
             update_progress(95, "Vorbereitung abgeschlossen.")
-            return self.shift_schedule_data, self.processed_vacations, self.wunschfrei_data, self.daily_counts
+            # --- KORREKTUR: Rückgabewert an ShiftPlanTab angepasst ---
+            return True  # Erfolg
+            # --- ENDE KORREKTUR ---
 
         # 2. NICHT IM CACHE: Von DB laden
         print(f"[DM] Lade Monat {year}-{month} von DB (nicht im P5-Cache).")
@@ -202,6 +223,7 @@ class ShiftPlanDataManager:
             '_prev_month_shifts': {}, 'previous_month_shifts': {},
             'processed_vacations_prev': {}, 'wunschfrei_data_prev': {},
             'next_month_shifts': {}, 'cached_users_for_month': [],
+            'user_data_map': {}  # NEU
         }
 
         update_progress(10, "Lade alle Plandaten (Batch-Optimierung)...")
@@ -210,12 +232,20 @@ class ShiftPlanDataManager:
 
         batch_data = get_all_data_for_plan_display(year, month, current_date_for_archive_check)
         if batch_data is None:
-            raise Exception("Fehler beim Abrufen der Batch-Daten aus der Datenbank.")
+            # --- KORREKTUR: Rückgabewert an ShiftPlanTab angepasst ---
+            print("[FEHLER] get_all_data_for_plan_display hat None zurückgegeben.")
+            return False  # Misserfolg
+            # --- ENDE KORREKTUR ---
 
         update_progress(60, "Verarbeite Schicht- und Antragsdaten...")
 
         # 2b. Daten in temporäre Caches entpacken (delegiert)
         temp_data['cached_users_for_month'] = batch_data.get('users', [])
+
+        # --- NEU: user_data_map füllen (wichtig für PlanningAssistant)
+        temp_data['user_data_map'] = {u['id']: u for u in temp_data['cached_users_for_month']}
+        # --- ENDE NEU ---
+
         temp_data['locked_shifts_cache'] = batch_data.get('locks', {})
         temp_data['shift_schedule_data'] = batch_data.get('shifts', {})
         temp_data['wunschfrei_data'] = batch_data.get('wunschfrei_requests', {})
@@ -273,6 +303,7 @@ class ShiftPlanDataManager:
         self.wunschfrei_data_prev = temp_data['wunschfrei_data_prev']
         self.next_month_shifts = temp_data['next_month_shifts']
         self.cached_users_for_month = temp_data['cached_users_for_month']
+        self.user_data_map = temp_data['user_data_map']  # NEU
 
         update_progress(80, "Prüfe Konflikte (Ruhezeit, Hunde)...")
         # Volle Konfliktprüfung (delegiert)
@@ -295,9 +326,12 @@ class ShiftPlanDataManager:
             'next_month_shifts': self.next_month_shifts,
             'cached_users_for_month': self.cached_users_for_month,
             'locked_shifts': self.locked_shifts_cache,
+            'user_data_map': self.user_data_map  # NEU
         }
 
-        return self.shift_schedule_data, self.processed_vacations, self.wunschfrei_data, self.daily_counts
+        # --- KORREKTUR: Rückgabewert an ShiftPlanTab angepasst ---
+        return True  # Erfolg
+        # --- ENDE KORREKTUR ---
 
     def recalculate_daily_counts_for_day(self, date_obj, old_shift, new_shift):
         """Aktualisiert self.daily_counts für einen bestimmten Tag nach Schichtänderung."""
@@ -332,3 +366,12 @@ class ShiftPlanDataManager:
             del self.daily_counts[date_str]
 
         print(f"[DM Counts] Neue Zählung für {date_str}: {self.daily_counts.get(date_str, {})}")
+
+    # --- NEU: Delegierung an PlanningAssistant (behebt den AttributeError) ---
+    def get_conflicts_for_shift(self, user_id, date_obj, target_shift_abbrev):
+        """
+        Delegiert die sofortige Konfliktprüfung an den PlanningAssistant.
+        Nutzt nur Cache-Daten (Regel 2).
+        """
+        return self.planning_assistant.get_conflicts_for_shift(user_id, date_obj, target_shift_abbrev)
+    # --- ENDE NEU ---

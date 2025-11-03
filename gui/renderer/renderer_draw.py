@@ -1,5 +1,6 @@
 # gui/renderer/renderer_draw.py
 # NEU: Ausgelagerte Logik für das initiale Zeichnen des Grids (Regel 4)
+# ANGEPASST: Fügt <Enter> Bindings für Tastatur-Shortcuts hinzu
 
 import tkinter as tk
 from tkinter import ttk
@@ -104,8 +105,10 @@ class RendererDraw:
 
             # Stunden
             total_hours = self.dm.calculate_total_hours_for_user(user_id_str, self.renderer.year, self.renderer.month)
-            total_hours_label = tk.Label(plan_grid_frame, text=str(total_hours), font=("Segoe UI", 10, "bold"),
+            # --- KORREKTUR (Regel 2): Stunden korrekt formatieren ---
+            total_hours_label = tk.Label(plan_grid_frame, text=f"{total_hours:.1f}", font=("Segoe UI", 10, "bold"),
                                          bg="white", fg="black", padx=5, pady=5, bd=1, relief="solid", anchor="e")
+            # --- ENDE KORREKTUR ---
             total_hours_label.grid(row=current_row, column=days_in_month + 3, sticky="nsew")
             self.renderer.grid_widgets['user_totals'][user_id_str] = total_hours_label
 
@@ -118,6 +121,12 @@ class RendererDraw:
             self.styling._apply_prev_month_cell_color(user_id, prev_month_last_day, frame_ue, label_ue,
                                                       prev_shift_display)
             self.renderer.grid_widgets['cells'][user_id_str][0] = {'frame': frame_ue, 'label': label_ue}
+
+            # --- NEU (Für Tastatur-Shortcuts) ---
+            # Binde Hover-Events an die "Ü"-Zelle (Tag 0)
+            label_ue.bind("<Enter>", lambda e, uid=user_id: self.renderer.set_hovered_cell(uid, 0))
+            frame_ue.bind("<Enter>", lambda e, uid=user_id: self.renderer.set_hovered_cell(uid, 0))
+            # --- ENDE NEU ---
 
             # Tageszellen
             for day in range(1, days_in_month + 1):
@@ -137,7 +146,13 @@ class RendererDraw:
                 elif vacation_status == 'Ausstehend':
                     final_display_text = "U?"
                 elif request_info:
-                    status, requested_shift, requested_by, _ = request_info
+                    # --- KORREKTUR: Sicheres Entpacken von request_info ---
+                    try:
+                        status, requested_shift, requested_by, _ = request_info
+                    except (TypeError, ValueError):
+                        status, requested_shift, requested_by = None, None, None
+                    # --- ENDE KORREKTUR ---
+
                     if status == 'Ausstehend':
                         if requested_by == 'admin':
                             final_display_text = f"{requested_shift} (A)?"
@@ -183,6 +198,12 @@ class RendererDraw:
                                lambda e, uid=user_id, dt=date_str: self.ah.show_wunschfrei_context_menu(e, uid, dt))
                 else:
                     label.unbind("<Button-3>")
+
+                # --- NEU (Für Tastatur-Shortcuts) ---
+                # Binde Hover-Events an die Tageszelle (Tag 1-31)
+                label.bind("<Enter>", lambda e, uid=user_id, d=day: self.renderer.set_hovered_cell(uid, d))
+                frame.bind("<Enter>", lambda e, uid=user_id, d=day: self.renderer.set_hovered_cell(uid, d))
+                # --- ENDE NEU ---
 
                 self.renderer.grid_widgets['cells'][user_id_str][day] = {'frame': frame, 'label': label}
 
@@ -238,7 +259,13 @@ class RendererDraw:
                 min_req = self.dm.get_min_staffing_for_date(current_date).get(abbrev)
 
                 display_text = str(count)
-                if min_req is not None: display_text = f"{count}/{min_req}"
+                # --- KORREKTUR (Regel 2): Logik zur Zählanzeige ---
+                if min_req is not None and min_req > 0:
+                    display_text = f"{count}/{min_req}"
+                elif min_req is None and count == 0:
+                    display_text = ""  # Zeige 0 nicht an, wenn nicht geplant
+                # --- ENDE KORREKTUR ---
+
                 if abbrev == "6" and (not is_friday or is_holiday): display_text = ""
 
                 count_label = tk.Label(plan_grid_frame, text=display_text, font=("Segoe UI", 9), bd=1,
@@ -255,4 +282,7 @@ class RendererDraw:
 
         # Abschluss: UI im Tab finalisieren (Aufruf an den Haupt-Renderer)
         if self.renderer.master and self.renderer.master.winfo_exists():
-            self.renderer.master._finalize_ui_after_render()
+            if hasattr(self.renderer.master, '_finalize_ui_after_render'):
+                self.renderer.master._finalize_ui_after_render()
+            else:
+                print("[FEHLER] Renderer-Master (ShiftPlanTab) hat keine _finalize_ui_after_render Methode.")

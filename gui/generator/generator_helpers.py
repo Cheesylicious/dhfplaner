@@ -11,7 +11,7 @@ class GeneratorHelpers:
     def __init__(self, generator_instance):
         self.gen = generator_instance
         self._next_month_shifts = None  # Cache für Folgemonatsdaten
-        # NEU: Schichten, die als fortlaufende Arbeitstage gezählt werden müssen (inkl. QA und S)
+        # NEU: Schichten, die als fortlaufende Arbeitstage gezählt werden müssen (inkl. QA/S)
         self.hard_work_indicators = {'T.', 'N.', '6', '24', 'QA', 'S'}
 
     def check_time_overlap_optimized(self, shift1_abbrev, shift2_abbrev):
@@ -28,21 +28,29 @@ class GeneratorHelpers:
         """
         Holt die *Arbeits*-Schicht vom Vortag (ignoriert U, X, WF etc.).
         Gibt die Schichtabkürzung zurück, oder "" falls kein Dienst.
+
+        KORREKTUR (N->T Problem): Priorisiert die Vormonatsdatenbank,
+        wenn das Datum im Vormonat liegt.
         """
         check_date_str = check_date_obj.strftime('%Y-%m-%d')
-        shifts_data = self.gen.live_shifts_data.get(user_id_str, {})
 
-        shift = shifts_data.get(check_date_str)
-        if shift and shift not in self.gen.free_shifts_indicators:
-            return shift
-
-        # Wenn die Schicht nicht im aktuellen Monat liegt, lade Vormonat
+        # --- KORREKTUR (N->T Problem) ---
+        # 1. Prüfe, ob das Datum im Vormonat liegt
         if check_date_obj.month != self.gen.month:
-            # Hier greifen wir auf die Methode zu, die in ShiftPlanDataManager bereitgestellt wird (siehe Korrektur oben)
+            # Hier greifen wir auf die Methode zu, die in ShiftPlanDataManager bereitgestellt wird
             prev_month_data = self.gen.data_manager.get_previous_month_shifts().get(user_id_str, {})
             shift = prev_month_data.get(check_date_str)
             if shift and shift not in self.gen.free_shifts_indicators:
                 return shift
+            # Explizit "" zurückgeben, wenn im Vormonat nichts gefunden wurde
+            return ""
+
+            # 2. Wenn nicht im Vormonat, prüfe live_shifts_data (aktueller Monat)
+        shifts_data = self.gen.live_shifts_data.get(user_id_str, {})
+        shift = shifts_data.get(check_date_str)
+        if shift and shift not in self.gen.free_shifts_indicators:
+            return shift
+        # --- ENDE KORREKTUR ---
 
         return ""  # Kein Dienst gefunden
 
@@ -50,21 +58,28 @@ class GeneratorHelpers:
         """
         Holt die Schicht vom Vortag, *inklusive* Freischichten.
         Gibt die Schichtabkürzung (oder None) zurück.
+
+        KORREKTUR (N->T Problem): Priorisiert die Vormonatsdatenbank,
+        wenn das Datum im Vormonat liegt.
         """
         check_date_str = check_date_obj.strftime('%Y-%m-%d')
-        shifts_data = self.gen.live_shifts_data.get(user_id_str, {})
 
-        shift = shifts_data.get(check_date_str)
-        if shift is not None:
-            return shift
-
-        # Wenn die Schicht nicht im aktuellen Monat liegt, lade Vormonat
+        # --- KORREKTUR (N->T Problem) ---
+        # 1. Prüfe, ob das Datum im Vormonat liegt
         if check_date_obj.month != self.gen.month:
-            # Hier greifen wir auf die Methode zu, die in ShiftPlanDataManager bereitgestellt wird (siehe Korrektur oben)
+            # Hier greifen wir auf die Methode zu, die in ShiftPlanDataManager bereitgestellt wird
             prev_month_data = self.gen.data_manager.get_previous_month_shifts().get(user_id_str, {})
             shift = prev_month_data.get(check_date_str)
             if shift is not None:
                 return shift
+            return None  # Explizit None zurückgeben
+
+        # 2. Wenn nicht im Vormonat, prüfe live_shifts_data (aktueller Monat)
+        shifts_data = self.gen.live_shifts_data.get(user_id_str, {})
+        shift = shifts_data.get(check_date_str)
+        if shift is not None:
+            return shift
+        # --- ENDE KORREKTUR ---
 
         return None  # Kein Eintrag gefunden
 
@@ -180,3 +195,4 @@ class GeneratorHelpers:
             return free_days_count >= self.gen.mandatory_rest_days
 
         return True  # Block war zu kurz, keine obligatorische Ruhezeit nötig
+

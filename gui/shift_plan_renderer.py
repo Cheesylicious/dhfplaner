@@ -41,6 +41,11 @@ class ShiftPlanRenderer:
         self.month = 0
         self.users_to_render = []
 
+        # --- NEU (Für Tastatur-Shortcuts) ---
+        # Speichert (user_id, day_of_month) der Zelle unter dem Mauszeiger
+        self.hovered_cell_coords = None
+        # --- ENDE NEU ---
+
         # --- NEU (Refactoring): Helfer-Klassen instanziieren ---
         self.styling_helper = RendererStyling(self)
         self.printer = RendererPrinter(self)
@@ -63,6 +68,13 @@ class ShiftPlanRenderer:
 
     def set_plan_grid_frame(self, frame):
         self.plan_grid_frame = frame
+
+        # --- NEU (Für Tastatur-Shortcuts) ---
+        # Wenn die Maus das gesamte Grid-Frame verlässt,
+        # setzen wir die Hover-Koordinaten zurück.
+        if self.plan_grid_frame:
+            self.plan_grid_frame.bind("<Leave>", self._on_mouse_leave_grid)
+        # --- ENDE NEU ---
 
     # --- Methoden für Caching und Styling (delegiert) ---
 
@@ -95,6 +107,11 @@ class ShiftPlanRenderer:
         print(f"[Renderer] Baue Grid für {year}-{month:02d}...")
         self.year, self.month = year, month
 
+        # --- NEU (Für Tastatur-Shortcuts) ---
+        # Setze Hover-Koordinaten zurück, da das Gitter neu gezeichnet wird
+        self.hovered_cell_coords = None
+        # --- ENDE NEU ---
+
         # 1. Styling-Cache vorbereiten
         self._pre_calculate_day_data(year, month)
 
@@ -120,8 +137,15 @@ class ShiftPlanRenderer:
             # Fallback (sollte dank Preloading selten sein)
             print("[WARNUNG] Renderer führt synchronen Daten-Reload durch!")
             try:
-                self.shifts_data, self.processed_vacations, self.wunschfrei_data, self.daily_counts = self.dm.load_and_process_data(
-                    year, month)
+                # --- KORREKTUR: load_and_process_data gibt keinen Wert zurück ---
+                # (Es füllt die DM-Caches, wir müssen sie danach lesen)
+                self.dm.load_and_process_data(year, month)
+                self.shifts_data = self.dm.shift_schedule_data
+                self.processed_vacations = self.dm.processed_vacations
+                self.wunschfrei_data = self.dm.wunschfrei_data
+                self.daily_counts = self.dm.daily_counts
+                # --- ENDE KORREKTUR ---
+
                 self.prev_month_shifts = self.dm.get_previous_month_shifts()
                 self.processed_vacations_prev = getattr(self.dm, 'processed_vacations_prev', {})
                 self.wunschfrei_data_prev = getattr(self.dm, 'wunschfrei_data_prev', {})
@@ -194,7 +218,15 @@ class ShiftPlanRenderer:
         elif vacation_status == 'Ausstehend':
             final_display_text = "U?"
         elif request_info:
-            status, requested_shift, requested_by, _ = request_info
+            # --- KORREKTUR: request_info Entpacken (basiert auf db_plan_loader) ---
+            # request_info ist (status, requested_shift, requested_by, request_id)
+            try:
+                status, requested_shift, requested_by, _ = request_info
+            except (TypeError, ValueError):
+                print(f"[FEHLER] Unerwartetes request_info Format: {request_info}")
+                status, requested_shift, requested_by = None, None, None
+            # --- ENDE KORREKTUR ---
+
             if status == 'Ausstehend':
                 if requested_by == 'admin':
                     final_display_text = f"{requested_shift} (A)?"
@@ -246,7 +278,7 @@ class ShiftPlanRenderer:
         if not label: return
         total_hours = self.dm.calculate_total_hours_for_user(user_id_str, self.year, self.month)
         if label.winfo_exists():
-            label.config(text=str(total_hours))
+            label.config(text=f"{total_hours:.1f}")  # Formatierung als Float
 
     def update_daily_counts_for_day(self, day, date_obj):
         """Aktualisiert alle Zähl-Labels für einen bestimmten Tag."""
@@ -261,13 +293,19 @@ class ShiftPlanRenderer:
                 count = current_counts_for_day.get(abbrev, 0)
                 min_req = min_staffing_for_day.get(abbrev)
                 display_text = str(count)
-                if min_req is not None: display_text = f"{count}/{min_req}"
+                if min_req is not None and min_req > 0:  # Zeige 0/0 nicht an
+                    display_text = f"{count}/{min_req}"
+                elif min_req is None and count == 0:  # Zeige 0 nicht an, wenn nicht geplant
+                    display_text = ""
+
                 is_friday = date_obj.weekday() == 4;
 
                 day_data = self.get_day_data(day)  # Nutze Cache
                 is_holiday = day_data['is_holiday']
 
-                if abbrev == "6" and (not is_friday or is_holiday): display_text = ""
+                if abbrev == "6" and not (is_friday or is_holiday):
+                    display_text = ""
+
                 count_label.config(text=display_text)
                 self.apply_daily_count_color(abbrev, day, date_obj, count_label, count, min_req)  # Delegiert
 
@@ -329,7 +367,13 @@ class ShiftPlanRenderer:
                 elif vacation_status == 'Ausstehend':
                     final_display_text = 'U?'
                 elif request_info:
-                    status, requested_shift, requested_by, _ = request_info
+                    # --- KORREKTUR: request_info Entpacken (basiert auf db_plan_loader) ---
+                    try:
+                        status, requested_shift, requested_by, _ = request_info
+                    except (TypeError, ValueError):
+                        status, requested_shift, requested_by = None, None, None
+                    # --- ENDE KORREKTUR ---
+
                     if status == 'Ausstehend':
                         if requested_shift == 'WF':
                             final_display_text = 'WF'
@@ -356,3 +400,27 @@ class ShiftPlanRenderer:
     def print_shift_plan(self, year, month, month_name):
         """Delegiert die Erstellung der HTML-Druckansicht an den Helfer."""
         self.printer.print_shift_plan(year, month, month_name)
+
+    # --- NEUE METHODEN (Für Tastatur-Shortcuts) ---
+
+    def set_hovered_cell(self, user_id, day):
+        """ Speichert die Zelle, über der die Maus schwebt. """
+        self.hovered_cell_coords = (user_id, day)
+
+    def clear_hovered_cell(self):
+        """ Löscht die Hover-Information. """
+        self.hovered_cell_coords = None
+
+    def get_hovered_cell_coords(self):
+        """
+        Gibt die Zelle zurück, über der die Maus schwebt.
+        Returns:
+            tuple (user_id, day) or None
+        """
+        return self.hovered_cell_coords
+
+    def _on_mouse_leave_grid(self, event):
+        """ Setzt die Hover-Koordinaten zurück, wenn die Maus das Gitter verlässt. """
+        self.clear_hovered_cell()
+
+    # --- ENDE NEUE METHODEN ---
