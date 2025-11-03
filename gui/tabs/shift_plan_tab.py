@@ -44,14 +44,22 @@ class ShiftPlanTab(ttk.Frame):
 
         # --- Ende DataManager Übernahme ---
 
-        # --- KORREKTUR: self.data_manager an den ActionHandler übergeben ---
-        # Zuvor stand hier fälschlicherweise 'self' als drittes Argument,
-        # was dem ActionHandler das ShiftPlanTab-Frame statt des DataManagers gab.
+        # --- KORREKTUR (Refactoring): Renderer-abhängige Initialisierung ---
+        # Behebt den Fehler "Renderer nicht verfügbar"
+
+        # 1. ActionHandler initialisieren (bekommt 'None' als Renderer)
+        # (Das dritte Argument ist der data_manager, das ist korrekt)
         self.action_handler = ShiftPlanActionHandler(self, app, self.data_manager, None)
+
+        # 2. Renderer initialisieren (bekommt den ActionHandler)
+        self.renderer = ShiftPlanRenderer(self, bootloader_app, self.data_manager, self.action_handler)
+
+        # 3. Renderer-Instanz an ActionHandler übergeben & Helfer initialisieren
+        # (Dies ist der entscheidende Fix, der die Helfer im ActionHandler aktiviert)
+        self.action_handler.set_renderer_and_init_helpers(self.renderer)
+
         # --- ENDE KORREKTUR ---
 
-        self.renderer = ShiftPlanRenderer(self, bootloader_app, self.data_manager, self.action_handler)
-        self.action_handler.renderer = self.renderer
         self.grid_widgets = self.renderer.grid_widgets
 
         self._menu_item_cache = self._prepare_shift_menu_items()
@@ -63,25 +71,20 @@ class ShiftPlanTab(ttk.Frame):
         self.renderer.set_plan_grid_frame(self.plan_grid_frame)
 
         # --- KORREKTUR: build_shift_plan_grid intelligent aufrufen ---
-        # Prüfen, ob die vorgeladenen Daten (vom aktuellen Tag) für die
-        # aktuelle Ansicht (die standardmäßig auch der aktuelle Tag ist) passen.
+        # (Logik bleibt unverändert)
 
         current_app_date = self.app.current_display_date
 
-        # Prüfen, ob der DM Daten geladen hat UND ob sie für den Monat sind,
-        # den wir anzeigen wollen.
         if (self.data_manager.year == current_app_date.year and
                 self.data_manager.month == current_app_date.month and
-                self.data_manager.year != 0):  # (Stellt sicher, dass überhaupt etwas geladen wurde)
+                self.data_manager.year != 0):
 
             print(
                 f"[ShiftPlanTab] Nutze vorgeladene Monatsdaten ({current_app_date.year}-{current_app_date.month}) -> data_ready=True.")
-            # Starte das Rendering direkt mit den vorgeladenen Daten
             self.build_shift_plan_grid(current_app_date.year, current_app_date.month, data_ready=True)
         else:
             print(f"[ShiftPlanTab] Vorgeladene Daten ({self.data_manager.year}-{self.data_manager.month}) "
                   f"passen nicht zur Ansicht ({current_app_date.year}-{current_app_date.month}). Lade neu.")
-            # Standard-Ladevorgang (asynchron)
             self.build_shift_plan_grid(current_app_date.year, current_app_date.month)
 
     def _prepare_shift_menu_items(self):
@@ -227,12 +230,10 @@ class ShiftPlanTab(ttk.Frame):
                         if hasattr(self.app, '_load_holidays_for_year'): self.app._load_holidays_for_year(new_year)
                         if hasattr(self.app, '_load_events_for_year'): self.app._load_events_for_year(new_year)
 
-                    # --- NEU (P4): Preloader beim Monatswechsel per Dialog triggern ---
                     if hasattr(self.app, 'trigger_shift_plan_preload'):
                         self.app.trigger_shift_plan_preload(new_year, new_month)
-                    # --- ENDE NEU ---
 
-                    self.build_shift_plan_grid(new_year, new_month)  # Standard-Ladevorgang
+                    self.build_shift_plan_grid(new_year, new_month)
                 dialog.destroy()
             except ValueError:
                 messagebox.showerror("Fehler", "Ungültige Monats- oder Jahresauswahl.", parent=dialog)
@@ -383,7 +384,7 @@ class ShiftPlanTab(ttk.Frame):
         self.after(0, lambda v=value, t=text: self._update_progress(v, t))
 
     def _on_generation_complete(self, success, save_count, error_message):
-        # (unverändert)
+        # (Angepasst: Cache-Invalidierung)
         year = self.app.current_display_date.year
         month = self.app.current_display_date.month
         if self.progress_frame and self.progress_frame.winfo_exists():
@@ -391,6 +392,16 @@ class ShiftPlanTab(ttk.Frame):
             if self.plan_grid_frame.winfo_exists():
                 self.plan_grid_frame.grid_rowconfigure(0, weight=0)
                 self.plan_grid_frame.grid_columnconfigure(0, weight=0)
+
+        # --- KORREKTUR (Problem 2): P5-Cache invalidieren ---
+        # (Wird VOR dem Neuladen aufgerufen)
+        if hasattr(self, 'data_manager') and hasattr(self.data_manager, 'invalidate_month_cache'):
+            print(f"[ShiftPlanTab] Invalidiere DM-Cache für {year}-{month} nach Generierung.")
+            self.data_manager.invalidate_month_cache(year, month)
+        else:
+            print("[WARNUNG] DataManager oder invalidate_month_cache nicht gefunden. Cache nicht invalidiert.")
+        # --- ENDE KORREKTUR ---
+
         if success:
             messagebox.showinfo("Erfolg",
                                 f"Plan-Generierung abgeschlossen.\n{save_count} Dienste wurden eingetragen.",
@@ -401,12 +412,7 @@ class ShiftPlanTab(ttk.Frame):
             self.build_shift_plan_grid(year, month)  # Trotzdem neu laden
 
     def build_shift_plan_grid(self, year, month, data_ready=False):
-        """
-        Startet den Lade- oder Zeichenprozess.
-        Wenn data_ready=True, wird angenommen, dass der DataManager
-        die Daten für year/month bereits geladen hat und nur gezeichnet wird.
-        """
-        # (Angepasst: Lade-UI nur anzeigen, wenn data_ready=False)
+        # (unverändert)
         month_name_german = {"January": "Januar", "February": "Februar", "March": "März", "April": "April",
                              "May": "Mai", "June": "Juni", "July": "Juli", "August": "August", "September": "September",
                              "October": "Oktober", "November": "November", "December": "Dezember"}
@@ -418,23 +424,15 @@ class ShiftPlanTab(ttk.Frame):
             self.month_label_var.set(f"Ungültiger Monat {month}/{year}")
         self.update_lock_status()
 
-        # UI zurücksetzen
         for widget in self.plan_grid_frame.winfo_children(): widget.destroy()
         if self.renderer: self.renderer.grid_widgets = {'cells': {}, 'user_totals': {}, 'daily_counts': {}}
 
         if data_ready:
-            # --- DATEN SIND BEREITS VORGELADEN (vom Bootloader) ---
             print(f"[ShiftPlanTab] Starte sofortiges Rendering für {year}-{month} (data_ready=True).")
-            # Wir müssen sicherstellen, dass die UI für das Rendering bereit ist
-            # (insb. der Ladebalken weg ist, falls er noch da war)
-            self._create_progress_widgets()  # Erstellt, aber...
-            self.progress_frame.grid_forget()  # ...sofort versteckt.
-
-            # Starte das Rendering direkt (synchron im UI-Thread)
+            self._create_progress_widgets()
+            self.progress_frame.grid_forget()
             self._render_grid(year, month)
-
         else:
-            # --- STANDARD-LADEVORGANG (z.B. Monatswechsel) ---
             self._create_progress_widgets()
             self.progress_frame.grid(row=0, column=0, sticky="nsew", padx=20, pady=20)
             self.plan_grid_frame.grid_rowconfigure(0, weight=1);
@@ -455,9 +453,7 @@ class ShiftPlanTab(ttk.Frame):
         # (unverändert)
         error_message = None
         try:
-            # Nutzt den DataManager, um Daten zu laden UND zu verarbeiten
             self.data_manager.load_and_process_data(year, month, self._safe_update_progress)
-            # Nach erfolgreichem Laden, starte das Rendering im UI-Thread
             self.after(1, lambda: self._render_grid(year, month))
         except Exception as e:
             print(f"FEHLER beim Laden der Daten im Thread: {e}")
@@ -470,17 +466,13 @@ class ShiftPlanTab(ttk.Frame):
         # (unverändert)
         if not self.renderer: print("[FEHLER] Renderer nicht initialisiert in _render_grid."); return
 
-        # (Sicherstellen, dass Lade-UI weg ist, falls sie noch nicht weg war)
         if self.progress_bar and self.progress_bar.winfo_exists():
             self.progress_bar.config(value=100)
         if self.status_label and self.status_label.winfo_exists():
             self.status_label.config(text="Zeichne Gitter...")
         self.update_idletasks()
 
-        # Ruft den Renderer auf. data_ready=True, da der DM die Daten jetzt hält.
         self.renderer.build_shift_plan_grid(year, month, data_ready=True)
-
-        # (Das _finalize_ui_after_render wird vom Renderer selbst aufgerufen)
 
     def _finalize_ui_after_render(self):
         # (unverändert)
@@ -500,7 +492,7 @@ class ShiftPlanTab(ttk.Frame):
         try:
             print("   -> Lade Daten synchron für Refresh...");
             self.data_manager.load_and_process_data(year,
-                                                    month);  # Lädt neu
+                                                    month);
             print(
                 "   -> Daten für Refresh geladen.")
         except Exception as e:
@@ -509,7 +501,7 @@ class ShiftPlanTab(ttk.Frame):
         if self.renderer:
             print("   -> Zeichne Grid neu für Refresh...");
             self.renderer.build_shift_plan_grid(year, month,
-                                                data_ready=True);  # Zeichnet neu mit geladenen Daten
+                                                data_ready=True);
             print(
                 "   -> Grid für Refresh neu gezeichnet.")
         else:
@@ -531,16 +523,13 @@ class ShiftPlanTab(ttk.Frame):
         new_year, new_month = self.app.current_display_date.year, self.app.current_display_date.month
         self.app.current_display_date = self.app.current_display_date.replace(day=1)
         if current_date.year != new_year:
-            # (Prüfe self.app.app (Bootloader) für die Hilfsfunktionen)
             if hasattr(self.app.app, 'load_holidays_for_year'): self.app.app.load_holidays_for_year(new_year)
             if hasattr(self.app.app, 'load_events_for_year'): self.app.app.load_events_for_year(new_year)
 
-        # --- NEU (P4): Preloader beim Blättern triggern ---
         if hasattr(self.app, 'trigger_shift_plan_preload'):
             self.app.trigger_shift_plan_preload(new_year, new_month)
-        # --- ENDE NEU ---
 
-        self.build_shift_plan_grid(new_year, new_month)  # Standard-Ladevorgang
+        self.build_shift_plan_grid(new_year, new_month)
 
     def show_next_month(self):
         # (Angepasst)
@@ -554,12 +543,10 @@ class ShiftPlanTab(ttk.Frame):
             if hasattr(self.app.app, 'load_holidays_for_year'): self.app.app.load_holidays_for_year(new_year)
             if hasattr(self.app.app, 'load_events_for_year'): self.app.app.load_events_for_year(new_year)
 
-        # --- NEU (P4): Preloader beim Blättern triggern ---
         if hasattr(self.app, 'trigger_shift_plan_preload'):
             self.app.trigger_shift_plan_preload(new_year, new_month)
-        # --- ENDE NEU ---
 
-        self.build_shift_plan_grid(new_year, new_month)  # Standard-Ladevorgang
+        self.build_shift_plan_grid(new_year, new_month)
 
     def check_understaffing(self):
         # (unverändert)
@@ -574,7 +561,6 @@ class ShiftPlanTab(ttk.Frame):
                                  "Tageszählungen (daily_counts) nicht im DataManager gefunden.\nBitte warten Sie, bis der Plan geladen ist.",
                                  parent=self);
             return
-        # (Prüfe self.app.app (Bootloader) für die shift_types_data)
         shifts_to_check_data = get_ordered_shift_abbrevs(include_hidden=False)
         shifts_to_check = [item['abbreviation'] for item in shifts_to_check_data if item.get('check_for_understaffing')]
         understaffing_found = False
@@ -590,7 +576,7 @@ class ShiftPlanTab(ttk.Frame):
                     if count < min_req:
                         understaffing_found = True
                         shift_name = self.app.app.shift_types_data.get(shift, {}).get('name',
-                                                                                      shift)  # Hole Namen vom Bootloader
+                                                                                      shift)
                         ttk.Label(self.understaffing_result_frame,
                                   text=f"Unterbesetzung am {current_date.strftime('%d.%m.%Y')}: Schicht '{shift_name}' ({shift}) - {count} von {min_req} anwesend.",
                                   foreground="red", font=("Segoe UI", 10)).pack(anchor="w")
