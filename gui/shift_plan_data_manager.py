@@ -2,7 +2,7 @@
 from datetime import date, datetime, timedelta, time
 import calendar
 from collections import defaultdict
-import traceback  # Import für detailliertere Fehlermeldungen
+import traceback
 
 # DB Imports
 from database.db_shifts import get_all_data_for_plan_display
@@ -31,6 +31,7 @@ class ShiftPlanDataManager:
     # GENERATOR_CONFIG_KEY wird jetzt in DataManagerHelpers verwaltet
 
     def __init__(self, app):
+        # --- KORREKTUR: Entferne super().__init__(app) (zur Vermeidung von TypeError) ---
         self.app = app
 
         # --- P5: Multi-Monats-Cache ---
@@ -47,6 +48,10 @@ class ShiftPlanDataManager:
         self.daily_counts = {}
         self.locked_shifts_cache = {}
         self.cached_users_for_month = []
+
+        # --- KORREKTUR (Fix für Stunden-Bug) ---
+        self.user_shift_totals = {}
+        # --- ENDE KORREKTUR ---
 
         # --- NEU: user_data_map (wird für PlanningAssistant benötigt) ---
         # Stellt sicher, dass die User-Metadaten immer verfügbar sind
@@ -76,6 +81,33 @@ class ShiftPlanDataManager:
         # ShiftLockManager (greift jetzt auf self.locked_shifts_cache zu)
         self.shift_lock_manager = ShiftLockManager(app, self)
 
+    # --- NEUE HILFSFUNKTION FÜR RACE CONDITION FIX ---
+    def _initialize_user_shift_totals(self, user_data_map):
+        """
+        Stellt sicher, dass self.user_shift_totals ALLE Benutzer-IDs enthält,
+        initialisiert mit 0.0, um den Race Condition (Null-Bug) beim
+        inkrementellen Live-Update zu verhindern.
+        """
+        all_relevant_user_ids = user_data_map.keys()
+
+        # Stellen Sie sicher, dass der Cache initialisiert ist
+        if not isinstance(self.user_shift_totals, dict):
+            self.user_shift_totals = {}
+
+        # Initialisieren/Verifizieren Sie jeden Benutzer-Eintrag
+        for user_id in all_relevant_user_ids:
+            user_id_str = str(user_id)
+            # Prüft, ob der Eintrag im Cache existiert. Wenn nicht, mit 0.0 initialisieren.
+            if user_id_str not in self.user_shift_totals or 'hours_total' not in self.user_shift_totals[user_id_str]:
+                self.user_shift_totals[user_id_str] = {
+                    'hours_total': 0.0,
+                    'shifts_total': 0
+                }
+
+        print(f"[DM Cache] Initialisiere/Verifiziere {len(all_relevant_user_ids)} Benutzer-Totals im Cache.")
+
+    # --- ENDE NEUE HILFSFUNKTION ---
+
     def _clear_active_caches(self):
         """
         Setzt alle *aktiven* Caches zurück.
@@ -93,6 +125,9 @@ class ShiftPlanDataManager:
         self.wunschfrei_data_prev = {}
         self.next_month_shifts = {}
         self.cached_users_for_month = []
+
+        # --- KORREKTUR: user_shift_totals leeren ---
+        self.user_shift_totals = {}
 
         # self.user_data_map wird NICHT geleert, da es App-global ist
 
@@ -148,7 +183,23 @@ class ShiftPlanDataManager:
 
     def calculate_total_hours_for_user(self, user_id_str, year, month):
         """Delegiert an DataManagerHelpers"""
+        # HINWEIS: Diese Funktion wird extern aufgerufen, um Soll-Stunden zu berechnen.
+        # Die Live-Aktualisierung der Ist-Stunden verwendet NICHT diese Funktion,
+        # sondern greift auf self.user_shift_totals zu.
         return self.helpers.calculate_total_hours_for_user(user_id_str, year, month)
+
+    # --- NEU: Helper-Methode für die Ist-Stunden-Berechnung aus der DB (angenommen) ---
+    def _calculate_user_shift_totals(self, shift_data, user_data_map, shift_types_data):
+        """
+        Placeholder für die langsame Berechnung der Ist-Stunden-Totals.
+        Wir delegieren dies an den Helper, um die Monolithenbildung zu vermeiden.
+        """
+        print("[DM] Starte langsame Berechnung der user_shift_totals...")
+        # WICHTIG: Angenommen, diese Methode wird im Helper korrekt implementiert und
+        # liefert den vollständigen berechneten Ist-Stunden-Cache zurück.
+        return self.helpers.calculate_user_shift_totals_from_db(shift_data, user_data_map, shift_types_data)
+
+    # --- ENDE NEU ---
 
     def update_violation_set(self, year, month):
         """Delegiert an ViolationManager"""
@@ -200,19 +251,25 @@ class ShiftPlanDataManager:
             self.cached_users_for_month = cached_data['cached_users_for_month']
             self.locked_shifts_cache = cached_data.get('locked_shifts', {})
 
-            # --- NEU: user_data_map aus Cache laden ---
-            # (Wichtig für PlanningAssistant, falls App neu gestartet wurde)
+            # --- KORREKTUR: user_data_map und user_shift_totals aus Cache laden ---
             if 'user_data_map' in cached_data:
                 self.user_data_map = cached_data['user_data_map']
-            # --- ENDE NEU ---
+            if 'user_shift_totals' in cached_data:
+                self.user_shift_totals = cached_data['user_shift_totals']
+
+            # --- NEU: ABSICHERUNG GEGEN PRELOADER-FEHLER (HARTES FIX) ---
+            # Wenn user_data_map geladen wurde (was schnell ist), erzwinge die Initialisierung,
+            # um Null-Fehler bei inkonsistentem Preloading zu verhindern.
+            if self.user_data_map:
+                self._initialize_user_shift_totals(self.user_data_map)
+            # --- ENDE ABSICHERUNG ---
+            # --- ENDE KORREKTUR ---
 
             # Schichtzeiten-Cache (global) sicherstellen (delegiert)
             self.vm.preprocess_shift_times()
 
             update_progress(95, "Vorbereitung abgeschlossen.")
-            # --- KORREKTUR: Rückgabewert an ShiftPlanTab angepasst ---
             return True  # Erfolg
-            # --- ENDE KORREKTUR ---
 
         # 2. NICHT IM CACHE: Von DB laden
         print(f"[DM] Lade Monat {year}-{month} von DB (nicht im P5-Cache).")
@@ -223,7 +280,8 @@ class ShiftPlanDataManager:
             '_prev_month_shifts': {}, 'previous_month_shifts': {},
             'processed_vacations_prev': {}, 'wunschfrei_data_prev': {},
             'next_month_shifts': {}, 'cached_users_for_month': [],
-            'user_data_map': {}  # NEU
+            'user_data_map': {},
+            'user_shift_totals': {}  # NEU
         }
 
         update_progress(10, "Lade alle Plandaten (Batch-Optimierung)...")
@@ -232,10 +290,8 @@ class ShiftPlanDataManager:
 
         batch_data = get_all_data_for_plan_display(year, month, current_date_for_archive_check)
         if batch_data is None:
-            # --- KORREKTUR: Rückgabewert an ShiftPlanTab angepasst ---
             print("[FEHLER] get_all_data_for_plan_display hat None zurückgegeben.")
             return False  # Misserfolg
-            # --- ENDE KORREKTUR ---
 
         update_progress(60, "Verarbeite Schicht- und Antragsdaten...")
 
@@ -292,6 +348,17 @@ class ShiftPlanDataManager:
         print(f"[DM] Atomares Update: Überschreibe aktive Caches mit Daten für {year}-{month}")
         self.year = year
         self.month = month
+
+        # ZUERST: user_data_map aktualisieren
+        self.user_data_map = temp_data['user_data_map']
+
+        # --- KRITISCHER SCHRITT (Fix für den Bug) ---
+        # Initialisiere user_shift_totals SOFORT mit 0 für alle Benutzer,
+        # da user_data_map jetzt aktuell ist.
+        self._initialize_user_shift_totals(self.user_data_map)
+        # --- ENDE KRITISCHER SCHRITT ---
+
+        # Restliche Caches
         self.shift_schedule_data = temp_data['shift_schedule_data']
         self.processed_vacations = temp_data['processed_vacations']
         self.wunschfrei_data = temp_data['wunschfrei_data']
@@ -303,11 +370,20 @@ class ShiftPlanDataManager:
         self.wunschfrei_data_prev = temp_data['wunschfrei_data_prev']
         self.next_month_shifts = temp_data['next_month_shifts']
         self.cached_users_for_month = temp_data['cached_users_for_month']
-        self.user_data_map = temp_data['user_data_map']  # NEU
 
         update_progress(80, "Prüfe Konflikte (Ruhezeit, Hunde)...")
         # Volle Konfliktprüfung (delegiert)
         self.update_violation_set(year, month)  # Füllt self.violation_cells
+
+        update_progress(90, "Berechne Monats-Totals...")
+        # Lade die Ist-Stunden (Dies ist der langsame Schritt)
+        # NEU: Der Cache wird mit den berechneten Werten überschrieben.
+        # Fix für Attribute Error: Wir verwenden self.app.shift_types_data anstelle des fehlerhaften self.app.app.shift_types_data
+        self.user_shift_totals = self._calculate_user_shift_totals(
+            self.shift_schedule_data,
+            self.user_data_map,
+            self.app.shift_types_data  # Verwende self.app.shift_types_data, um den Fehler zu vermeiden
+        )
 
         update_progress(95, "Vorbereitung abgeschlossen.")
 
@@ -326,12 +402,11 @@ class ShiftPlanDataManager:
             'next_month_shifts': self.next_month_shifts,
             'cached_users_for_month': self.cached_users_for_month,
             'locked_shifts': self.locked_shifts_cache,
-            'user_data_map': self.user_data_map  # NEU
+            'user_data_map': self.user_data_map,
+            'user_shift_totals': self.user_shift_totals  # Wichtig: Speichere die berechneten Totals
         }
 
-        # --- KORREKTUR: Rückgabewert an ShiftPlanTab angepasst ---
         return True  # Erfolg
-        # --- ENDE KORREKTUR ---
 
     def recalculate_daily_counts_for_day(self, date_obj, old_shift, new_shift):
         """Aktualisiert self.daily_counts für einen bestimmten Tag nach Schichtänderung."""

@@ -44,14 +44,23 @@ class UserManagementTab(ttk.Frame):
             "last_seen": ("Zuletzt Online", 120),
             "is_approved": ("Freigegeben?", 80),
             "is_archived": ("Archiviert?", 80),
-            "archived_date": ("Archiviert am", 120)
+            "archived_date": ("Archiviert am", 120),
+            # --- NEUES FELD FÜR BEARBEITUNG ---
+            "activation_date": ("Aktiv ab Datum", 120)
+            # --- ENDE NEUES FELD ---
         }
+
+        # Sicherstellen, dass alle Spalten, die in self.all_columns definiert wurden,
+        # im ColumnChooser berücksichtigt werden können.
+
         loaded_visible_keys = load_config_json(USER_MGMT_VISIBLE_COLUMNS_KEY)
         if loaded_visible_keys and isinstance(loaded_visible_keys, list):
+            # Filtere nur gültige Schlüssel
             self.visible_column_keys = [key for key in loaded_visible_keys if key in self.all_columns]
         else:
             self.visible_column_keys = [k for k in self.all_columns if
-                                        k not in ['id', 'is_approved', 'is_archived', 'archived_date', 'last_seen']]
+                                        k not in ['id', 'is_approved', 'is_archived', 'archived_date', 'last_seen',
+                                                  'activation_date']]
 
         if 'id' not in self.visible_column_keys:
             self.visible_column_keys.insert(0, 'id')
@@ -63,14 +72,30 @@ class UserManagementTab(ttk.Frame):
 
         # --- INNOVATION (Regel 1 & 2) ---
         # Daten entweder aus dem Cache laden oder (als Fallback) aus der DB holen.
-        if initial_data_cache is not None:
-            print("[UserMgmtTab] Lade Daten aus initialem Cache.")
+        if initial_data_cache is not None and initial_data_cache:
+            # NEU: Überprüfen, ob der Cache vollständig ist (z.B. mehr Spalten als nur die Basis)
+            # Wenn der Cache nur die Basisdaten enthält (z.B. von get_all_users()),
+            # wird er trotzdem verwendet, aber der Bearbeiten-Dialog wird unvollständig.
+            print(f"[UserMgmtTab] Lade Daten aus initialem Cache ({len(initial_data_cache)} Einträge).")
             self.all_users_data = initial_data_cache
             self._load_users_from_cache()  # Daten sortieren und anzeigen
         else:
-            print("[UserMgmtTab] Initialer Cache leer. Lade aus DB (Fallback).")
+            print("[UserMgmtTab] Initialer Cache leer/fehlerhaft. Lade aus DB (Fallback).")
             self.refresh_data()  # Daten aus DB holen und anzeigen
         # --- ENDE INNOVATION ---
+
+    # --- NEUE METHODE (Regel 1 & 4) ---
+    def update_data_cache(self, new_data_cache):
+        """
+        Methode für AdminTabManager/Preloader, um den vollständigen
+        Datensatz synchron zu injizieren, NACHDEM er aus der DB geladen wurde.
+        """
+        if new_data_cache is not None:
+            print(f"[UserMgmtTab] Aktualisiere internen Cache mit {len(new_data_cache)} Einträgen.")
+            self.all_users_data = new_data_cache
+            self._load_users_from_cache()
+
+    # --- ENDE NEUE METHODE ---
 
     def _create_widgets(self):
         top_frame = ttk.Frame(self)
@@ -154,13 +179,14 @@ class UserManagementTab(ttk.Frame):
             value = user_item.get(self._sort_by)
             if value is None or value == "":
                 is_date_col = self._sort_by in ['entry_date', 'last_ausbildung', 'last_schiessen', 'archived_date',
-                                                'geburtstag', 'last_seen']
+                                                'geburtstag', 'last_seen', 'activation_date']
                 if self._sort_desc:
                     return date.min if is_date_col else ""
                 else:
                     return date.max if is_date_col else "~~~~"
             if isinstance(value, str): return value.lower()
-            if self._sort_by in ['entry_date', 'last_ausbildung', 'last_schiessen', 'archived_date', 'geburtstag']:
+            if self._sort_by in ['entry_date', 'last_ausbildung', 'last_schiessen', 'archived_date', 'geburtstag',
+                                 'activation_date']:
                 try:
                     if isinstance(value, datetime): return value.date()
                     if isinstance(value, date): return value
@@ -191,22 +217,19 @@ class UserManagementTab(ttk.Frame):
                 if value is None: value = ""
                 if col_key in ["is_approved", "is_archived"]:
                     value = "Ja" if value == 1 else "Nein"
-                elif col_key in ['entry_date', 'last_ausbildung', 'last_schiessen', 'geburtstag']:
+                elif col_key in ['entry_date', 'last_ausbildung', 'last_schiessen', 'geburtstag', 'archived_date',
+                                 'activation_date']:
                     if isinstance(value, datetime):
                         value = value.strftime('%Y-%m-%d')
-                    elif isinstance(value, date):
-                        value = value.strftime('%Y-%m-%d')
-                elif col_key == 'last_seen':
-                    if isinstance(value, datetime): value = value.strftime('%Y-%m-%d %H:%M')
-                elif col_key == 'archived_date':
-                    # --- KORREKTUR: Auch hier nur Datum anzeigen, wenn Datum gesetzt ---
-                    if isinstance(value, datetime):
-                        value = value.strftime('%Y-%m-%d')  # Nur Datum
                     elif isinstance(value, date):
                         value = value.strftime('%Y-%m-%d')
                     else:
-                        value = ""  # Ansonsten leer
-                    # --- ENDE KORREKTUR ---
+                        value = ""  # KORREKTUR: Leere Strings bei fehlendem Datum
+                elif col_key == 'last_seen':
+                    if isinstance(value, datetime):
+                        value = value.strftime('%Y-%m-%d %H:%M')
+                    else:
+                        value = ""
                 values_to_insert.append(value)
 
             # --- NEU: Tags für Hervorhebung bestimmen ---
@@ -236,6 +259,7 @@ class UserManagementTab(ttk.Frame):
             else:
                 print("[UserMgmtTab] Refresh aus DB.")
                 # Fallback: Direkter DB-Aufruf, wenn kein Cache bereitgestellt wird
+                # DIESE FUNKTION LIEFERT ALLE DETAILS (für Bearbeitungsdialog)
                 self.all_users_data = get_all_users_with_details()
 
             # Daten sortieren und in Treeview laden (ohne DB-Zugriff)
@@ -335,10 +359,10 @@ class UserManagementTab(ttk.Frame):
                                       admin_user_id=self.current_user['id'], callback=self.on_user_saved)
             edit_win.grab_set()
         else:
-            print(f"Warnung: User {user_id} nicht im Cache bei Doppelklick.")
-            # --- KORREKTUR: Ruft refresh_data() statt load_users() auf ---
+            print(f"Warnung: User {user_id} nicht im Cache bei Doppelklick. Versuche DB-Refresh.")
+            # WICHTIG: Wenn die Daten fehlen (z.B. nach einem Preloader-Fehler),
+            # erzwinge den Refresh und versuche es erneut.
             self.refresh_data()
-            # --- ENDE KORREKTUR ---
             user_data = next((user for user in self.all_users_data if user['id'] == user_id), None)
             if user_data:
                 edit_win = UserEditWindow(master=self, user_id=user_id, user_data=user_data, is_new=False,
@@ -346,7 +370,7 @@ class UserManagementTab(ttk.Frame):
                                           admin_user_id=self.current_user['id'], callback=self.on_user_saved)
                 edit_win.grab_set()
             else:
-                messagebox.showerror("Fehler", f"User {user_id} nicht geladen.", parent=self)
+                messagebox.showerror("Fehler", f"User {user_id} nicht geladen. DB-Fehler.", parent=self)
 
     def on_user_saved(self):
         clear_user_order_cache();
@@ -396,7 +420,13 @@ class UserManagementTab(ttk.Frame):
         try:
             user_id = int(selected_item)
             user_data = next((user for user in self.all_users_data if user['id'] == user_id), None)
-            if not user_data: messagebox.showerror("Fehler", "User nicht gefunden.", parent=self); return None, None
+            if not user_data:
+                # Zusätzlicher Check: Wenn user_data fehlt, erzwinge Refresh.
+                self.refresh_data()
+                user_data = next((user for user in self.all_users_data if user['id'] == user_id), None)
+                if not user_data: messagebox.showerror("Fehler",
+                                                       "User nicht gefunden (Cache und DB-Refresh fehlgeschlagen).",
+                                                       parent=self); return None, None
             return user_id, user_data
         except ValueError:
             return None, None
@@ -545,8 +575,6 @@ class UserManagementTab(ttk.Frame):
         except Exception as e:
             messagebox.showerror("Fehler", f"Fehler beim Prüfen der Freischaltungen:\n{e}", parent=self)
 
-    # --- ENDE KORRIGIERTE FUNKTION ---
-
 
 # --- Klasse ColumnChooser (unverändert) ---
 class ColumnChooser(tk.Toplevel):
@@ -591,3 +619,4 @@ class ColumnChooser(tk.Toplevel):
                 new_visible.append(key)
         self.callback(new_visible);
         self.destroy()
+

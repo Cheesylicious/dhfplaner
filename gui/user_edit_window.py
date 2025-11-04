@@ -39,61 +39,61 @@ class UserEditWindow(tk.Toplevel):
         self.widgets = {}
         row_index = 0
 
-        readonly_fields = ['password_hash', 'urlaub_rest']
+        # KORREKTUR: last_seen zur Readonly-Liste hinzufügen
+        readonly_fields = ['password_hash', 'urlaub_rest', 'last_seen']
 
         field_order = [
             ('vorname', 'Vorname'), ('name', 'Nachname'), ('geburtstag', 'Geburtstag'),
-            ('telefon', 'Telefon'), ('entry_date', 'Eintrittsdatum'),
+            ('telefon', 'Telefon'),
+            ('last_ausbildung', 'Letzte Ausb.'), ('last_schiessen', 'Letztes Sch.'),
+            ('entry_date', 'Eintrittsdatum'),
             ('activation_date', 'Aktiv ab Datum'),  # NEUES FELD
             ('urlaub_gesamt', 'Urlaub Gesamt'),
             ('urlaub_rest', 'Urlaub Rest'), ('diensthund', 'Diensthund'), ('role', 'Rolle'),
             ('password_hash', 'Passwort Hash'), ('has_seen_tutorial', 'Tutorial gesehen'),
-            ('password_changed', 'Passwort geändert')
+            ('password_changed', 'Passwort geändert'),
+            ('last_seen', 'Zuletzt Online')  # Hier belassen, da es unten als readonly behandelt wird
         ]
 
+        # Datumsfelder für DateEntry-Widget (NICHT alle DATETIME-Felder)
+        date_entry_fields = ["geburtstag", "entry_date", "activation_date", "last_ausbildung", "last_schiessen"]
+
         for key, display_name in field_order:
-            if self.is_new and key in readonly_fields + ['password_hash']:
+            if self.is_new and key in readonly_fields + ['password_hash', 'has_seen_tutorial', 'password_changed',
+                                                         'last_ausbildung', 'last_schiessen']:
+                continue
+            if key == 'last_seen' and self.is_new:
                 continue
 
             ttk.Label(main_frame, text=f"{display_name}:").grid(row=row_index, column=0, sticky="w", pady=5,
                                                                 padx=(0, 10))
 
-            # --- ANPASSUNG FÜR DATUMS-WIDGETS ---
-            if key in ["geburtstag", "entry_date", "activation_date"]:
+            # --- ANPASSUNG FÜR DATUMS-WIDGETS (DateEntry) ---
+            if key in date_entry_fields:
 
-                # 1. Widget IMMER ohne Datum initialisieren
                 widget = DateEntry(main_frame, date_pattern='dd.mm.yyyy',
-                                   # Wichtig: locale='de_DE' für korrekte Anzeige
                                    locale='de_DE',
-                                   # Setze 'None' als Wert, wenn das Feld leer ist
                                    selectmode='day', date=None)
 
                 date_val = None
-                # 2. Rohdaten holen (kann None, str, date, datetime sein)
                 db_value = self.user_data.get(key)
 
-                # 3. Rohdaten in date_val (datetime.date) umwandeln
                 if db_value:
-                    date_str = str(db_value)  # In String umwandeln für Konsistenz
+                    date_str = str(db_value)
                     if date_str != 'None' and not date_str.startswith('0000-00-00'):
                         try:
-                            # Versuche, DATETIME oder DATE zu parsen
                             if ' ' in date_str:
-                                # Zuerst als datetime parsen
                                 date_obj = datetime.strptime(date_str, '%Y-%m-%d %H:%M:%S')
-                                date_val = date_obj.date()  # Nur das Datum extrahieren
+                                date_val = date_obj.date()
                             else:
-                                # Als date parsen
                                 date_obj = datetime.strptime(date_str, '%Y-%m-%d')
                                 date_val = date_obj.date()
                         except (ValueError, TypeError):
-                            pass  # date_val bleibt None
+                            pass
 
-                # 4. Wert im Widget setzen
                 if date_val:
                     widget.set_date(date_val)
                 else:
-                    # Explizit den Text löschen, falls set_date(None) das heutige Datum setzt
                     widget.set_date(None)
                     widget.delete(0, 'end')
 
@@ -122,7 +122,19 @@ class UserEditWindow(tk.Toplevel):
                 widget = ttk.Combobox(main_frame, textvariable=self.vars[key], values=["Ja", "Nein"], state="readonly")
 
             else:
-                self.vars[key] = tk.StringVar(value=str(self.user_data.get(key, "")))
+                # Normale Eingabefelder (auch last_seen, urlaub_gesamt, urlaub_rest)
+                initial_value = self.user_data.get(key)
+
+                # --- KORREKTUR: Handhabung von Datum/None für nicht-DateEntry-Felder ---
+                if initial_value is None:
+                    initial_value = ""
+                elif key == 'last_seen' and isinstance(initial_value, datetime):
+                    initial_value = initial_value.strftime('%Y-%m-%d %H:%M:%S')
+                else:
+                    initial_value = str(initial_value)
+                # --- ENDE KORREKTUR ---
+
+                self.vars[key] = tk.StringVar(value=initial_value)
                 style_name = "Readonly.TEntry" if key in readonly_fields else "TEntry"
                 widget = ttk.Entry(main_frame, textvariable=self.vars[key], style=style_name)
                 if key in readonly_fields:
@@ -178,7 +190,7 @@ class UserEditWindow(tk.Toplevel):
                     messagebox.showwarning("Eingabe fehlt", "Das Eintrittsdatum darf nicht leer sein.", parent=self)
                     return
                 else:
-                    # Geburtstag, Activation Date DÜRFEN leer sein (None -> NULL)
+                    # Optionale Datumsfelder DÜRFEN leer sein (None -> NULL)
                     updated_data[key] = None
             else:
                 # Wenn Feld nicht leer ist, versuche zu parsen

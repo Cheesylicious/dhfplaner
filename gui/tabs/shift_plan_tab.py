@@ -1,434 +1,261 @@
 # gui/tabs/shift_plan_tab.py
+# REFRACTORED (Regel 4): Dient als Orchestrator.
+# - UI-Erstellung in ShiftPlanUISetup ausgelagert.
+# - Event-Handler (Callbacks) in ShiftPlanEvents ausgelagert.
+# - Behält die Lade-Logik (Threading) und Status-Updates.
+#
+# KORRIGIERT (Regel 1) - DRITTE RUNDE:
+# Die entscheidende Property 'user_shift_totals' hinzugefügt.
+# Das Fehlen dieser Property hat dazu geführt, dass der
+# ActionUpdateHandler die Ist-Stunden beim Hinzufügen
+# einer Schicht genullt hat (Cache-Problem).
+
 import tkinter as tk
-from tkinter import ttk, messagebox, simpledialog
-from datetime import date, timedelta, datetime, time  # time importiert
+from tkinter import ttk, messagebox
+from datetime import date, timedelta, datetime
 import calendar
 import threading
-from collections import defaultdict
-import math
 
 # Importiere die Helfer-Module
-from database.db_users import get_ordered_users_for_schedule
 from gui.request_lock_manager import RequestLockManager
 from gui.shift_plan_data_manager import ShiftPlanDataManager
 from gui.shift_plan_renderer import ShiftPlanRenderer
 from gui.shift_plan_actions import ShiftPlanActionHandler
-from database.db_shifts import get_ordered_shift_abbrevs, \
-    delete_all_shifts_for_month
-from ..dialogs.rejection_reason_dialog import RejectionReasonDialog
-from ..dialogs.generator_settings_window import \
-    GeneratorSettingsWindow
-# --- Import des Generators ---
-from gui.shift_plan_generator import ShiftPlanGenerator
-# --- NEUER IMPORT (Regel 2 & 4): Latenz-Problem beheben ---
-# (Wird für _on_key_press benötigt, auch wenn es in ShiftPlanTab
-# nur via data_manager aufgerufen wird)
-from gui.planning_assistant import PlanningAssistant
+from database.db_shifts import get_ordered_shift_abbrevs
+
+# --- NEUE IMPORTE (Refactoring Regel 4) ---
+from .tab_components.shift_plan_ui_setup import ShiftPlanUISetup
+from .tab_components.shift_plan_events import ShiftPlanEvents
+
+
+# --- ENDE NEUE IMPORTE ---
 
 
 class ShiftPlanTab(ttk.Frame):
+    """
+    Haupt-Frame des Dienstplan-Tabs.
+    Dient als Orchestrator für:
+    - ShiftPlanUISetup (Erstellt die Widgets)
+    - ShiftPlanEvents (Verarbeitet Button-Klicks und Tastatur-Eingaben)
+    - ShiftPlanDataManager (Lädt und verwaltet Daten)
+    - ShiftPlanRenderer (Zeichnet das Gitter)
+    - ShiftPlanActionHandler (Verarbeitet Kontextmenü-Aktionen)
+
+    Diese Klasse steuert hauptsächlich den Daten-Lade-Prozess (inkl. Threading)
+    und die Aktualisierung des UI-Status (z.B. Ladebalken).
+    """
+
     def __init__(self, master, app):  # 'app' ist MainAdminWindow/MainUserWindow
         super().__init__(master)
         self.app = app  # app ist MainAdminWindow/MainUserWindow
 
-        # --- KORREKTUR: DataManager von der App (Bootloader) übernehmen ---
-        # self.app.app ist der Bootloader (Application)
+        # --- 1. Bootloader und DataManager initialisieren ---
         bootloader_app = self.app.app
+        self.data_manager = self._init_data_manager(bootloader_app)
 
-        if hasattr(bootloader_app, 'data_manager') and bootloader_app.data_manager is not None:
-            print("[ShiftPlanTab] Übernehme vorgeladenen DataManager vom Bootloader.")
-            self.data_manager = bootloader_app.data_manager
-
-            # WICHTIG: Die App-Referenz im DM auf das FENSTER (MainAdminWindow) aktualisieren
-            # anstatt auf den Bootloader, da der DM (z.B. für Dialoge) das Fenster als Parent braucht.
-            self.data_manager.app = app
-        else:
-            print("[ShiftPlanTab] WARNUNG: Kein vorgeladener DataManager gefunden. Erstelle neuen.")
-            self.data_manager = ShiftPlanDataManager(app)  # Fallback: 'app' ist MainAdminWindow
-
-        # --- Ende DataManager Übernahme ---
-
-        # --- KORREKTUR (Refactoring): Renderer-abhängige Initialisierung ---
-        # Behebt den Fehler "Renderer nicht verfügbar"
-
-        # 1. ActionHandler initialisieren (bekommt 'None' als Renderer)
-        # (Das dritte Argument ist der data_manager, das ist korrekt)
+        # --- 2. ActionHandler und Renderer initialisieren (Korrektur-Sequenz) ---
         self.action_handler = ShiftPlanActionHandler(self, app, self.data_manager, None)
-
-        # 2. Renderer initialisieren (bekommt den ActionHandler)
         self.renderer = ShiftPlanRenderer(self, bootloader_app, self.data_manager, self.action_handler)
-
-        # 3. Renderer-Instanz an ActionHandler übergeben & Helfer initialisieren
-        # (Dies ist der entscheidende Fix, der die Helfer im ActionHandler aktiviert)
         self.action_handler.set_renderer_and_init_helpers(self.renderer)
 
-        # --- ENDE KORREKTUR ---
+        # --- 3. UI- und Event-Handler initialisieren (Refactoring Regel 4) ---
+        # (self.ui und self.events sind NEU)
+        self.ui = ShiftPlanUISetup(self, app)
+        self.events = ShiftPlanEvents(self)
 
-        # --- NEU (Für Tastatur-Shortcuts) ---
-        # Definiert, welche Taste welches Kürzel auslöst.
-        # (Leerzeichen ' ' für "FREI")
+        # --- 4. Tastatur-Shortcuts (Map verbleibt hier, wird von Events genutzt) ---
         self.shortcut_map = {
             't': 'T.',
             'n': 'N.',
             '6': '6',
             'f': '',  # 'f' für FREI
-            ' ': '',  # 'Leertaste' für FREI
             'x': 'X',
             'u': 'U',
             's': 'S',
             'q': 'QA',
         }
-        # --- ENDE NEU ---
+        # (Leertaste 'space' wird direkt in ShiftPlanEvents behandelt)
 
-        self.grid_widgets = self.renderer.grid_widgets
+        # --- 5. UI-Setup durchführen ---
+        # Wir übergeben die Event-Handler-Instanz an den UI-Builder,
+        # damit die Buttons/Bindings korrekt zugewiesen werden.
+        self.ui.setup_ui(self.events)
 
-        # --- KORREKTUR (AttributeError): Menü-Vorbereitung ---
-        # self._menu_item_cache = self._prepare_shift_menu_items()
-        # -> ENTFERNT. Das Menü wird jetzt "Just-in-Time" im
-        #    ActionHandler erstellt, wenn es benötigt wird.
-        # --- ENDE KORREKTUR ---
+        # --- 6. Renderer das Ziel-Frame zuweisen ---
+        # (Das plan_grid_frame wurde von self.ui.setup_ui() erstellt)
+        self.renderer.set_plan_grid_frame(self.ui.plan_grid_frame)
 
-        self.progress_frame = None
-        self.progress_bar = None
-        self.status_label = None
-
-        self.setup_ui()
-        self.renderer.set_plan_grid_frame(self.plan_grid_frame)
-
-        # --- KORREKTUR: Race Condition (P1a vs P1b) beim Start beheben ---
-        # Die Optimierung (data_ready=True) beim Start führt zu einer Race Condition,
-        # wenn der P1b-Preloader (N+1) schneller ist als der GUI-Renderer (N).
-        # Der Renderer liest dann die aktiven Daten von N+1 (Konflikte, Daten)
-        # und wendet sie fälschlicherweise auf das N-Grid an.
-        #
-        # Wir erzwingen DAHER beim allerersten Start IMMER data_ready=False.
-        # Dies zwingt den DataManager (im GUI-Thread), den Monat N (2025-12)
-        # aus dem P5-Cache zu laden und *erneut* zu aktivieren, BEVOR der Renderer
-        # die Daten liest.
-
+        # --- 7. Initialen Ladevorgang starten ---
+        # (Logik zur Vermeidung der Race Condition P1a/P1b bleibt)
         current_app_date = self.app.current_display_date
-
         print(
             f"[ShiftPlanTab] Erzwinge Neuladen (data_ready=False) für {current_app_date.year}-{current_app_date.month}, um Race Condition (P1b) zu vermeiden.")
         self.build_shift_plan_grid(current_app_date.year, current_app_date.month, data_ready=False)
 
-        # --- ALTE (FEHLERHAFTE) LOGIK: ---
-        # (Auskommentiert, siehe oben)
-        # --- ENDE KORREKTUR ---
-
-    # --- KORREKTUR (AttributeError): Menü-Vorbereitung ---
-    # Die Funktion _prepare_shift_menu_items() wird entfernt.
-    # Sie wird in den ShiftPlanActionHandler verschoben (Regel 4).
-    # --- ENDE KORREKTUR ---
-
-    def setup_ui(self):
-        # (unverändert)
-        main_view_container = ttk.Frame(self, padding="10");
-        main_view_container.pack(fill="both", expand=True)
-        nav_frame = ttk.Frame(main_view_container);
-        nav_frame.pack(fill="x", pady=(0, 10))
-        left_nav_frame = ttk.Frame(nav_frame);
-        left_nav_frame.pack(side="left")
-
-        style = ttk.Style(self)
-        style.configure("Delete.TButton", background="red", foreground="white", font=('Segoe UI', 9, 'bold'))
-        style.map("Delete.TButton", background=[('active', '#CC0000')])
-        style.configure("Generate.TButton", background="green", foreground="white", font=('Segoe UI', 9, 'bold'))
-        style.map("Generate.TButton", background=[('active', '#006400')])
-        style.configure("SettingsWarn.TButton", background="gold", foreground="black", font=('Segoe UI', 9, 'bold'))
-        style.map("SettingsWarn.TButton", background=[('active', 'goldenrod')])
-        style.configure("UnlockAll.TButton", background="darkorange", foreground="white", font=('Segoe UI', 9, 'bold'))
-        style.map("UnlockAll.TButton", background=[('active', '#E67E00')])
-
-        ttk.Button(left_nav_frame, text="< Voriger Monat", command=self.show_previous_month).pack(side="left")
-        ttk.Button(left_nav_frame, text="📄 Drucken", command=self.print_shift_plan).pack(side="left", padx=(20, 5))
-        ttk.Button(left_nav_frame, text="Schichtplan Löschen !!!", command=self._on_delete_month,
-                   style="Delete.TButton").pack(side="left", padx=5)
-        ttk.Separator(left_nav_frame, orient='vertical').pack(side='left', fill='y', padx=(10, 5))
-        ttk.Button(left_nav_frame, text="Schichtplan generieren", command=self._on_generate_plan,
-                   style="Generate.TButton").pack(side="left", padx=5)
-        ttk.Button(left_nav_frame, text="Planungsassistent-Einstellungen", command=self._open_generator_settings,
-                   style="SettingsWarn.TButton").pack(side="left", padx=5)
-        ttk.Button(left_nav_frame, text="Alle Sicherungen aufheben", command=self._on_unlock_all_shifts,
-                   style="UnlockAll.TButton").pack(side="left", padx=5)
-
-        self.month_label_var = tk.StringVar()
-        month_label_frame = ttk.Frame(nav_frame);
-        month_label_frame.pack(side="left", expand=True, fill="x")
-
-        self.month_label = ttk.Label(month_label_frame, textvariable=self.month_label_var,
-                                     font=("Segoe UI", 14, "bold"),
-                                     anchor="center", cursor="hand2")
-        self.month_label.pack()
-        self.month_label.bind("<Button-1>", self._on_month_label_click)
-
-        self.lock_status_label = ttk.Label(month_label_frame, text="", font=("Segoe UI", 10, "italic"),
-                                           anchor="center");
-        self.lock_status_label.pack()
-        ttk.Button(nav_frame, text="Nächster Monat >", command=self.show_next_month).pack(side="right")
-        grid_container_frame = ttk.Frame(main_view_container);
-        grid_container_frame.pack(fill="both", expand=True)
-        vsb = ttk.Scrollbar(grid_container_frame, orient="vertical");
-        vsb.pack(side="right", fill="y")
-        hsb = ttk.Scrollbar(grid_container_frame, orient="horizontal");
-        hsb.pack(side="bottom", fill="x")
-        self.canvas = tk.Canvas(grid_container_frame, yscrollcommand=vsb.set, xscrollcommand=hsb.set,
-                                highlightthickness=0);
-        self.canvas.pack(side="left", fill="both", expand=True)
-        vsb.config(command=self.canvas.yview);
-        hsb.config(command=self.canvas.xview)
-        self.inner_frame = ttk.Frame(self.canvas);
-        self.canvas.create_window((0, 0), window=self.inner_frame, anchor="nw", tags="inner_frame")
-        self.plan_grid_frame = ttk.Frame(self.inner_frame);
-        self.plan_grid_frame.pack(fill="both", expand=True)
-
-        def _configure_inner_frame(event): self.canvas.itemconfig('inner_frame', width=event.width)
-
-        def _configure_scrollregion(event): self.canvas.configure(scrollregion=self.canvas.bbox("all"))
-
-        self.canvas.bind('<Configure>', _configure_inner_frame);
-        self.inner_frame.bind('<Configure>', _configure_scrollregion)
-
-        # --- NEU (Für Tastatur-Shortcuts) ---
-        self._bind_keyboard_shortcuts()
-        # --- ENDE NEU ---
-
-        footer_frame = ttk.Frame(main_view_container);
-        footer_frame.pack(fill="x", pady=(10, 0))
-        check_frame = ttk.Frame(footer_frame);
-        check_frame.pack(side="left")
-        ttk.Button(check_frame, text="Schichtplan Prüfen", command=self.check_understaffing).pack(side="left", padx=5)
-        ttk.Button(check_frame, text="Leeren", command=self.clear_understaffing_results).pack(side="left", padx=5)
-        self.lock_button = ttk.Button(footer_frame, text="", command=self.toggle_month_lock);
-        self.lock_button.pack(side="right", padx=5)
-        self.understaffing_result_frame = ttk.Frame(main_view_container, padding="10")
-
-    def _open_generator_settings(self):
-        # (unverändert)
-        GeneratorSettingsWindow(self.app, self, self.data_manager)
-
-    def _on_month_label_click(self, event):
-        # (unverändert)
-        self._show_month_chooser_dialog()
-
-    def _show_month_chooser_dialog(self):
-        # (unverändert)
-        dialog = tk.Toplevel(self)
-        dialog.title("Monatsauswahl")
-        dialog.transient(self.master.master)
-        dialog.grab_set();
-        dialog.focus_set()
-        current_date = self.app.current_display_date;
-        current_year = current_date.year;
-        current_month = current_date.month
-        month_names_de = ["Januar", "Februar", "März", "April", "Mai", "Juni", "Juli",
-                          "August", "September", "Oktober", "November", "Dezember"]
-        start_year = date.today().year - 5;
-        end_year = date.today().year + 5
-        years = [str(y) for y in range(start_year, end_year + 1)]
-        selected_month_var = tk.StringVar(value=month_names_de[current_month - 1])
-        selected_year_var = tk.StringVar(value=str(current_year))
-        ttk.Label(dialog, text="Monat auswählen:").pack(padx=10, pady=(10, 0))
-        month_combo = ttk.Combobox(dialog, textvariable=selected_month_var, values=month_names_de, state="readonly",
-                                   width=15)
-        month_combo.pack(padx=10, pady=(0, 10))
-        ttk.Label(dialog, text="Jahr auswählen:").pack(padx=10, pady=(10, 0))
-        year_combo = ttk.Combobox(dialog, textvariable=selected_year_var, values=years, state="readonly", width=15)
-        year_combo.pack(padx=10, pady=(0, 10))
-
-        def on_ok():
-            try:
-                new_month_index = month_names_de.index(selected_month_var.get())
-                new_month = new_month_index + 1
-                new_year = int(selected_year_var.get())
-                new_date = date(new_year, new_month, 1)
-                if new_date.year != current_date.year or new_date.month != current_date.month:
-                    self.app.current_display_date = new_date
-                    if current_year != new_year:
-                        # --- KORREKTUR: Greife auf Bootloader.app zu ---
-                        if hasattr(self.app.app, '_load_holidays_for_year'): self.app.app._load_holidays_for_year(
-                            new_year)
-                        if hasattr(self.app.app, '_load_events_for_year'): self.app.app._load_events_for_year(new_year)
-                        # --- ENDE KORREKTUR ---
-
-                    if hasattr(self.app, 'trigger_shift_plan_preload'):
-                        self.app.trigger_shift_plan_preload(new_year, new_month)
-
-                    self.build_shift_plan_grid(new_year, new_month)
-                dialog.destroy()
-            except ValueError:
-                messagebox.showerror("Fehler", "Ungültige Monats- oder Jahresauswahl.", parent=dialog)
-            except Exception as e:
-                messagebox.showerror("Schwerer Fehler", f"Ein unerwarteter Fehler ist aufgetreten:\n{e}", parent=dialog)
-
-        button_frame = ttk.Frame(dialog)
-        button_frame.pack(padx=10, pady=10)
-        ttk.Button(button_frame, text="Abbrechen", command=dialog.destroy).pack(side="left", padx=5)
-        ttk.Button(button_frame, text="OK", command=on_ok).pack(side="left", padx=5)
-        dialog.update_idletasks()
-        width = dialog.winfo_width();
-        height = dialog.winfo_height()
-        main_window = self.master.master if self.master and self.master.master else self
-        x = main_window.winfo_x() + (main_window.winfo_width() // 2) - (width // 2)
-        y = main_window.winfo_y() + (main_window.winfo_height() // 2) - (height // 2)
-        dialog.geometry(f'+{x}+{y}')
-        dialog.wait_window()
-
-    def _create_progress_widgets(self):
-        # (unverändert)
-        if self.progress_frame and self.progress_frame.winfo_exists(): self.progress_frame.destroy()
-        self.progress_frame = ttk.Frame(self.plan_grid_frame)
-        self.status_label = ttk.Label(self.progress_frame, text="", font=("Segoe UI", 12));
-        self.status_label.pack(pady=(20, 5))
-        self.progress_bar = ttk.Progressbar(self.progress_frame, orient='horizontal', length=300, mode='determinate');
-        self.progress_bar.pack(pady=5)
-
-    def print_shift_plan(self):
-        # (unverändert)
-        year, month = self.app.current_display_date.year, self.app.current_display_date.month
-        month_name = self.month_label_var.get()
-        if self.renderer:
-            self.renderer.print_shift_plan(year, month, month_name)
+    def _init_data_manager(self, bootloader_app):
+        """Initialisiert den DataManager oder übernimmt ihn vom Bootloader."""
+        if hasattr(bootloader_app, 'data_manager') and bootloader_app.data_manager is not None:
+            print("[ShiftPlanTab] Übernehme vorgeladenen DataManager vom Bootloader.")
+            data_manager = bootloader_app.data_manager
+            # WICHTIG: App-Referenz im DM auf das FENSTER (MainAdminWindow) aktualisieren
+            data_manager.app = self.app
         else:
-            messagebox.showerror("Fehler", "Druckfunktion nicht bereit.", parent=self)
+            print("[ShiftPlanTab] WARNUNG: Kein vorgeladener DataManager gefunden. Erstelle neuen.")
+            data_manager = ShiftPlanDataManager(self.app)  # Fallback
+        return data_manager
 
-    def _on_delete_month(self):
-        # (unverändert)
-        year = self.app.current_display_date.year
-        month = self.app.current_display_date.month
-        month_str = self.month_label_var.get()
-        msg1 = f"Möchten Sie wirklich **ALLE** planbaren Schichteinträge für\n\n{month_str}\n\nlöschen?\n\nDiese Aktion kann nicht rückgängig gemacht werden!"
-        if not messagebox.askyesno("WARNUNG: Schichtplan löschen", msg1, icon='warning', parent=self):
-            return
-        prompt = f"Um den Löschvorgang für {month_str} zu bestätigen, geben Sie bitte 'LÖSCHEN' in das Feld ein und klicken Sie OK."
-        confirmation_text = simpledialog.askstring("Endgültige Bestätigung", prompt, parent=self)
-        if confirmation_text != "LÖSCHEN":
-            messagebox.showinfo("Abgebrochen",
-                                "Eingabe war ungültig. Der Löschvorgang wurde abgebrochen.",
-                                parent=self)
-            return
+    # --- Lade- und Status-Logik (verbleibt im Orchestrator) ---
+
+    def build_shift_plan_grid(self, year, month, data_ready=False):
+        """
+        Orchestriert das Leeren, Laden und Neuzeichnen des Dienstplans.
+        Wird von Callbacks in ShiftPlanEvents aufgerufen.
+        """
+        month_name_german = {"January": "Januar", "February": "Februar", "March": "März", "April": "April",
+                             "May": "Mai", "June": "Juni", "July": "Juli", "August": "August", "September": "September",
+                             "October": "Oktober", "November": "November", "December": "Dezember"}
         try:
-            self.action_handler.delete_shift_plan_by_admin(year, month)
-        except Exception as e:
-            messagebox.showerror("Schwerer Fehler", f"Ein unerwarteter Fehler ist aufgetreten:\n{e}",
-                                 parent=self);
-            import traceback;
-            traceback.print_exc()
+            month_name_en = date(year, month, 1).strftime('%B')
+            self.ui.month_label_var.set(
+                f"{month_name_german.get(month_name_en, month_name_en)} {year}")
+        except ValueError:
+            self.ui.month_label_var.set(f"Ungültiger Monat {month}/{year}")
 
-    def _on_unlock_all_shifts(self):
-        # (unverändert)
-        year = self.app.current_display_date.year
-        month = self.app.current_display_date.month
-        month_str = self.month_label_var.get()
-        msg = f"Möchten Sie wirklich **ALLE** Schichtsicherungen (Locks 🔒) für\n\n{month_str}\n\naufheben?\n\nDie eingetragenen Schichten selbst bleiben erhalten."
-        if not messagebox.askyesno("WARNUNG: Alle Sicherungen aufheben", msg, icon='warning', parent=self):
-            return
+        self.update_lock_status()
+
+        # Altes Gitter leeren
+        for widget in self.ui.plan_grid_frame.winfo_children():
+            widget.destroy()
+        if self.renderer:
+            self.renderer.grid_widgets = {'cells': {}, 'user_totals': {}, 'daily_counts': {}}
+
+        if data_ready:
+            # Fall 1: Daten sind bereits geladen (z.B. durch Preloader)
+            print(f"[ShiftPlanTab] Starte sofortiges Rendering für {year}-{month} (data_ready=True).")
+            # Stelle sicher, dass der Ladebalken weg ist (falls er noch da war)
+            self.hide_progress_widgets()
+            self._render_grid(year, month)
+        else:
+            # Fall 2: Daten müssen aktiv geladen werden (Standard)
+            # (Zeigt Ladebalken an)
+            self.show_progress_widgets(text="Daten werden geladen...")
+
+            print(f"[ShiftPlanTab] Starte Lade-Thread für {year}-{month} (data_ready=False)...")
+            threading.Thread(target=self._load_data_in_thread, args=(year, month), daemon=True).start()
+
+    def _load_data_in_thread(self, year, month):
+        """Worker-Thread zum Laden der Daten (Regel 2: Latenz vermeiden)."""
+        error_message = None
         try:
-            self.action_handler.unlock_all_shifts_for_month(year, month)
+            # _safe_update_progress wird als Callback für den Ladebalken übergeben
+            success = self.data_manager.load_and_process_data(year, month, self._safe_update_progress)
+            if success:
+                # Zurück zum UI-Thread, um das Gitter zu zeichnen
+                self.after(1, lambda: self._render_grid(year, month))
+            else:
+                raise Exception("load_and_process_data hat 'False' zurückgegeben.")
         except Exception as e:
-            messagebox.showerror("Schwerer Fehler", f"Ein unerwarteter Fehler ist aufgetreten:\n{e}",
-                                 parent=self);
-            import traceback;
-            traceback.print_exc()
+            print(f"FEHLER beim Laden der Daten im Thread: {e}")
+            error_message = f"Fehler beim Laden der Daten:\n{e}"
+            self.after(1, lambda msg=error_message: messagebox.showerror("Fehler", msg, parent=self))
+            self.after(1, lambda: self.ui.status_label.config(
+                text="Laden fehlgeschlagen!") if self.ui.status_label and self.ui.status_label.winfo_exists() else None)
 
-    def _on_generate_plan(self):
-        # (Angepasst: Übergibt locked_shifts_cache)
-        year = self.app.current_display_date.year
-        month = self.app.current_display_date.month
-        month_str = self.month_label_var.get()
-        if RequestLockManager.is_month_locked(year, month):
-            messagebox.showwarning("Gesperrt",
-                                   f"Der Monat {month_str} ist für Anträge gesperrt.\nEine automatische Generierung ist nicht möglich, bitte erst entsperren.",
-                                   parent=self)
+    def _render_grid(self, year, month):
+        """Rendert das Gitter, nachdem die Daten geladen wurden."""
+        if not self.renderer:
+            print("[FEHLER] Renderer nicht initialisiert in _render_grid.")
             return
-        msg = (f"Dies generiert automatisch 'T.', 'N.' und '6' Dienste für {month_str}.\n\n"
-               "Bestehende Einträge (auch Urlaub, Wunschfrei etc.) werden NICHT überschrieben.\n"
-               "Hundekonflikte, Urlaube, Ruhezeiten und Mindestbesetzung werden berücksichtigt.\n\n"
-               "Fortfahren?")
-        if not messagebox.askyesno("Schichtplan generieren", msg, parent=self): return
-        for widget in self.plan_grid_frame.winfo_children(): widget.destroy()
-        if self.renderer: self.renderer.grid_widgets = {'cells': {}, 'user_totals': {}, 'daily_counts': {}}
-        self._create_progress_widgets()
-        self.progress_frame.grid(row=0, column=0, sticky="nsew", padx=20, pady=20)
-        self.plan_grid_frame.grid_rowconfigure(0, weight=1);
-        self.plan_grid_frame.grid_columnconfigure(0, weight=1)
-        self.progress_bar.config(value=0, maximum=100);
-        self.status_label.config(text="Starte Generierung...")
+
+        # Status auf "Zeichnen" aktualisieren
+        self._safe_update_progress(100, "Zeichne Gitter...")
         self.update_idletasks()
-        try:
-            vacation_requests = self.data_manager.processed_vacations
-            wunschfrei_requests = self.data_manager.wunschfrei_data
-            current_shifts = self.data_manager.shift_schedule_data
 
-            # --- KORREKTUR (Regel 1): Gesicherte Schichten laden ---
-            locked_shifts = self.data_manager.locked_shifts_cache
-            # --- ENDE KORREKTUR ---
+        # Starte den eigentlichen Zeichenvorgang im Renderer
+        self.renderer.build_shift_plan_grid(year, month, data_ready=True)
 
-            live_shifts_data = {uid: day_data.copy() for uid, day_data in current_shifts.items()}
-            first_day_of_target_month = date(year, month, 1)
-            date_for_user_filter = datetime.combine(first_day_of_target_month, time(0, 0, 0))
-            all_users = get_ordered_users_for_schedule(for_date=date_for_user_filter)
-            if not all_users:
-                messagebox.showerror("Fehler", f"Keine aktiven Benutzer für die Planung im {month_str} gefunden.",
-                                     parent=self)
-                if self.progress_frame and self.progress_frame.winfo_exists(): self.progress_frame.grid_forget()
-                return
-            user_data_map = {user['id']: user for user in all_users}
+        # Hinweis: self.renderer.build_shift_plan_grid ruft jetzt
+        # self._finalize_ui_after_render (HIER) auf, wenn es fertig ist.
 
-            # --- KORREKTUR: user_data_map im DataManager aktualisieren ---
-            # (Wichtig für PlanningAssistant, falls dieser vor dem Generator läuft)
-            self.data_manager.user_data_map = user_data_map
-            # --- ENDE KORREKTUR ---
+    def _finalize_ui_after_render(self):
+        """
+        Wird vom Renderer aufgerufen, NACHDEM das Gitter gezeichnet wurde.
+        Versteckt den Ladebalken und konfiguriert die Scrollregion.
+        """
+        self.hide_progress_widgets()
 
-            holidays_in_month = set()
-            if hasattr(self.app.app, 'holiday_manager'):  # Prüfe Bootloader
-                year_holidays = self.app.app.holiday_manager.holidays.get(str(year), {})
-                for date_str, holiday_name in year_holidays.items():
-                    try:
-                        h_date = datetime.strptime(date_str, '%Y-%m-%d').date()
-                        if h_date.year == year and h_date.month == month: holidays_in_month.add(h_date)
-                    except ValueError:
-                        print(f"[WARNUNG] Ungültiges Feiertagsdatum ignoriert: {date_str}")
-        except AttributeError as ae:
-            messagebox.showerror("Fehler",
-                                 f"Benötigte Plandaten nicht gefunden:\n{ae}\nBitte warten Sie, bis der Plan vollständig geladen ist, oder laden Sie ihn neu.",
-                                 parent=self)
-            if self.progress_frame and self.progress_frame.winfo_exists(): self.progress_frame.grid_forget()
-            return
-        except Exception as e:
-            messagebox.showerror("Fehler", f"Fehler beim Vorbereiten der Generierung:\n{e}", parent=self)
-            if self.progress_frame and self.progress_frame.winfo_exists(): self.progress_frame.grid_forget()
-            return
+        if self.ui.inner_frame.winfo_exists() and self.ui.canvas.winfo_exists():
+            self.ui.inner_frame.update_idletasks()
+            self.ui.canvas.config(scrollregion=self.ui.canvas.bbox("all"))
 
-        generator = ShiftPlanGenerator(
-            app=self.app.app,  # Übergib den Bootloader (für shift_types etc.)
-            data_manager=self.data_manager,
-            year=year, month=month, all_users=all_users, user_data_map=user_data_map,
-            vacation_requests=vacation_requests, wunschfrei_requests=wunschfrei_requests,
-            live_shifts_data=live_shifts_data,
-            locked_shifts_data=locked_shifts,  # <-- NEU (Regel 1)
-            holidays_in_month=holidays_in_month,
-            progress_callback=self._safe_update_progress,
-            completion_callback=self._on_generation_complete
-        )
-        threading.Thread(target=generator.run_generation, daemon=True).start()
+    # --- UI-Status (Ladebalken & Sperren) ---
+
+    def show_progress_widgets(self, text="Starte Vorgang..."):
+        """Zeigt die Lade-Widgets an (aufgerufen von Events oder build_grid)."""
+        # (Wir rufen die UI-Methode auf, um die Widgets zu erstellen/neu zu erstellen)
+        self.ui._create_progress_widgets()
+
+        # Mache das Progress-Frame sichtbar
+        self.ui.progress_frame.grid(row=0, column=0, sticky="nsew", padx=20, pady=20)
+        self.ui.plan_grid_frame.grid_rowconfigure(0, weight=1)
+        self.ui.plan_grid_frame.grid_columnconfigure(0, weight=1)
+        self.ui.progress_bar.config(value=0, maximum=100)
+        self.ui.status_label.config(text=text)
+        self.update_idletasks()
+
+    def hide_progress_widgets(self):
+        """Versteckt die Lade-Widgets (aufgerufen nach dem Rendern)."""
+        if self.ui.progress_frame and self.ui.progress_frame.winfo_exists():
+            self.ui.progress_frame.grid_forget()
+            if self.ui.plan_grid_frame.winfo_exists():
+                self.ui.plan_grid_frame.grid_rowconfigure(0, weight=0)
+                self.ui.plan_grid_frame.grid_columnconfigure(0, weight=0)
 
     def _safe_update_progress(self, value, text):
-        # (unverändert)
+        """Thread-sichere Methode zur Aktualisierung des Ladebalkens."""
         self.after(0, lambda v=value, t=text: self._update_progress(v, t))
 
-    def _on_generation_complete(self, success, save_count, error_message):
-        # (Angepasst: Cache-Invalidierung)
+    def _update_progress(self, step_value, step_text):
+        """Aktualisiert die Lade-Widgets im UI-Thread."""
+        if self.ui.progress_bar and self.ui.progress_bar.winfo_exists():
+            self.ui.progress_bar.config(value=step_value)
+        if self.ui.status_label and self.ui.status_label.winfo_exists():
+            self.ui.status_label.config(text=step_text)
+
+    def update_lock_status(self):
+        """Aktualisiert die UI-Anzeige für die Monatssperre."""
         year = self.app.current_display_date.year
         month = self.app.current_display_date.month
-        if self.progress_frame and self.progress_frame.winfo_exists():
-            self.progress_frame.grid_forget()
-            if self.plan_grid_frame.winfo_exists():
-                self.plan_grid_frame.grid_rowconfigure(0, weight=0)
-                self.plan_grid_frame.grid_columnconfigure(0, weight=0)
+        is_locked = RequestLockManager.is_month_locked(year, month)
+        s = ttk.Style()
+        s.configure("Lock.TButton", background="red", foreground="white", font=('Segoe UI', 9, 'bold'))
+        s.map("Lock.TButton", background=[('active', '#CC0000')])
+        s.configure("Unlock.TButton", background="green", foreground="white", font=('Segoe UI', 9, 'bold'))
+        s.map("Unlock.TButton", background=[('active', '#006400')])
+
+        if is_locked:
+            self.ui.lock_status_label.config(text="(Für Anträge gesperrt)", foreground="red")
+            self.ui.lock_button.config(
+                text="Monat entsperren", style="Unlock.TButton")
+        else:
+            self.ui.lock_status_label.config(text="")
+            self.ui.lock_button.config(text="Monat für Anträge sperren",
+                                       style="Lock.TButton")
+
+    # --- Callback vom Generator (wird von ShiftPlanEvents aufgerufen) ---
+
+    def _on_generation_complete(self, success, save_count, error_message):
+        """
+        Callback, der ausgeführt wird, nachdem der Generator-Thread
+        abgeschlossen ist.
+        """
+        year = self.app.current_display_date.year
+        month = self.app.current_display_date.month
+
+        # Ladebalken ausblenden
+        self.hide_progress_widgets()
 
         # --- KORREKTUR (Problem 2): P5-Cache invalidieren ---
-        # (Wird VOR dem Neuladen aufgerufen)
         if hasattr(self, 'data_manager') and hasattr(self.data_manager, 'invalidate_month_cache'):
             print(f"[ShiftPlanTab] Invalidiere DM-Cache für {year}-{month} nach Generierung.")
             self.data_manager.invalidate_month_cache(year, month)
@@ -440,305 +267,131 @@ class ShiftPlanTab(ttk.Frame):
             messagebox.showinfo("Erfolg",
                                 f"Plan-Generierung abgeschlossen.\n{save_count} Dienste wurden eingetragen.",
                                 parent=self)
-            self.build_shift_plan_grid(year, month)  # Neu laden
         else:
             messagebox.showerror("Fehler bei Generierung", error_message, parent=self)
-            self.build_shift_plan_grid(year, month)  # Trotzdem neu laden
 
-    def build_shift_plan_grid(self, year, month, data_ready=False):
-        # (unverändert)
-        month_name_german = {"January": "Januar", "February": "Februar", "March": "März", "April": "April",
-                             "May": "Mai", "June": "Juni", "July": "Juli", "August": "August", "September": "September",
-                             "October": "Oktober", "November": "November", "December": "Dezember"}
-        try:
-            month_name_en = date(year, month, 1).strftime('%B');
-            self.month_label_var.set(
-                f"{month_name_german.get(month_name_en, month_name_en)} {year}")
-        except ValueError:
-            self.month_label_var.set(f"Ungültiger Monat {month}/{year}")
-        self.update_lock_status()
+        # Plan in jedem Fall neu laden, um Ergebnisse (oder Fehlerzustand) anzuzeigen
+        self.build_shift_plan_grid(year, month)
 
-        for widget in self.plan_grid_frame.winfo_children(): widget.destroy()
-        if self.renderer: self.renderer.grid_widgets = {'cells': {}, 'user_totals': {}, 'daily_counts': {}}
-
-        if data_ready:
-            print(f"[ShiftPlanTab] Starte sofortiges Rendering für {year}-{month} (data_ready=True).")
-            self._create_progress_widgets()
-            self.progress_frame.grid_forget()
-            self._render_grid(year, month)
-        else:
-            self._create_progress_widgets()
-            self.progress_frame.grid(row=0, column=0, sticky="nsew", padx=20, pady=20)
-            self.plan_grid_frame.grid_rowconfigure(0, weight=1);
-            self.plan_grid_frame.grid_columnconfigure(0, weight=1)
-            self.progress_bar.config(value=0, maximum=100);
-            self.status_label.config(text="Daten werden geladen...")
-            self.update_idletasks()
-
-            print(f"[ShiftPlanTab] Starte Lade-Thread für {year}-{month} (data_ready=False)...")
-            threading.Thread(target=self._load_data_in_thread, args=(year, month), daemon=True).start()
-
-    def _update_progress(self, step_value, step_text):
-        # (unverändert)
-        if self.progress_bar and self.progress_bar.winfo_exists(): self.progress_bar.config(value=step_value)
-        if self.status_label and self.status_label.winfo_exists(): self.status_label.config(text=step_text)
-
-    def _load_data_in_thread(self, year, month):
-        # (unverändert)
-        error_message = None
-        try:
-            # --- KORREKTUR: Rückgabewert prüfen ---
-            success = self.data_manager.load_and_process_data(year, month, self._safe_update_progress)
-            if success:
-                self.after(1, lambda: self._render_grid(year, month))
-            else:
-                raise Exception("load_and_process_data hat 'False' zurückgegeben.")
-            # --- ENDE KORREKTUR ---
-        except Exception as e:
-            print(f"FEHLER beim Laden der Daten im Thread: {e}")
-            error_message = f"Fehler beim Laden der Daten:\n{e}"
-            self.after(1, lambda msg=error_message: messagebox.showerror("Fehler", msg, parent=self))
-            self.after(1, lambda: self.status_label.config(
-                text="Laden fehlgeschlagen!") if self.status_label and self.status_label.winfo_exists() else None)
-
-    def _render_grid(self, year, month):
-        # (unverändert)
-        if not self.renderer: print("[FEHLER] Renderer nicht initialisiert in _render_grid."); return
-
-        if self.progress_bar and self.progress_bar.winfo_exists():
-            self.progress_bar.config(value=100)
-        if self.status_label and self.status_label.winfo_exists():
-            self.status_label.config(text="Zeichne Gitter...")
-        self.update_idletasks()
-
-        self.renderer.build_shift_plan_grid(year, month, data_ready=True)
-
-    def _finalize_ui_after_render(self):
-        # (unverändert)
-        if self.progress_frame and self.progress_frame.winfo_exists():
-            self.progress_frame.grid_forget()
-            if self.plan_grid_frame.winfo_exists():
-                self.plan_grid_frame.grid_rowconfigure(0, weight=0);
-                self.plan_grid_frame.grid_columnconfigure(0, weight=0)
-        if self.inner_frame.winfo_exists() and self.canvas.winfo_exists():
-            self.inner_frame.update_idletasks();
-            self.canvas.config(scrollregion=self.canvas.bbox("all"))
+    # --- Synchrones Refresh (wird von außen aufgerufen, z.B. MainAdminWindow) ---
 
     def refresh_plan(self):
-        # (unverändert)
+        """
+        Erzwingt ein synchrones Neuladen und Neuzeichnen der Daten.
+        (Wird oft von anderen Tabs aufgerufen, wenn sich Daten ändern)
+        """
         print("[ShiftPlanTab] Starte synchronen Refresh...")
         year, month = self.app.current_display_date.year, self.app.current_display_date.month
         try:
-            print("   -> Lade Daten synchron für Refresh...");
-            self.data_manager.load_and_process_data(year,
-                                                    month);
-            print(
-                "   -> Daten für Refresh geladen.")
+            print("   -> Lade Daten synchron für Refresh...")
+            # (Kein Ladebalken-Callback hier)
+            self.data_manager.load_and_process_data(year, month)
+            print("   -> Daten für Refresh geladen.")
         except Exception as e:
-            messagebox.showerror("Fehler", f"Fehler beim Aktualisieren der Plandaten: {e}", parent=self);
+            messagebox.showerror("Fehler", f"Fehler beim Aktualisieren der Plandaten: {e}", parent=self)
             return
+
         if self.renderer:
-            print("   -> Zeichne Grid neu für Refresh...");
-            self.renderer.build_shift_plan_grid(year, month,
-                                                data_ready=True);
-            print(
-                "   -> Grid für Refresh neu gezeichnet.")
+            print("   -> Zeichne Grid neu für Refresh...")
+            # (Renderer ruft _finalize_ui_after_render_sync auf)
+            self.renderer.build_shift_plan_grid(year, month, data_ready=True, is_sync_refresh=True)
+            print("   -> Grid für Refresh neu gezeichnet.")
         else:
             print("[FEHLER] Renderer nicht verfügbar für Refresh.")
 
     def _finalize_ui_after_render_sync(self):
-        # (unverändert)
-        if self.inner_frame.winfo_exists() and self.canvas.winfo_exists():
-            self.inner_frame.update_idletasks();
-            self.canvas.config(scrollregion=self.canvas.bbox("all"))
+        """
+        Wird vom Renderer nach einem SYNCHRONEN Refresh aufgerufen.
+        (Aktualisiert nur die Scrollregion, versteckt keinen Ladebalken)
+        """
+        if self.ui.inner_frame.winfo_exists() and self.ui.canvas.winfo_exists():
+            self.ui.inner_frame.update_idletasks()
+            self.ui.canvas.config(scrollregion=self.ui.canvas.bbox("all"))
 
-    def show_previous_month(self):
-        # (Angepasst)
-        self.clear_understaffing_results()
-        current_date = self.app.current_display_date;
-        first_day_of_current_month = current_date.replace(day=1)
-        last_day_of_previous_month = first_day_of_current_month - timedelta(days=1)
-        self.app.current_display_date = last_day_of_previous_month
-        new_year, new_month = self.app.current_display_date.year, self.app.current_display_date.month
-        self.app.current_display_date = self.app.current_display_date.replace(day=1)
-        if current_date.year != new_year:
-            if hasattr(self.app.app, 'load_holidays_for_year'): self.app.app.load_holidays_for_year(new_year)
-            if hasattr(self.app.app, 'load_events_for_year'): self.app.app.load_events_for_year(new_year)
+    # --- NEU: Kompatibilitäts-Properties (Fix für Regel 1) ---
+    # Diese fangen alte Zugriffe (z.B. self.inner_frame) ab und
+    # leiten sie an das neue UI-Objekt (self.ui.inner_frame) weiter.
+    # Dies repariert externen Code (wie ActionUpdateHandler),
+    # der durch das Refactoring gebrochen wurde.
 
-        if hasattr(self.app, 'trigger_shift_plan_preload'):
-            self.app.trigger_shift_plan_preload(new_year, new_month)
+    # --- 1. UI-Elemente ---
+    @property
+    def inner_frame(self):
+        """Kompatibilitäts-Property: Leitet zu self.ui.inner_frame weiter."""
+        return self.ui.inner_frame
 
-        self.build_shift_plan_grid(new_year, new_month)
+    @property
+    def canvas(self):
+        """Kompatibilitäts-Property: Leitet zu self.ui.canvas weiter."""
+        return self.ui.canvas
 
-    def show_next_month(self):
-        # (Angepasst)
-        self.clear_understaffing_results()
-        current_date = self.app.current_display_date;
-        days_in_month = calendar.monthrange(current_date.year, current_date.month)[1]
-        first_day_of_next_month = current_date.replace(day=1) + timedelta(days=days_in_month)
-        self.app.current_display_date = first_day_of_next_month
-        new_year, new_month = self.app.current_display_date.year, self.app.current_display_date.month
-        if current_date.year != new_year:
-            if hasattr(self.app.app, 'load_holidays_for_year'): self.app.app.load_holidays_for_year(new_year)
-            if hasattr(self.app.app, 'load_events_for_year'): self.app.app.load_events_for_year(new_year)
+    @property
+    def plan_grid_frame(self):
+        """Kompatibilitäts-Property: Leitet zu self.ui.plan_grid_frame weiter."""
+        return self.ui.plan_grid_frame
 
-        if hasattr(self.app, 'trigger_shift_plan_preload'):
-            self.app.trigger_shift_plan_preload(new_year, new_month)
+    @property
+    def month_label_var(self):
+        """Kompatibilitäts-Property: Leitet zu self.ui.month_label_var weiter."""
+        return self.ui.month_label_var
 
-        self.build_shift_plan_grid(new_year, new_month)
+    @property
+    def lock_status_label(self):
+        """Kompatibilitäts-Property: Leitet zu self.ui.lock_status_label weiter."""
+        return self.ui.lock_status_label
 
-    def check_understaffing(self):
-        # (unverändert)
-        self.clear_understaffing_results()
-        year, month = self.app.current_display_date.year, self.app.current_display_date.month
-        days_in_month = calendar.monthrange(year, month)[1]
-        print("[Check Understaffing] Verwende aktuelle Live-Daten aus dem DataManager...")
-        try:
-            daily_counts = self.data_manager.daily_counts
-        except AttributeError:
-            messagebox.showerror("Fehler",
-                                 "Tageszählungen (daily_counts) nicht im DataManager gefunden.\nBitte warten Sie, bis der Plan geladen ist.",
-                                 parent=self);
-            return
-        shifts_to_check_data = get_ordered_shift_abbrevs(include_hidden=False)
-        shifts_to_check = [item['abbreviation'] for item in shifts_to_check_data if
-                           item.get('check_for_understaffing')]
-        understaffing_found = False
-        self.understaffing_result_frame.pack(fill="x", pady=5, before=self.lock_button.master)
-        for day in range(1, days_in_month + 1):
-            current_date = date(year, month, day);
-            date_str = current_date.strftime('%Y-%m-%d')
-            min_staffing = self.data_manager.get_min_staffing_for_date(current_date)
-            for shift in shifts_to_check:
-                min_req = min_staffing.get(shift)
-                if min_req is not None and min_req > 0:
-                    count = daily_counts.get(date_str, {}).get(shift, 0)
-                    if count < min_req:
-                        understaffing_found = True
-                        # --- KORREKTUR: Greife auf Bootloader.app zu ---
-                        shift_name = self.app.app.shift_types_data.get(shift, {}).get('name',
-                                                                                      shift)
-                        # --- ENDE KORREKTUR ---
-                        ttk.Label(self.understaffing_result_frame,
-                                  text=f"Unterbesetzung am {current_date.strftime('%d.%m.%Y')}: Schicht '{shift_name}' ({shift}) - {count} von {min_req} anwesend.",
-                                  foreground="red", font=("Segoe UI", 10)).pack(anchor="w")
-        if not understaffing_found: ttk.Label(self.understaffing_result_frame, text="Keine Unterbesetzungen gefunden.",
-                                              foreground="green", font=("Segoe UI", 10, "bold")).pack(anchor="w")
+    @property
+    def lock_button(self):
+        """Kompatibilitäts-Property: Leitet zu self.ui.lock_button weiter."""
+        return self.ui.lock_button
 
-    def clear_understaffing_results(self):
-        # (unverändert)
-        self.understaffing_result_frame.pack_forget()
-        for widget in self.understaffing_result_frame.winfo_children(): widget.destroy()
+    @property
+    def understaffing_result_frame(self):
+        """Kompatibilitäts-Property: Leitet zu self.ui.understaffing_result_frame weiter."""
+        return self.ui.understaffing_result_frame
 
-    def update_lock_status(self):
-        # (unverändert)
-        year = self.app.current_display_date.year;
-        month = self.app.current_display_date.month
-        is_locked = RequestLockManager.is_month_locked(year, month)
-        s = ttk.Style();
-        s.configure("Lock.TButton", background="red", foreground="white", font=('Segoe UI', 9, 'bold'));
-        s.map("Lock.TButton", background=[('active', '#CC0000')]);
-        s.configure("Unlock.TButton", background="green", foreground="white", font=('Segoe UI', 9, 'bold'));
-        s.map("Unlock.TButton", background=[('active', '#006400')])
-        if is_locked:
-            self.lock_status_label.config(text="(Für Anträge gesperrt)", foreground="red");
-            self.lock_button.config(
-                text="Monat entsperren", style="Unlock.TButton")
-        else:
-            self.lock_status_label.config(text="");
-            self.lock_button.config(text="Monat für Anträge sperren",
-                                    style="Lock.TButton")
+    # --- 2. Daten-Elemente (WICHTIG FÜR STUNDENBERECHNUNG) ---
+    @property
+    def grid_widgets(self):
+        """
+        Kompatibilitäts-Property: Leitet zu self.renderer.grid_widgets weiter.
+        (Wichtig für ActionUpdateHandler -> Aktualisierung der Summen-Labels)
+        """
+        return self.renderer.grid_widgets
 
-    def toggle_month_lock(self):
-        # (unverändert)
-        year = self.app.current_display_date.year;
-        month = self.app.current_display_date.month
-        is_locked = RequestLockManager.is_month_locked(year, month)
-        locks = RequestLockManager.load_locks();
-        lock_key = f"{year}-{month:02d}"
-        if is_locked:
-            if lock_key in locks: del locks[lock_key]
-        else:
-            locks[lock_key] = True
-        if RequestLockManager.save_locks(locks):
-            self.update_lock_status()
-            if hasattr(self.app, 'refresh_antragssperre_views'): self.app.refresh_antragssperre_views()
-        else:
-            messagebox.showerror("Fehler", "Der Status konnte nicht gespeichert werden.", parent=self)
+    @property
+    def user_data_map(self):
+        """
+        Kompatibilitäts-Property: Leitet zu self.data_manager.user_data_map weiter.
+        (Wichtig für Stundenberechnung - Soll-Stunden)
+        """
+        return self.data_manager.user_data_map
 
-    # --- NEUE METHODEN (Für Tastatur-Shortcuts) ---
+    # --- HINZUGEFÜGT: Fix für das "Stunden-Nullen"-Problem ---
+    @property
+    def user_shift_totals(self):
+        """
+        Kompatibilitäts-Property: Leitet zu self.data_manager.user_shift_totals weiter.
+        (Wichtig für Stundenberechnung - Ist-Stunden-Basis)
+        """
+        return self.data_manager.user_shift_totals
 
-    def _bind_keyboard_shortcuts(self):
-        """Bindet Tastatur-Events an das Canvas, um Shortcuts zu ermöglichen."""
-        # Wir binden an das Canvas, da es den Hauptfokus beim Scrollen hat
-        # und die Events an die inneren Widgets (Labels) weitergibt.
-        self.canvas.bind("<Key>", self._on_key_press)
+    # --- ENDE FIX ---
 
-        # WICHTIG: Damit das Canvas Tastatur-Events empfangen kann,
-        # muss es den Fokus erhalten können. Wir setzen den Fokus,
-        # wenn die Maus das Canvas betritt.
-        self.canvas.bind("<Enter>", lambda e: self.canvas.focus_set())
+    @property
+    def shift_types_data(self):
+        """
+        Kompatibilitäts-Property: Leitet zu self.app.app.shift_types_data weiter.
+        (Wichtig für Stundenberechnung - Schicht-Stundenwerte)
+        """
+        return self.app.app.shift_types_data
 
-    def _on_key_press(self, event):
-        """Verarbeitet einen Tastendruck als Schicht-Shortcut."""
+    @property
+    def shift_frequency(self):
+        """
+        Kompatibilitäts-Property: Leitet zu self.app.shift_frequency weiter.
+        (Wichtig für Menü-Erstellung im ActionHandler)
+        """
+        return self.app.shift_frequency
 
-        # 1. Prüfen, ob eine Taste gedrückt wurde, die wir kennen
-        key = event.keysym.lower()
-        if key not in self.shortcut_map:
-            # Ignoriere Tasten wie "Shift", "Control" oder "a"
-            return
-
-            # 2. Ziel-Schicht ermitteln
-        target_shift_abbrev = self.shortcut_map[key]
-
-        # 3. Renderer fragen, wo die Maus ist
-        if not self.renderer:
-            return
-
-        coords = self.renderer.get_hovered_cell_coords()
-        if not coords:
-            # Maus ist nicht über einer gültigen Zelle
-            return
-
-        user_id, day = coords
-
-        # 4. Datum ermitteln
-        try:
-            # --- KORREKTUR (AttributeError) ---
-            # 'self' (ShiftPlanTab) hat nicht .year oder .month
-            # Wir müssen self.renderer (oder self.data_manager) fragen
-            if day == 0:  # "Ü"-Zelle
-                date_obj = date(self.renderer.year, self.renderer.month, 1) - timedelta(days=1)
-            else:
-                date_obj = date(self.renderer.year, self.renderer.month, day)
-            # --- ENDE KORREKTUR ---
-        except ValueError:
-            return  # Ungültiges Datum (z.B. 31. Feb)
-
-        # 5. Gültigkeit PRÜFEN (Regel 2: Keine DB-Latenz!)
-        # Wir nutzen den PlanningAssistant (via DataManager)
-        if not hasattr(self.data_manager, 'get_conflicts_for_shift'):
-            print("[FEHLER] PlanningAssistant-Funktion nicht im DataManager gefunden.")
-            return
-
-        conflicts = self.data_manager.get_conflicts_for_shift(user_id, date_obj, target_shift_abbrev)
-
-        if conflicts:
-            # Zeige den ersten Konflikt an (optional)
-            print(f"Shortcut blockiert: {conflicts[0]}")
-            # Mache ein "Ping"-Geräusch, um ungültige Eingabe zu signalisieren
-            self.bell()
-            return
-
-        # 6. Aktion AUSFÜHREN
-        # --- KORREKTUR (AttributeError) ---
-        # Rufe die korrekte Funktion 'save_shift_entry_and_refresh'
-        # aus dem ActionHandler auf (die auch das Menü verwendet).
-        print(f"[Shortcut] Weise zu: U:{user_id} D:{day} -> '{target_shift_abbrev}'")
-        self.action_handler.save_shift_entry_and_refresh(
-            user_id,
-            date_obj.strftime('%Y-%m-%d'),  # Die Funktion erwartet einen String
-            target_shift_abbrev
-        )
-        # --- ENDE KORREKTUR ---
-
+    # --- ENDE Kompatibilitäts-Properties ---
