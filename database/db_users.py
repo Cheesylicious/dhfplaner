@@ -255,13 +255,41 @@ def get_all_users():
 
 
 def get_all_users_with_details():
-    # ... (unverändert) ...
+    """
+    Holt alle Benutzer mit allen notwendigen Details für die Anzeige und Bearbeitung.
+    (Kritisch für den Fix)
+    """
     conn = create_connection()
     if conn is None:
         return []
     try:
         cursor = conn.cursor(dictionary=True)
-        cursor.execute("SELECT * FROM users")
+        # --- KORREKTUR: Explizite Spaltenauswahl für Konsistenz und Vollständigkeit ---
+        # Stellt sicher, dass ALLE Felder für den UserManagementTab und den EditWindow geladen werden.
+        cursor.execute("""
+                       SELECT id,
+                              vorname,
+                              name,
+                              role,
+                              geburtstag,
+                              telefon,
+                              diensthund,
+                              urlaub_gesamt,
+                              urlaub_rest,
+                              entry_date,
+                              last_ausbildung,
+                              last_schiessen,
+                              last_seen,
+                              is_approved,
+                              is_archived,
+                              archived_date,
+                              password_hash,
+                              has_seen_tutorial,
+                              password_changed,
+                              activation_date
+                       FROM users
+                       """)
+        # --- ENDE KORREKTUR ---
         users = cursor.fetchall()
         return users
     except Exception as e:
@@ -388,10 +416,11 @@ def save_user_order(user_order_list):
         # (VALUES() ist effizienter als die 'AS new' Syntax)
         query = """
                 INSERT INTO user_order (user_id, sort_order, is_visible)
-                VALUES (%s, %s, %s)
-                ON DUPLICATE KEY UPDATE
-                    sort_order = VALUES(sort_order),
-                    is_visible = VALUES(is_visible)
+                VALUES (%s, %s, %s) ON DUPLICATE KEY \
+                UPDATE \
+                    sort_order = \
+                VALUES (sort_order), is_visible = \
+                VALUES (is_visible)
                 """
 
         # 3. Führe den Befehl *einmal* für alle Daten aus
@@ -444,14 +473,23 @@ def update_user_details(user_id, details, current_user_id):
     try:
         cursor = conn.cursor()
 
-        # --- NEU: Leere Strings für Datumsfelder in None umwandeln ---
-        # (Wird von user_edit_window jetzt als None übergeben, aber doppelt sicher)
-        for date_field in ['geburtstag', 'entry_date', 'activation_date', 'archived_date']:
-            if date_field in details and details[date_field] == "":
+        # --- KORREKTUR: Alle DATUMS-/DATETIME-Felder auf NULL setzen, wenn sie leer sind. (FINAL FIX für 1292) ---
+        date_fields_to_nullify = ['geburtstag', 'entry_date', 'activation_date', 'archived_date',
+                                  'last_ausbildung', 'last_schiessen', 'last_seen']
+
+        for date_field in date_fields_to_nullify:
+            # Prüfen auf leeren String ('') oder explizites None
+            if date_field in details and (details[date_field] == "" or details[date_field] is None):
                 details[date_field] = None
-        # --- ENDE NEU ---
+        # --- ENDE KORREKTUR ---
 
         valid_details = {k: v for k, v in details.items() if k != 'password'}
+
+        # --- KRITISCHER FIX FÜR LOGIN-SPERRE (Regel 1) ---
+        # Verhindert, dass der password_hash überschrieben wird, da das Feld leer aus der GUI kommt.
+        if 'password_hash' in valid_details:
+            del valid_details['password_hash']
+        # --- ENDE KRITISCHER FIX ---
 
         # --- ANPASSUNG FÜR URLAUBSBERECHNUNG BEI DATUMSÄNDERUNG ---
         if 'entry_date' in valid_details:
