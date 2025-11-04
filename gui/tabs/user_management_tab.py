@@ -95,7 +95,17 @@ class UserManagementTab(ttk.Frame):
             self.all_users_data = new_data_cache
             self._load_users_from_cache()
 
-    # --- ENDE NEUE METHODE ---
+    # --- NEUE INNOVATION FÜR AKTUALISIERUNG BEIM FOKUS (Regel 1 & 2) ---
+    def on_tab_focus(self):
+        """
+        Wird vom AdminTabManager aufgerufen, wenn dieser Tab aktiviert wird.
+        Erzwingt eine Aktualisierung der Daten, um sicherzustellen, dass die
+        Anzeige aktuell ist (Regel 2: Vermeidet Wartezeiten und manuelle Aktionen).
+        """
+        print("[UserMgmtTab] on_tab_focus aufgerufen. Aktualisiere Daten.")
+        # Ruft refresh_data auf, welches entweder aus Cache oder DB lädt.
+        self.refresh_data()
+    # --- ENDE NEUE INNOVATION ---
 
     def _create_widgets(self):
         top_frame = ttk.Frame(self)
@@ -190,6 +200,7 @@ class UserManagementTab(ttk.Frame):
                 try:
                     if isinstance(value, datetime): return value.date()
                     if isinstance(value, date): return value
+                    # Das Datenbankformat YYYY-MM-DD muss für das Parsen beibehalten werden
                     return datetime.strptime(str(value), '%Y-%m-%d').date()
                 except:
                     return date.min
@@ -219,15 +230,26 @@ class UserManagementTab(ttk.Frame):
                     value = "Ja" if value == 1 else "Nein"
                 elif col_key in ['entry_date', 'last_ausbildung', 'last_schiessen', 'geburtstag', 'archived_date',
                                  'activation_date']:
+                    # --- KORRIGIERTER CODEBLOCK FÜR DATUMSANZEIGE (NEUES FORMAT: TT.MM.YYYY) ---
+                    DATE_FORMAT = '%d.%m.%Y'
                     if isinstance(value, datetime):
-                        value = value.strftime('%Y-%m-%d')
+                        value = value.strftime(DATE_FORMAT)
                     elif isinstance(value, date):
-                        value = value.strftime('%Y-%m-%d')
+                        value = value.strftime(DATE_FORMAT)
+                    elif isinstance(value, str) and value:
+                        try:
+                            # Parsen mit DB-Format ('%Y-%m-%d'), Formatieren mit Anzeige-Format (DATE_FORMAT)
+                            parsed_date = datetime.strptime(value.split(' ')[0], '%Y-%m-%d').date()
+                            value = parsed_date.strftime(DATE_FORMAT)
+                        except:
+                            value = ""
                     else:
-                        value = ""  # KORREKTUR: Leere Strings bei fehlendem Datum
+                        value = ""  # Leere Strings bei fehlendem/ungültigem Datum
+                    # --- ENDE KORRIGIERTER CODEBLOCK ---
                 elif col_key == 'last_seen':
                     if isinstance(value, datetime):
-                        value = value.strftime('%Y-%m-%d %H:%M')
+                        # Auch hier das Datumsformat anpassen
+                        value = value.strftime('%d.%m.%Y %H:%M')
                     else:
                         value = ""
                 values_to_insert.append(value)
@@ -405,9 +427,6 @@ class UserManagementTab(ttk.Frame):
             else:
                 self.selected_user_id = None;
                 self.selected_user_data = None
-        else:
-            self.selected_user_id = None;
-            self.selected_user_data = None
             try:
                 self.tree.selection_remove(self.tree.selection())
             except tk.TclError:
@@ -619,4 +638,3 @@ class ColumnChooser(tk.Toplevel):
                 new_visible.append(key)
         self.callback(new_visible);
         self.destroy()
-

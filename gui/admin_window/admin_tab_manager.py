@@ -52,6 +52,7 @@ class AdminTabManager:
         """
         Manager für das Lazy Loading und die Verwaltung der Notebook-Tabs.
         """
+        super().__init__()  # Sicherstellen, dass init von object aufgerufen wird, falls dies eine Erbschaft wäre
         self.admin_window = admin_window
         self.notebook = notebook
         self.user_data = admin_window.user_data
@@ -112,10 +113,20 @@ class AdminTabManager:
 
             print(f"[GUI-Admin] on_tab_changed: Zu Tab '{tab_name}' gewechselt.")
 
-            # --- NEU (Regel 4): Logik ausgelagert ---
-            # Ruft die Preload-Funktion auf, die prüft, ob geladen werden muss
-            self.preload_tab(tab_name, tab_index)
-            # --- ENDE NEU ---
+            # --- NEUE WICHTIGE LOGIK: Automatischer Refresh bei Fokus (Regel 1 & 2) ---
+            # Wenn der Tab bereits geladen ist, rufen wir die on_tab_focus Methode auf,
+            # die wir in UserManagementTab implementiert haben.
+            if tab_name in self.loaded_tabs:
+                frame = self.tab_frames.get(tab_name)
+                if frame and hasattr(frame, 'on_tab_focus'):
+                    print(f"[GUI-Admin] on_tab_changed: Rufe on_tab_focus() für GELADENEN Tab '{tab_name}' auf.")
+                    frame.on_tab_focus()
+                return
+            # --- ENDE NEUE LOGIK ---
+
+            # Wenn der Tab NICHT geladen ist, starten wir den Ladevorgang
+            # force_select=True stellt sicher, dass die Ladeanzeige gezeigt wird
+            self.preload_tab(tab_name, tab_index, force_select=True)
 
         except (tk.TclError, IndexError) as e:
             print(f"[GUI-Admin] Fehler beim Ermitteln des Tabs in on_tab_changed: {e}")
@@ -131,6 +142,8 @@ class AdminTabManager:
         if tab_name in self.loaded_tabs or tab_name in self.loading_tabs:
             if not force_select:  # Nur Log, wenn Preloader lädt
                 print(f"[GUI-Admin] -> Tab '{tab_name}' ist bereits geladen oder wird geladen. Keine Aktion.")
+            # WICHTIG: Kein on_tab_focus hier! Das passiert jetzt in on_tab_changed,
+            # damit die Logik auch funktioniert, wenn force_select=False (Hintergrund-Preload)
             return
 
         if tab_name not in self.tab_definitions or self.tab_definitions[tab_name] is None:
@@ -154,7 +167,7 @@ class AdminTabManager:
                 print(f"[GUI-Admin] FEHLER: Konnte Index für Platzhalter {tab_name} nicht finden.")
                 return
 
-        # Zeige Ladeanzeige nur, wenn der Tab aktiv ausgewählt wurde (nicht bei P2)
+        # Zeige Ladeanzeige nur, wenn der Tab aktiv ausgewählt wurde
         if force_select:
             try:
                 current_widget_at_index = self.notebook.nametowidget(self.notebook.select())

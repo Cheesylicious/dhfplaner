@@ -1,5 +1,7 @@
 # gui/data_manager/dm_helpers.py
 # NEU: Ausgelagerte Hilfsfunktionen für den DataManager (Regel 4)
+# KORRIGIERT: Fügt die fehlende Methode calculate_user_shift_totals_from_db
+# hinzu, die zur Initialisierung des Ist-Stunden-Caches benötigt wird.
 
 from datetime import date, datetime, timedelta, time
 import calendar
@@ -135,6 +137,32 @@ class DataManagerHelpers:
 
         return {k: int(v) for k, v in min_staffing.items() if
                 isinstance(v, (int, str)) and str(v).isdigit() and int(v) >= 0}
+
+    # --- NEU: HINZUGEFÜGT FÜR DIE LADE-LOGIK (Fix für Attribute Error) ---
+    def calculate_user_shift_totals_from_db(self, shift_data, user_data_map, shift_types_data):
+        """
+        Berechnet die Ist-Stunden-Totals für alle Benutzer im aktuellen Monat.
+        (Wird im Worker-Thread ausgeführt und ist der langsame Schritt)
+        """
+        year = self.dm.year
+        month = self.dm.month
+        totals_cache = defaultdict(dict)
+
+        # Iteriere über alle Benutzer im aktuellen Kontext
+        for user_id_str in self.dm.user_data_map:
+            # WICHTIG: Wir delegieren die komplexe Berechnung an die bereits existierende Funktion
+            total_hours = self.calculate_total_hours_for_user(user_id_str, year, month)
+
+            # Speichere die Ist-Stunden
+            totals_cache[user_id_str]['hours_total'] = total_hours
+
+            # Speichere die Schicht-Counts (grob, da die genaue Berechnung aufwendiger ist)
+            # Die Ist-Stunden sind der kritische Wert für den Live-Update-Bug.
+            totals_cache[user_id_str]['shifts_total'] = len(self.dm.shift_schedule_data.get(user_id_str, {}))
+
+        return dict(totals_cache)
+
+    # --- ENDE NEU ---
 
     def calculate_total_hours_for_user(self, user_id_str, year, month):
         """ Berechnet die geschätzten Gesamtstunden für einen Benutzer im Monat. """
