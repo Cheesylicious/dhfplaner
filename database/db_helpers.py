@@ -1,13 +1,56 @@
 # database/db_helpers.py
 import hashlib
 from datetime import datetime, date
-from .db_config_manager import load_config_json # Importiert aus der neuen Datei
+from .db_config_manager import load_config_json  # Importiert aus der neuen Datei
+
+# --- NEUER IMPORT für dynamische Rollen ---
+# (Wir importieren die Funktion, die wir im letzten Schritt erstellt haben)
+try:
+    from .db_roles import get_all_roles_details
+except ImportError:
+    print("WARNUNG: db_roles.py nicht gefunden. Fallback für Hierarchie wird verwendet.")
+    get_all_roles_details = None
+# --- ENDE NEUER IMPORT ---
 
 # ==============================================================================
 # --- KONSTANTEN UND HILFSFUNKTIONEN ---
 # ==============================================================================
 
-ROLE_HIERARCHY = {"Gast": 1, "Benutzer": 2, "Admin": 3, "SuperAdmin": 4}
+# --- KORREKTUR: Statische Hierarchie entfernt ---
+# ROLE_HIERARCHY = {"Gast": 1, "Benutzer": 2, "Admin": 3, "SuperAdmin": 4} # ENTFERNT
+# --- ENDE KORREKTUR ---
+
+# Fallback-Daten, falls die DB-Migration noch nicht erfolgt ist
+_FALLBACK_HIERARCHY = {"Gast": 1, "Mitarbeiter": 2, "Admin": 3}
+
+
+def get_dynamic_role_hierarchy():
+    """
+    (NEUE FUNKTION)
+    Ersetzt die alte statische ROLE_HIERARCHY-Variable.
+    Lädt die Hierarchie-Level dynamisch aus der Datenbank.
+    Gibt ein Dict im alten Format zurück: {'Admin': 1, 'Mitarbeiter': 2, ...}
+    """
+    if get_all_roles_details is None:
+        return _FALLBACK_HIERARCHY
+
+    try:
+        # 1. Ruft die Liste ab: [{'name': 'Admin', 'hierarchy_level': 1}, ...]
+        roles_list = get_all_roles_details()
+
+        if not roles_list:
+            print("WARNUNG: get_dynamic_role_hierarchy: Keine Rollen von DB empfangen. Nutze Fallback.")
+            return _FALLBACK_HIERARCHY
+
+        # 2. Konvertiert in das alte Map-Format: {'Admin': 1, ...}
+        roles_map = {role['name']: role['hierarchy_level'] for role in roles_list}
+        return roles_map
+
+    except Exception as e:
+        print(f"FEHLER bei get_dynamic_role_hierarchy: {e}. Nutze Fallback.")
+        return _FALLBACK_HIERARCHY
+
+
 MIN_STAFFING_RULES_CONFIG_KEY = "MIN_STAFFING_RULES"
 REQUEST_LOCKS_CONFIG_KEY = "REQUEST_LOCKS"
 ADMIN_MENU_CONFIG_KEY = "ADMIN_MENU_CONFIG"

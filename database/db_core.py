@@ -44,8 +44,10 @@ def is_db_initialized():
 
 # --- Aus db_helpers ---
 try:
+    # --- KORREKTUR: ROLE_HIERARCHY (Variable) ersetzt durch get_dynamic_role_hierarchy (Funktion) ---
     from .db_helpers import (
-        ROLE_HIERARCHY,
+        get_dynamic_role_hierarchy,  # NEU (aus vorherigem Schritt)
+        # ROLE_HIERARCHY, # ENTFERNT (aus vorherigem Schritt)
         MIN_STAFFING_RULES_CONFIG_KEY,
         REQUEST_LOCKS_CONFIG_KEY,
         ADMIN_MENU_CONFIG_KEY,
@@ -57,6 +59,7 @@ try:
         _create_admin_notification,
         get_vacation_days_for_tenure
     )
+    # --- ENDE KORREKTUR ---
 except ImportError as e:
     print(f"FEHLER beim Re-Import von db_helpers: {e}")
 
@@ -91,7 +94,12 @@ try:
         run_db_update_v1,
         run_db_update_add_is_archived,
         run_db_update_add_archived_date,
-        run_db_update_activation_date
+        run_db_update_activation_date,
+        run_db_migration_add_role_permissions,  # (aus vorherigem Schritt)
+
+        # --- NEUER EXPORT (Regel 4) ---
+        run_db_migration_add_role_window_type
+        # --- ENDE NEU ---
     )
 except ImportError as e:
     print(f"FEHLER beim Re-Import von db_migration_fixes: {e}")
