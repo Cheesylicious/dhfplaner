@@ -12,6 +12,12 @@ from database.db_admin import admin_reset_password  # create_user_by_admin wird 
 from database.db_core import save_config_json, load_config_json
 from ..user_edit_window import UserEditWindow
 
+# --- NEUE IMPORTE FÜR ROLLENVERWALTUNG ---
+from ..dialogs.role_management_dialog import RoleManagementDialog
+
+# (db_roles wird nur vom Dialog selbst benötigt)
+# -------------------------------------------
+
 USER_MGMT_VISIBLE_COLUMNS_KEY = "USER_MGMT_VISIBLE_COLUMNS"
 
 
@@ -105,6 +111,7 @@ class UserManagementTab(ttk.Frame):
         print("[UserMgmtTab] on_tab_focus aufgerufen. Aktualisiere Daten.")
         # Ruft refresh_data auf, welches entweder aus Cache oder DB lädt.
         self.refresh_data()
+
     # --- ENDE NEUE INNOVATION ---
 
     def _create_widgets(self):
@@ -117,6 +124,11 @@ class UserManagementTab(ttk.Frame):
 
         ttk.Button(top_frame, text="➕ Mitarbeiter hinzufügen", command=self.add_user).pack(side="left", padx=5)
         ttk.Button(top_frame, text="📊 Spalten auswählen", command=self.open_column_chooser).pack(side="left", padx=5)
+
+        # --- NEUER BUTTON FÜR ROLLENVERWALTUNG (Regel 4) ---
+        ttk.Button(top_frame, text="Rollen verwalten", command=self.open_role_management).pack(side="left", padx=5)
+        # --------------------------------------------------
+
         # --- KORREKTUR: Button-Text angepasst ---
         ttk.Button(top_frame, text="🕒 Freischaltungen prüfen", command=self.check_pending_approvals).pack(side="right",
                                                                                                           padx=5)
@@ -593,6 +605,23 @@ class UserManagementTab(ttk.Frame):
             # else: Keine Meldung ausgeben, wenn nichts ansteht
         except Exception as e:
             messagebox.showerror("Fehler", f"Fehler beim Prüfen der Freischaltungen:\n{e}", parent=self)
+
+    # --- NEUE METHODE FÜR ROLLENVERWALTUNG (Regel 4) ---
+    def open_role_management(self):
+        """
+        Öffnet den Dialog zur Rollenverwaltung.
+        Als Callback wird self.refresh_data übergeben, damit die
+        Treeview (mit Rollennamen) und die Rollenliste für den
+        UserEditWindow-Dialog (über get_allowed_roles) aktualisiert werden.
+        """
+        # HINWEIS: Wir rufen self.refresh_data als Callback auf.
+        # Dies lädt die Benutzerliste neu (Regel 1, falls sich Rollennamen ändern).
+        # Es löst KEIN Neuladen der Rollen in self.admin_window.get_allowed_roles() aus.
+        # Dies ist eine strukturelle Schwäche im alten Code.
+        # Wir gehen davon aus, dass get_allowed_roles() die Daten bei JEDEM Aufruf
+        # neu aus der DB lädt.
+        RoleManagementDialog(self, on_close_callback=self.refresh_data)
+    # --- ENDE NEUE METHODE ---
 
 
 # --- Klasse ColumnChooser (unverändert) ---

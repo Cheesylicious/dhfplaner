@@ -5,7 +5,12 @@ from tkinter import ttk, messagebox, simpledialog
 from database.db_core import (
     run_db_update_v1, run_db_update_is_approved,
     load_config_json, save_config_json, VACATION_RULES_CONFIG_KEY,
-    run_db_update_activation_date  # NEUER IMPORT
+    run_db_update_activation_date,  # NEUER IMPORT
+
+    # --- NEUE IMPORTE FÜR ROLLEN-MIGRATIONEN (Regel 4) ---
+    run_db_migration_add_role_permissions,
+    run_db_migration_add_role_window_type
+    # --- ENDE NEU ---
 )
 from database.db_users import admin_batch_update_vacation_entitlements
 
@@ -31,7 +36,32 @@ class SettingsTab(ttk.Frame):
         general_frame = ttk.LabelFrame(self, text="🛠️ Datenbank-Wartung und Updates", padding=(20, 10))
         general_frame.pack(fill="x", padx=20, pady=20, anchor='n')
 
-        # --- 1. Update für 'is_approved' Spalte (Fehlerbehebung) ---
+        # --- 0. NEU: Migration für Rollen-Fenstertyp ---
+        ttk.Label(general_frame,
+                  text="Funktion für Rollen-Fensterzuweisung hinzufügen:",
+                  font=('Segoe UI', 10, 'bold')).pack(anchor='w', pady=(10, 5))
+
+        ttk.Button(general_frame,
+                   text="DB Update: 'Rollen-Fenstertyp' Spalte hinzufügen",
+                   command=self.run_role_window_type_migration,  # NEUE FUNKTION
+                   style='Success.TButton').pack(fill='x', padx=5, pady=5)
+        # --- ENDE NEU ---
+
+        # --- 1. NEU: Migration für Rollen-Berechtigungen ---
+        ttk.Label(general_frame,
+                  text="Funktion für Rollen-Berechtigungen & Hierarchie hinzufügen:",
+                  font=('Segoe UI', 10, 'bold')).pack(anchor='w', pady=(10, 5))
+
+        ttk.Button(general_frame,
+                   text="DB Update: 'Rollen-Berechtigungen' Spalten hinzufügen",
+                   command=self.run_role_migration,  # NEUE FUNKTION
+                   style='Success.TButton').pack(fill='x', padx=5, pady=5)
+        # --- ENDE NEU ---
+
+        # Separator
+        ttk.Separator(general_frame, orient='horizontal').pack(fill='x', pady=15)
+
+        # --- 2. Update für 'is_approved' Spalte (Fehlerbehebung) ---
         ttk.Label(general_frame,
                   text="Fehler 'Unknown column is_approved' bei Registrierung beheben:",
                   font=('Segoe UI', 10, 'bold')).pack(anchor='w', pady=(10, 5))
@@ -41,7 +71,7 @@ class SettingsTab(ttk.Frame):
                    command=self.run_update_is_approved,
                    style='Danger.TButton').pack(fill='x', padx=5, pady=5)
 
-        # --- 2. NEU: Update für 'activation_date' Spalte ---
+        # --- 3. Update für 'activation_date' Spalte ---
         ttk.Label(general_frame,
                   text="Funktion für zukünftige Mitarbeiter-Aktivierung hinzufügen:",
                   font=('Segoe UI', 10, 'bold')).pack(anchor='w', pady=(10, 5))
@@ -55,7 +85,7 @@ class SettingsTab(ttk.Frame):
         # Separator
         ttk.Separator(general_frame, orient='horizontal').pack(fill='x', pady=15)
 
-        # --- 3. Update für Chat (Bestehende Funktion) ---
+        # --- 4. Update für Chat (Bestehende Funktion) ---
         ttk.Label(general_frame,
                   text="Datenbank-Update für die Chat-Funktion (last_seen und chat_messages):",
                   font=('Segoe UI', 10, 'bold')).pack(anchor='w', pady=(10, 5))
@@ -65,7 +95,7 @@ class SettingsTab(ttk.Frame):
                    command=self.run_chat_update,
                    style='Success.TButton').pack(fill='x', padx=5, pady=5)
 
-        # --- 4. NEU: FRAME FÜR URLAUBSREGELN ---
+        # --- 5. FRAME FÜR URLAUBSREGELN ---
         vacation_frame = ttk.LabelFrame(self, text="📅 Urlaubsanspruch nach Dienstjahren", padding=(20, 10))
         vacation_frame.pack(fill="both", expand=True, padx=20, pady=(0, 20))
 
@@ -97,6 +127,40 @@ class SettingsTab(ttk.Frame):
         ttk.Button(btn_frame, text="Ansprüche JETZT\naktualisieren", command=self.run_batch_update,
                    style="Accent.TButton").pack(fill="x", pady=2)
         # --- ENDE NEU ---
+
+    # --- NEUE HANDLER-METHODE (GANZ OBEN) ---
+    def run_role_window_type_migration(self):
+        """Löst das Update für die Rollen-Fenstertyp-Spalte aus."""
+        if not messagebox.askyesno("Update bestätigen",
+                                   "Möchten Sie die Datenbank-Migration für die Rollen-Fensterzuweisung (window_type) jetzt ausführen?\n\n"
+                                   "Dieser Vorgang ist sicher und fügt die Spalte nur hinzu, wenn sie fehlt.",
+                                   parent=self):
+            return
+
+        success, message = run_db_migration_add_role_window_type()
+        if success:
+            messagebox.showinfo("Erfolg", message, parent=self)
+        else:
+            messagebox.showerror("Fehler", f"Update fehlgeschlagen:\n{message}", parent=self)
+
+    # --- ENDE NEU ---
+
+    # --- NEUE HANDLER-METHODE (VON VORHER) ---
+    def run_role_migration(self):
+        """Löst das Update für die Rollen-Berechtigungen aus."""
+        if not messagebox.askyesno("Update bestätigen",
+                                   "Möchten Sie die Datenbank-Migration für die Rollen-Berechtigungen (hierarchy_level, permissions) jetzt ausführen?\n\n"
+                                   "Dieser Vorgang ist sicher und fügt die Spalten nur hinzu, wenn sie fehlen.",
+                                   parent=self):
+            return
+
+        success, message = run_db_migration_add_role_permissions()
+        if success:
+            messagebox.showinfo("Erfolg", message, parent=self)
+        else:
+            messagebox.showerror("Fehler", f"Update fehlgeschlagen:\n{message}", parent=self)
+
+    # --- ENDE NEU ---
 
     def run_update_is_approved(self):
         """Löst das Update für die is_approved Spalte aus."""
