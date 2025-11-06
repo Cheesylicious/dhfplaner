@@ -1,4 +1,3 @@
-# gui/tabs/user_tab_settings_tab.py
 import tkinter as tk
 from tkinter import ttk, messagebox
 from ..tab_lock_manager import TabLockManager
@@ -63,7 +62,9 @@ class UserTabSettingsTab(ttk.Frame):
         settings_container.grid(row=2, column=0, sticky="ew")
         settings_container.columnconfigure(0, weight=1)
 
-        saved_locks = TabLockManager.load_tab_locks()
+        # --- KORREKTUR (Fehlerbehebung): 'load_tab_locks' -> 'load_locks' (Regel 1) ---
+        saved_locks = TabLockManager.load_locks()
+        # --- ENDE KORREKTUR ---
 
         row_counter = 0
         for tab_name in self.all_user_tab_names:
@@ -117,11 +118,16 @@ class UserTabSettingsTab(ttk.Frame):
         save_button.grid(row=0, column=0)
 
     def save_settings(self):
-        current_locks = TabLockManager.load_tab_locks()
+        # --- KORREKTUR (Fehlerbehebung): 'load_tab_locks' -> 'load_locks' (Regel 1) ---
+        current_locks = TabLockManager.load_locks()
+        # --- ENDE KORREKTUR ---
+
         for tab_name, var in self.vars.items():
             current_locks[tab_name] = var.get()
 
-        if TabLockManager.save_tab_locks(current_locks):
+        # --- KORREKTUR (Fehlerbehebung): 'save_tab_locks' -> 'save_locks' (Regel 1) ---
+        if TabLockManager.save_locks(current_locks):
+            # --- ENDE KORREKTUR ---
             messagebox.showinfo("Gespeichert",
                                 "Die Einstellungen für die Benutzer-Reiter wurden erfolgreich aktualisiert.",
                                 parent=self)

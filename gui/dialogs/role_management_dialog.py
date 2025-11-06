@@ -1,4 +1,3 @@
-# gui/dialogs/role_management_dialog.py
 import tkinter as tk
 from tkinter import ttk, messagebox
 import json
@@ -11,6 +10,24 @@ from database.db_roles import (
 
 # Import der Drag-and-Drop-Liste (aus vorherigem Schritt)
 from .role_hierarchy_list import RoleHierarchyList
+
+# --- NEU (Zentralisierung): Import aus dem Window Manager (Regel 4) ---
+try:
+    from gui.window_manager import get_window_options_for_roles
+except ImportError:
+    print("[FEHLER] window_manager.py nicht gefunden. Verwende Fallback für Fenster-Optionen.")
+
+
+    # (Regel 1) Fallback, falls Import fehlschlägt
+    def get_window_options_for_roles():
+        return {
+            'Benutzer-Fenster': 'main_user_window',
+            'Admin-Fenster': 'main_admin_window',
+            'Zuteilungs-Fenster': 'main_zuteilung_window'
+        }
+
+
+# --- ENDE NEU ---
 
 
 class RoleManagementDialog(tk.Toplevel):
@@ -28,11 +45,14 @@ class RoleManagementDialog(tk.Toplevel):
         # UI-Variablen für die Checkboxen
         self.permission_vars = {}  # Speichert {tab_name: tk.BooleanVar}
 
-        # --- NEU: Variable für Fenstertyp-Dropdown ---
-        self.window_type_var = tk.StringVar(value='user')
-        # Definiert die Anzeigenamen und die DB-Werte
-        self.window_type_options = {'Benutzer-Fenster': 'user', 'Admin-Fenster': 'admin'}
-        # --- ENDE NEU ---
+        # --- ANPASSUNG (Schema): Variable für Hauptfenster ---
+        # Standardwert ist jetzt der DB-Wert
+        self.window_type_var = tk.StringVar(value='main_user_window')
+
+        # Definiert die Anzeigenamen und die DB-Werte (gemäß db_schema.py)
+        # --- KORREKTUR (Regel 4): Lädt Optionen jetzt aus zentralem Manager ---
+        self.window_type_options = get_window_options_for_roles()
+        # --- ENDE KORREKTUR ---
 
         # --- Styles ---
         style = ttk.Style(self)
@@ -84,7 +104,7 @@ class RoleManagementDialog(tk.Toplevel):
         self.right_frame.columnconfigure(0, weight=1)
         main_pane.add(self.right_frame, weight=2)
 
-        # --- NEU: Frame für Fenstertyp ---
+        # --- Frame für Hauptfenster ---
         window_type_frame = ttk.Frame(self.right_frame)
         window_type_frame.pack(fill='x', pady=(0, 15))
 
@@ -94,13 +114,13 @@ class RoleManagementDialog(tk.Toplevel):
         self.window_type_combo = ttk.Combobox(
             window_type_frame,
             textvariable=self.window_type_var,
-            values=list(self.window_type_options.keys()),  # ['Benutzer-Fenster', 'Admin-Fenster']
-            state='readonly'
+            values=list(self.window_type_options.keys()),  # Werte kommen jetzt vom Manager
+            state='disabled'  # Startet deaktiviert
         )
         self.window_type_combo.pack(side="left", fill="x", expand=True)
         # Bindet die Änderung an eine neue Funktion
         self.window_type_combo.bind("<<ComboboxSelected>>", self.on_window_type_changed)
-        # --- ENDE NEU ---
+        # --- ENDE ---
 
         ttk.Separator(self.right_frame, orient='horizontal').pack(fill='x', pady=(0, 10))
 
@@ -156,7 +176,7 @@ class RoleManagementDialog(tk.Toplevel):
         """Aktiviert oder deaktiviert alle Checkboxen UND die Combobox."""
         # 'disabled' oder 'readonly' für die Combobox
         combo_state = 'readonly' if state == tk.NORMAL else 'disabled'
-        self.window_type_combo.config(state=combo_state)  # NEU
+        self.window_type_combo.config(state=combo_state)  # Angepasst
 
         for child in self.permissions_frame.winfo_children():
             if isinstance(child, ttk.Checkbutton):
@@ -182,16 +202,21 @@ class RoleManagementDialog(tk.Toplevel):
         self.current_selected_role_id = role_data['id']
         self.right_frame.config(text=f"Berechtigungen für: {role_data['name']}")
 
-        # --- NEU: Fenstertyp laden ---
-        db_window_type = role_data.get('window_type', 'user')  # z.B. 'admin'
+        # --- ANPASSUNG (Schema): Hauptfenster laden ---
+        # (Regel 1) Fallback auf 'main_user_window'
+        db_window_value = role_data.get('main_window', 'main_user_window')
+
         # Finde den Anzeigenamen (z.B. 'Admin-Fenster')
         display_name = 'Benutzer-Fenster'  # Fallback
+
+        # (Regel 1): Diese Schleife findet jetzt auch 'Zuteilungs-Fenster'
+        # da self.window_type_options vom Manager geladen wird.
         for key, value in self.window_type_options.items():
-            if value == db_window_type:
+            if value == db_window_value:
                 display_name = key
                 break
         self.window_type_var.set(display_name)
-        # --- ENDE NEU ---
+        # --- ENDE ANPASSUNG ---
 
         # 3. Berechtigungen laden
         role_permissions = role_data.get('permissions', {})
@@ -208,7 +233,7 @@ class RoleManagementDialog(tk.Toplevel):
             for child in self.permissions_frame.winfo_children():
                 if isinstance(child, ttk.Checkbutton):
                     child.config(state=tk.DISABLED)
-            # Combobox ERLAUBEN
+            # Combobox ERLAUBEN (Regel 1: Admins müssen ihr Fenster ändern können)
             self.window_type_combo.config(state='readonly')
             self.status_label.config(text=f"Info: '{role_data['name']}' hat immer alle Tab-Rechte.")
         else:
@@ -223,11 +248,10 @@ class RoleManagementDialog(tk.Toplevel):
             role_data = next((r for r in list_data if r['id'] == role_id), None)
         return role_data
 
-    # --- NEUE FUNKTION ---
     def on_window_type_changed(self, event=None):
         """
         Wird aufgerufen, wenn die Combobox geändert wird.
-        Speichert den neuen Wert (z.B. 'admin') im Daten-Cache (self.all_roles_data).
+        Speichert den neuen Wert (z.B. 'main_admin_window') im Daten-Cache (self.all_roles_data).
         """
         if self.current_selected_role_id is None:
             return
@@ -235,14 +259,14 @@ class RoleManagementDialog(tk.Toplevel):
         role_data = self._find_role_data_in_cache(self.current_selected_role_id)
 
         if role_data:
-            display_name = self.window_type_var.get()  # z.B. 'Admin-Fenster'
-            db_value = self.window_type_options.get(display_name, 'user')  # z.B. 'admin'
+            display_name = self.window_type_var.get()  # z.B. 'Zuteilungs-Fenster'
+            # --- ANPASSUNG (Schema): Korrekten DB-Wert und Fallback holen ---
+            db_value = self.window_type_options.get(display_name, 'main_user_window')  # z.B. 'main_zuteilung_window'
 
             # Speichere die Änderung im Haupt-Cache
-            role_data['window_type'] = db_value
-            print(f"Cache für Rolle ID {role_data['id']} auf window_type='{db_value}' gesetzt.")
-
-    # --- ENDE NEU ---
+            role_data['main_window'] = db_value
+            print(f"Cache für Rolle ID {role_data['id']} auf main_window='{db_value}' gesetzt.")
+            # --- ENDE ANPASSUNG ---
 
     def on_permission_changed(self):
         """
@@ -263,7 +287,11 @@ class RoleManagementDialog(tk.Toplevel):
         """Setzt die rechte Seite zurück."""
         self.right_frame.config(text="Berechtigungen für: [Bitte Rolle wählen]")
         self.current_selected_role_id = None
-        self.window_type_var.set('Benutzer-Fenster')  # Standard
+
+        # (Regel 1) Setzt den Fallback-Wert (erster Wert aus der Liste)
+        fallback_display_name = list(self.window_type_options.keys())[0] if self.window_type_options else ""
+        self.window_type_var.set(fallback_display_name)
+
         for var in self.permission_vars.values():
             var.set(False)
         self.set_permission_widgets_state(tk.DISABLED)
@@ -275,6 +303,8 @@ class RoleManagementDialog(tk.Toplevel):
             messagebox.showwarning("Eingabe fehlt", "Bitte einen Rollennamen eingeben.", parent=self)
             return
 
+        # (Regel 1) Wir nutzen die create_role Funktion aus db_roles.py,
+        # die automatisch das korrekte Standard-Fenster ('main_user_window') setzt.
         if create_role(role_name):
             messagebox.showinfo("Erfolg", f"Rolle '{role_name}' wurde erstellt.", parent=self)
             self.new_role_entry.delete(0, 'end')
@@ -293,7 +323,11 @@ class RoleManagementDialog(tk.Toplevel):
         role_id = role_data['id']
         role_name = role_data['name']
 
-        # Feste IDs (1=Admin, 2=Mitarbeiter, 3=Gast, 4=SuperAdmin)
+        # (Regel 1) Wir nutzen die delete_role Funktion aus db_roles.py,
+        # die die Prüfung auf Standardrollen (IDs 1-4) und Benutzerzuweisung
+        # bereits serverseitig durchführt.
+
+        # Lokale Prüfung (doppelt, aber User-freundlich)
         if role_id in [1, 2, 3, 4]:
             messagebox.showerror("Gesperrt",
                                  "Die Standardrollen (Admin, Mitarbeiter, Gast, SuperAdmin) können nicht gelöscht werden.",
@@ -314,18 +348,16 @@ class RoleManagementDialog(tk.Toplevel):
                                  parent=self)
 
     def save_and_close(self):
-        """Speichert Hierarchie, Berechtigungen UND Fenstertyp."""
+        """Speichert Hierarchie, Berechtigungen UND Hauptfenster."""
 
         # 1. Hole die sortierten Daten (aus der Drag-Drop-Liste)
         ordered_list_data = self.hierarchy_list.get_ordered_data()
-        ordered_ids = [r['id'] for r in ordered_list_data]
 
         # 2. Stelle sicher, dass die Daten in ordered_list_data
         #    die Änderungen aus dem Cache (self.all_roles_data) enthalten
         #    (Das sollte durch on_permission_changed und on_window_type_changed
         #    bereits der Fall sein, da beide Listen auf dieselben Dicts zeigen)
 
-        # Nur zur Sicherheit: Synchronisiere die Daten
         cache_dict = {r['id']: r for r in self.all_roles_data}
         final_data_to_save = []
         for list_role in ordered_list_data:
@@ -333,10 +365,11 @@ class RoleManagementDialog(tk.Toplevel):
                 # Nimm die Daten aus dem Haupt-Cache (die Änderungen enthalten)
                 final_data_to_save.append(cache_dict[list_role['id']])
             else:
-                # (Sollte nicht passieren) Nimm die Listendaten
                 final_data_to_save.append(list_role)
 
-        # 3. Speichere in DB
+        # 3. Speichere in DB (Regel 1)
+        # Wir rufen save_roles_details auf,
+        # das 'main_window' speichert.
         success, message = save_roles_details(final_data_to_save)
 
         if success:

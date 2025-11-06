@@ -29,7 +29,9 @@ class UserManagementTab(ttk.Frame):
         """
         super().__init__(master)
         self.admin_window = admin_window
+        # --- KORREKTUR (Fehlerbehebung): Speichert die ID des Admins, der den Tab bedient ---
         self.current_user = admin_window.user_data
+        # --- ENDE KORREKTUR ---
 
         # Speichert die Rohdaten (entweder aus Cache or DB)
         self.all_users_data = []
@@ -476,7 +478,13 @@ class UserManagementTab(ttk.Frame):
             name = f"{user_data.get('vorname', '')} {user_data.get('name', '')}".strip()
             if messagebox.askyesno("Reset", f"Passwort für '{name}' resetten?", parent=self):
                 pw = "NeuesPasswort123"
-                ok, msg = admin_reset_password(user_id, pw)
+
+                # --- KORREKTUR (Fehlerbehebung): admin_id hinzugefügt (Regel 1) ---
+                # Holt die ID des Admins, der eingeloggt ist und diese Aktion ausführt
+                admin_id = self.current_user['id']
+                ok, msg = admin_reset_password(user_id, pw, admin_id)
+                # --- ENDE KORREKTUR ---
+
                 if ok:
                     messagebox.showinfo("OK", f"{msg}\nTemp. PW: {pw}", parent=self)
                 else:

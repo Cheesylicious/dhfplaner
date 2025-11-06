@@ -1,4 +1,3 @@
-# gui/tabs/settings_tab.py
 import tkinter as tk
 from tkinter import ttk, messagebox, simpledialog
 # --- NEUE IMPORTE ---
@@ -14,6 +13,22 @@ from database.db_core import (
 )
 from database.db_users import admin_batch_update_vacation_entitlements
 
+# --- ENDE NEU ---
+
+# --- NEU (Regel 4): Import des neuen Konfigurations-Tabs ---
+try:
+    from ..dialogs.settings_tabs.window_config_tab import WindowConfigTab
+except ImportError:
+    print("[FEHLER] SettingsTab: Konnte WindowConfigTab nicht importieren.")
+
+
+    # (Regel 1) Fallback-Klasse, falls Import fehlschlägt
+    class WindowConfigTab(ttk.Frame):
+        def __init__(self, master, **kwargs):
+            super().__init__(master, **kwargs)
+            ttk.Label(self, text="Fehler: window_config_tab.py konnte nicht geladen werden.", foreground="red").pack(
+                padx=20, pady=20)
+
 
 # --- ENDE NEU ---
 
@@ -26,15 +41,27 @@ class SettingsTab(ttk.Frame):
         self.vacation_rules = []  # Cache für die Regeln
         # --- ENDE NEU ---
 
-        self.setup_ui()
-        # --- NEU: Regeln laden ---
-        self.load_rules_data()
-        # --- ENDE NEU ---
+        # --- KORREKTUR (Regel 4): UI wird jetzt in einem Notebook erstellt ---
+        self.setup_notebook_ui()
+        # (self.load_rules_data() wird jetzt von setup_notebook_ui aufgerufen)
+        # --- ENDE KORREKTUR ---
 
-    def setup_ui(self):
-        # Frame für allgemeine Einstellungen
-        general_frame = ttk.LabelFrame(self, text="🛠️ Datenbank-Wartung und Updates", padding=(20, 10))
-        general_frame.pack(fill="x", padx=20, pady=20, anchor='n')
+    # --- KORREKTUR (Regel 4): Umbau zu Notebook-Struktur ---
+    def setup_notebook_ui(self):
+        """Erstellt ein Notebook für die verschiedenen Einstellungs-Bereiche."""
+
+        # Haupt-Notebook
+        self.notebook = ttk.Notebook(self)
+        self.notebook.pack(fill="both", expand=True, padx=10, pady=10)
+
+        # --- 1. Tab: DB-Wartung (Der bisherige 'general_frame') ---
+        # (Regel 4) Erstelle einen Frame für den ersten Tab
+        db_wartung_frame = ttk.Frame(self.notebook, padding=(10, 20))
+        self.notebook.add(db_wartung_frame, text="Datenbank-Wartung")
+
+        # (Code aus altem setup_ui() hierher verschoben)
+        general_frame = ttk.LabelFrame(db_wartung_frame, text="🛠️ Datenbank-Wartung und Updates", padding=(20, 10))
+        general_frame.pack(fill="x", padx=10, pady=10, anchor='n')
 
         # --- 0. NEU: Migration für Rollen-Fenstertyp ---
         ttk.Label(general_frame,
@@ -95,9 +122,14 @@ class SettingsTab(ttk.Frame):
                    command=self.run_chat_update,
                    style='Success.TButton').pack(fill='x', padx=5, pady=5)
 
-        # --- 5. FRAME FÜR URLAUBSREGELN ---
-        vacation_frame = ttk.LabelFrame(self, text="📅 Urlaubsanspruch nach Dienstjahren", padding=(20, 10))
-        vacation_frame.pack(fill="both", expand=True, padx=20, pady=(0, 20))
+        # --- 2. Tab: Urlaubsregeln (Der bisherige 'vacation_frame') ---
+        # (Regel 4) Erstelle einen Frame für den zweiten Tab
+        urlaubs_frame = ttk.Frame(self.notebook, padding=(10, 20))
+        self.notebook.add(urlaubs_frame, text="Urlaubsregeln")
+
+        # (Code aus altem setup_ui() hierher verschoben)
+        vacation_frame = ttk.LabelFrame(urlaubs_frame, text="📅 Urlaubsanspruch nach Dienstjahren", padding=(20, 10))
+        vacation_frame.pack(fill="both", expand=True, padx=10, pady=10)
 
         vacation_frame.columnconfigure(0, weight=1)
         vacation_frame.rowconfigure(0, weight=1)
@@ -126,7 +158,26 @@ class SettingsTab(ttk.Frame):
 
         ttk.Button(btn_frame, text="Ansprüche JETZT\naktualisieren", command=self.run_batch_update,
                    style="Accent.TButton").pack(fill="x", pady=2)
+
+        # (Regel 1) Daten für diesen Tab laden
+        self.load_rules_data()
+
+        # --- 3. Tab: Fenster-Konfiguration (NEU) ---
+        # (Regel 4) Instanziiert den separaten Tab aus der anderen Datei
+        try:
+            self.window_config_tab_frame = WindowConfigTab(self.notebook)
+            self.notebook.add(self.window_config_tab_frame, text="Fenster-Konfiguration")
+        except Exception as e:
+            print(f"[FEHLER] SettingsTab: Konnte WindowConfigTab nicht instanziieren: {e}")
+            # (Regel 1) Fallback-Frame, falls die Instanziierung fehlschlägt
+            error_frame = ttk.Frame(self.notebook, padding=(10, 20))
+            ttk.Label(error_frame, text=f"Fehler beim Laden des Tabs:\n{e}", foreground="red").pack()
+            self.notebook.add(error_frame, text="Fenster-Konfiguration")
         # --- ENDE NEU ---
+
+    # --- ENDE KORREKTUR ---
+
+    # --- (setup_ui() wurde durch setup_notebook_ui() ersetzt) ---
 
     # --- NEUE HANDLER-METHODE (GANZ OBEN) ---
     def run_role_window_type_migration(self):
