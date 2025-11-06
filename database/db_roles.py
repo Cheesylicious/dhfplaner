@@ -14,7 +14,8 @@ ALL_ADMIN_TABS = [
 
 def get_all_roles_details():
     """
-    Ruft alle Rollen inkl. Hierarchie, Berechtigungen UND FENSTERTYP ab.
+    Ruft alle Rollen inkl. Hierarchie, Berechtigungen UND HAUPTFENSTER ab.
+    KORRIGIERT: Verwendet 'role_name' (gemäß DB-Schema).
     """
     conn = create_connection()
     if not conn:
@@ -24,9 +25,9 @@ def get_all_roles_details():
     try:
         cursor = conn.cursor(dictionary=True)
 
-        # --- KORREKTUR: `window_type` hinzugefügt ---
+        # --- KORREKTUR (Fehlerbehebung): 'name' -> 'role_name' ---
         cursor.execute(
-            "SELECT `id`, `role_name`, `hierarchy_level`, `permissions`, `window_type` "
+            "SELECT `id`, `role_name`, `hierarchy_level`, `permissions`, `main_window` "
             "FROM `roles` "
             "ORDER BY `hierarchy_level` ASC, `role_name` COLLATE utf8mb4_unicode_ci"
         )
@@ -45,18 +46,22 @@ def get_all_roles_details():
 
             roles_for_gui.append({
                 "id": role['id'],
+                # --- KORREKTUR (Fehlerbehebung): 'name' -> 'role_name' ---
                 "name": role['role_name'],
                 "hierarchy_level": role.get('hierarchy_level', 99),
                 "permissions": permissions_dict,
-                "window_type": role.get('window_type', 'user')  # NEU
+                # (main_window ist korrekt)
+                "main_window": role.get('main_window', 'main_user_window')
             })
 
         return roles_for_gui
 
     except Exception as e:
         if "Unknown column" in str(e):
-            print(f"DB FEHLER: {e}. Haben Sie die Migrationen (hierarchy, permissions, window_type) durchgeführt?")
+            print(f"DB FEHLER: {e}. Haben Sie die Migrationen (db_schema.py) durchgeführt?")
+            # --- KORREKTUR (Fehlerbehebung): Fallback ruft sich selbst auf (korrekt) ---
             return get_all_roles_legacy()  # Fallback
+            # --- ENDE KORREKTUR ---
 
         print(f"Fehler beim Abrufen aller Rollendetails: {e}")
         return []
@@ -66,22 +71,32 @@ def get_all_roles_details():
 
 
 def get_all_roles_legacy():
-    """Fallback, falls Migration noch nicht erfolgt ist."""
+    """
+    Fallback, falls Migration (Schema-Änderungen) noch nicht erfolgt ist.
+    KORRIGIERT: Verwendet 'role_name'.
+    """
     print("Führe Fallback aus: get_all_roles_legacy (nur Namen)")
     conn = create_connection()
     if not conn: return []
     try:
         cursor = conn.cursor(dictionary=True)
+        # --- KORREKTUR (Fehlerbehebung): 'name' -> 'role_name' ---
         cursor.execute("SELECT `id`, `role_name` FROM `roles` ORDER BY `role_name` COLLATE utf8mb4_unicode_ci")
         roles_from_db = cursor.fetchall()
+
+        admin_ids = [1, 2]  # Annahme: Admin=1, SuperAdmin=2 (oder [1, 4])
+
         return [{
             "id": role['id'],
+            # --- KORREKTUR (Fehlerbehebung): 'name' -> 'role_name' ---
             "name": role['role_name'],
             "hierarchy_level": 99,
             "permissions": {},
-            "window_type": 'admin' if role['id'] in [1, 4] else 'user'  # Fallback-Logik
+            "main_window": 'main_admin_window' if role['id'] in admin_ids else 'main_user_window'
         } for role in roles_from_db]
+
     except Exception as e:
+        # Dieser Block sollte jetzt überflüssig sein, da wir direkt 'role_name' abfragen
         print(f"Fehler im Legacy-Rollen-Fallback: {e}")
         return []
     finally:
@@ -92,7 +107,8 @@ def get_all_roles_legacy():
 def create_role(role_name_input):
     """
     Erstellt eine neue Rolle mit Standard-Hierarchie (99),
-    leeren Berechtigungen und Standard-Fenstertyp ('user').
+    leeren Berechtigungen und Standard-Hauptfenster ('main_user_window').
+    KORRIGIERT: Verwendet 'role_name'.
     """
     if not role_name_input or len(role_name_input.strip()) == 0:
         print("Fehler: Rollenname darf nicht leer sein.")
@@ -108,12 +124,12 @@ def create_role(role_name_input):
 
         default_permissions = json.dumps({})
         default_hierarchy = 99
-        default_window_type = 'user'  # NEU
+        default_window = 'main_user_window'
 
-        # --- KORREKTUR: `window_type` beim Erstellen hinzugefügt ---
+        # --- KORREKTUR (Fehlerbehebung): 'name' -> 'role_name' ---
         cursor.execute(
-            "INSERT INTO `roles` (`role_name`, `hierarchy_level`, `permissions`, `window_type`) VALUES (%s, %s, %s, %s)",
-            (role_name_input.strip(), default_hierarchy, default_permissions, default_window_type)
+            "INSERT INTO `roles` (`role_name`, `hierarchy_level`, `permissions`, `main_window`) VALUES (%s, %s, %s, %s)",
+            (role_name_input.strip(), default_hierarchy, default_permissions, default_window)
         )
         # --- ENDE KORREKTUR ---
 
@@ -128,13 +144,11 @@ def create_role(role_name_input):
             conn.close()
 
 
-# (delete_role bleibt unverändert)
 def delete_role(role_id):
     """
     Löscht eine Rolle anhand ihrer ID.
-    WICHTIG: Standardrollen (Admin, Mitarbeiter, Gast) werden blockiert.
+    KORRIGIERT: Verwendet 'role_name'.
     """
-    # Feste IDs (Annahme basierend auf db_schema.py: 1=Admin, 2=Mitarbeiter, 3=Gast, 4=SuperAdmin)
     if role_id in [1, 2, 3, 4]:
         print("Fehler: Standardrollen (Admin, Mitarbeiter, Gast, SuperAdmin) können nicht gelöscht werden.")
         return False, "Standardrollen können nicht gelöscht werden."
@@ -144,11 +158,24 @@ def delete_role(role_id):
 
     try:
         cursor = conn.cursor()
-        cursor.execute("SELECT COUNT(*) FROM `users` WHERE `role_id` = %s", (role_id,))
+
+        # --- KORREKTUR (Fehlerbehebung): 'name' -> 'role_name' ---
+        # Hole den 'role_name' der Rolle (z.B. "Admin") aus der 'roles'-Tabelle
+        cursor.execute("SELECT `role_name` FROM `roles` WHERE `id` = %s", (role_id,))
+        role_result = cursor.fetchone()
+
+        if not role_result:
+            return False, "Rolle mit ID nicht gefunden."
+
+        role_name_to_delete = role_result[0]
+
+        # Prüfen, ob das 'role' (ENUM) in 'users' noch diesen Namen verwendet
+        cursor.execute("SELECT COUNT(*) FROM `users` WHERE `role` = %s", (role_name_to_delete,))
         user_count = cursor.fetchone()[0]
+        # --- ENDE KORREKTUR ---
 
         if user_count > 0:
-            msg = f"{user_count} Benutzer haben diese Rolle noch. Löschen nicht möglich."
+            msg = f"{user_count} Benutzer haben diese Rolle noch (in users.role). Löschen nicht möglich."
             return False, msg
 
         cursor.execute("DELETE FROM `roles` WHERE `id` = %s", (role_id,))
@@ -158,6 +185,7 @@ def delete_role(role_id):
 
     except Exception as e:
         msg = f"Fehler beim Löschen der Rolle: {e}"
+        print(msg)
         conn.rollback()
         return False, msg
     finally:
@@ -167,7 +195,9 @@ def delete_role(role_id):
 
 def save_roles_details(roles_data_list):
     """
-    Speichert die komplette Hierarchie, Berechtigungen UND FENSTERTYP.
+    Speichert die komplette Hierarchie, Berechtigungen UND HAUPTFENSTER.
+    (Diese Funktion war bereits korrekt, da sie 'name' nicht verwendet hat,
+     sondern nur 'hierarchy_level', 'permissions' und 'main_window' schreibt.)
     """
     conn = create_connection()
     if not conn:
@@ -182,30 +212,62 @@ def save_roles_details(roles_data_list):
             role_id = role_data['id']
             new_level = index + 1
             permissions_json = json.dumps(role_data.get('permissions', {}))
-
-            # --- NEU: Fenstertyp holen ---
-            window_type = role_data.get('window_type', 'user')
-            # --- ENDE NEU ---
+            main_window = role_data.get('main_window', 'main_user_window')
 
             update_queries.append(
-                (new_level, permissions_json, window_type, role_id)  # NEU
+                (new_level, permissions_json, main_window, role_id)
             )
 
-        # --- KORREKTUR: `window_type` im UPDATE hinzugefügt ---
         cursor.executemany(
-            "UPDATE `roles` SET `hierarchy_level` = %s, `permissions` = %s, `window_type` = %s WHERE `id` = %s",
+            "UPDATE `roles` SET `hierarchy_level` = %s, `permissions` = %s, `main_window` = %s WHERE `id` = %s",
             update_queries
         )
-        # --- ENDE KORREKTUR ---
 
         conn.commit()
-        return True, "Hierarchie und Berechtigungen gespeichert."
+        return True, "Hierarchie, Berechtigungen und Hauptfenster gespeichert."
 
     except Exception as e:
         msg = f"Fehler beim Speichern der Rollendetails: {e}"
         print(msg)
         conn.rollback()
         return False, msg
+    finally:
+        if conn and conn.is_connected():
+            conn.close()
+
+
+def get_main_window_for_role(role_name):
+    """
+    Ruft effizient das zugewiesene Hauptfenster für einen bestimmten Rollennamen ab.
+    KORRIGIERT: Verwendet 'role_name'.
+    """
+    conn = create_connection()
+    if not conn:
+        print(f"Fehler: Konnte keine DB-Verbindung für get_main_window_for_role (Rolle: {role_name}) herstellen.")
+        return 'main_admin_window' if role_name in ["Admin", "SuperAdmin"] else 'main_user_window'
+
+    try:
+        cursor = conn.cursor(dictionary=True)
+
+        # --- KORREKTUR (Fehlerbehebung): 'name' -> 'role_name' ---
+        cursor.execute(
+            "SELECT `main_window` FROM `roles` WHERE `role_name` = %s",
+            (role_name,)
+        )
+        # --- ENDE KORREKTUR ---
+
+        result = cursor.fetchone()
+
+        if result and result.get('main_window'):
+            return result['main_window']
+        else:
+            print(
+                f"Warnung: Kein 'main_window' in Tabelle 'roles' für Rolle '{role_name}' gefunden. Verwende Fallback.")
+            return 'main_admin_window' if role_name in ["Admin", "SuperAdmin"] else 'main_user_window'
+
+    except Exception as e:
+        print(f"Fehler beim Abrufen des Hauptfensters für Rolle '{role_name}': {e}")
+        return 'main_admin_window' if role_name in ["Admin", "SuperAdmin"] else 'main_user_window'
     finally:
         if conn and conn.is_connected():
             conn.close()

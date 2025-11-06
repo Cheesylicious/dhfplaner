@@ -1,5 +1,6 @@
 # database/db_schema.py
 import mysql.connector
+import json
 
 # KORREKTUR: Importiert die Helfer aus der neuen Datei
 from .db_schema_helpers import _add_column_if_not_exists, _add_index_if_not_exists
@@ -119,6 +120,30 @@ def _run_initialize_db(conn, db_config):
                            activation_date DATETIME NULL DEFAULT NULL
                            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE =utf8mb4_unicode_ci;
                        """)
+
+        # --- KORREKTUR (Fehlerbehebung): 'name' -> 'role_name' (Regel 1) ---
+        cursor.execute("""
+                       CREATE TABLE IF NOT EXISTS roles
+                       (
+                           id
+                           INT
+                           AUTO_INCREMENT
+                           PRIMARY
+                           KEY,
+                           role_name
+                           VARCHAR
+                       (
+                           100
+                       ) NOT NULL UNIQUE,
+                           permissions JSON,
+                           main_window VARCHAR
+                       (
+                           255
+                       ) DEFAULT NULL
+                           /* hierarchy_level wird durch Migration hinzugefügt, falls benötigt */
+                           ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE =utf8mb4_unicode_ci;
+                       """)
+        # --- ENDE KORREKTUR ---
 
         cursor.execute("""
                        CREATE TABLE IF NOT EXISTS dogs
@@ -610,6 +635,63 @@ def _run_initialize_db(conn, db_config):
 
         print("Alle Tabellen sichergestellt.")
 
+        # --- KORREKTUR (Fehlerbehebung): Initialisierung der 'roles'-Tabelle (Regel 1) ---
+        # Verwendet jetzt 'role_name' statt 'name'
+        try:
+            default_permissions = json.dumps({})
+
+            # 1. Admin/SuperAdmin
+            cursor.execute(
+                """
+                INSERT INTO roles (role_name, permissions, main_window)
+                VALUES (%s, %s, %s) ON DUPLICATE KEY
+                UPDATE main_window = IFNULL(main_window, %s)
+                """,
+                ('Admin', default_permissions, 'main_admin_window', 'main_admin_window')
+            )
+            cursor.execute(
+                """
+                INSERT INTO roles (role_name, permissions, main_window)
+                VALUES (%s, %s, %s) ON DUPLICATE KEY
+                UPDATE main_window = IFNULL(main_window, %s)
+                """,
+                ('SuperAdmin', default_permissions, 'main_admin_window', 'main_admin_window')
+            )
+
+            # 2. Mitarbeiter
+            cursor.execute(
+                """
+                INSERT INTO roles (role_name, permissions, main_window)
+                VALUES (%s, %s, %s) ON DUPLICATE KEY
+                UPDATE main_window = IFNULL(main_window, %s)
+                """,
+                ('Mitarbeiter', default_permissions, 'main_user_window', 'main_user_window')
+            )
+
+            # 3. Guest (NEUER STANDARD)
+            # --- ANPASSUNG (Regel 1): Standard-Fenster für 'Guest' auf 'main_zuteilung_window' geändert ---
+            cursor.execute(
+                """
+                INSERT INTO roles (role_name, permissions, main_window)
+                VALUES (%s, %s, %s) ON DUPLICATE KEY
+                UPDATE main_window = IFNULL(main_window, %s)
+                """,
+                ('Guest', default_permissions, 'main_zuteilung_window', 'main_zuteilung_window')
+            )
+            # --- ENDE ANPASSUNG ---
+
+            print("Standard-Rollen und Hauptfenster sichergestellt.")
+
+        except mysql.connector.Error as e:
+            # Falls 'role_name' nicht existiert (z.B. bei alter Migration),
+            # versuchen wir, die Spalte hinzuzufügen
+            if "Unknown column 'role_name'" in str(e):
+                _add_column_if_not_exists(cursor, db_name, "roles", "role_name", "VARCHAR(100) NOT NULL UNIQUE")
+                print("Spalte 'role_name' zur 'roles'-Tabelle hinzugefügt. (Migrations-Fix)")
+            else:
+                print(f"FEHLER bei der Initialisierung der 'roles'-Tabelle: {e}")
+        # --- ENDE KORREKTUR ---
+
         # --- Migration: Indizes hinzufügen (ruft Helfer auf) ---
         _add_index_if_not_exists(cursor, "shifts", "idx_user_datum", "`user_id`, `datum`")
 
@@ -627,6 +709,11 @@ def _run_initialize_db(conn, db_config):
                                  "`is_approved`, `is_archived`, `activation_date`, `archived_date`")
         _add_index_if_not_exists(cursor, "users", "idx_user_auth", "`vorname`(255), `name`(255), `password_hash`(255)")
         _add_index_if_not_exists(cursor, "chat_messages", "idx_chat_recipient_read", "`recipient_id`, `is_read`")
+
+        # --- KORREKTUR (Fehlerbehebung): Index für 'role_name' (Regel 1) ---
+        # (Fügt Längenbeschränkung hinzu, die für VARCHAR-Indizes oft nötig ist)
+        _add_index_if_not_exists(cursor, "roles", "idx_roles_name", "`role_name`(100)")
+        # --- ENDE KORREKTUR ---
 
         # --- Migration: Spalten hinzufügen (ruft Helfer auf) ---
         _add_column_if_not_exists(cursor, db_name, "users", "entry_date", "DATE DEFAULT NULL")
@@ -646,9 +733,13 @@ def _run_initialize_db(conn, db_config):
         _add_column_if_not_exists(cursor, db_name, "app_config", "last_modified",
                                   "TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP")
         _add_column_if_not_exists(cursor, db_name, "requests", "created_at", "DATETIME DEFAULT CURRENT_TIMESTAMP")
-
-        # --- NEU (Regel 1): Spalte für Hundebilder hinzufügen ---
         _add_column_if_not_exists(cursor, db_name, "dogs", "image_blob", "MEDIUMBLOB DEFAULT NULL")
+
+        # Spalte 'main_window' zur 'roles'-Tabelle hinzufügen (falls sie schon existierte)
+        _add_column_if_not_exists(cursor, db_name, "roles", "main_window", "VARCHAR(255) DEFAULT NULL")
+
+        # (Migration für 'hierarchy_level', falls es von einer anderen Migration hinzugefügt wurde)
+        _add_column_if_not_exists(cursor, db_name, "roles", "hierarchy_level", "INT DEFAULT 99")
 
         print("Datenbank-Migrationen abgeschlossen.")
 

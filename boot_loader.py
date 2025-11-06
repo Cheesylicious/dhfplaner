@@ -1,4 +1,3 @@
-# gui/boot_loader.py
 import tkinter as tk
 from tkinter import ttk, messagebox
 import threading
@@ -32,6 +31,9 @@ from database.db_reports import get_open_bug_reports_count
 from gui.login_window import LoginWindow
 from gui.main_admin_window import MainAdminWindow
 from gui.main_user_window import MainUserWindow
+# --- NEU (Zuteilungs-Fenster): Import für das Zuteilungsfenster ---
+from gui.main_zuteilung_window import MainZuteilungWindow
+# --- ENDE NEU ---
 
 # --- NEU (P1-P4): Import des neuen Preloading-Managers (Regel 4) ---
 from gui.preloading_manager import PreloadingManager
@@ -53,6 +55,16 @@ class Application(tk.Tk):
         self.current_user_data = None
         self.main_window = None
         self.login_window = None
+
+        # --- NEU (Schritt 5): Fenster-Klassen-Mapping (Regel 2 & 4) ---
+        # Definiert, welcher String aus der DB welche Fensterklasse öffnet
+        self.window_class_map = {
+            "main_admin_window": MainAdminWindow,
+            "main_user_window": MainUserWindow,
+            # --- NEU (Zuteilungs-Fenster): Zuteilungsfenster hinzugefügt ---
+            "main_zuteilung_window": MainZuteilungWindow
+        }
+        # --- ENDE NEU ---
 
         # --- KORREKTUR: Berechne den ZIELMONAT (nächster Monat) ---
         # (Logik von MainAdminWindow hierher verschoben)
@@ -297,7 +309,9 @@ class Application(tk.Tk):
 
     def on_login_success(self, login_window, user_data):
         print(
-            f"[Boot Loader] Login erfolgreich für: {user_data['vorname']} {user_data['name']} (Rolle: {user_data['role']})")
+            f"[Boot Loader] Login erfolgreich für: {user_data['vorname']} {user_data['name']} (Rolle: {user_data['role']})"
+        )
+        # (user_data enthält jetzt 'main_window' dank login_window.py)
         self.current_user_data = user_data
         login_window.show_loading_ui()
         self.after(100, lambda: self._load_main_window(user_data))
@@ -307,13 +321,32 @@ class Application(tk.Tk):
             if self.main_window:
                 self.main_window.destroy()
 
-            role = user_data.get('role')
-            if role in ["Admin", "SuperAdmin"]:
-                print("[Boot Loader] Lade Admin-Fenster...")
-                self.main_window = MainAdminWindow(self, user_data, self)
+            # --- ANPASSUNG (Schritt 5): Dynamischer Fenster-Lader (Regel 2 & 4) ---
+
+            # 1. Fensternamen aus user_data holen (von login_window.py (Schritt 4) gesetzt)
+            window_name = user_data.get('main_window')
+
+            # 2. Fallback (Regel 1), falls login_window.py 'main_window' nicht setzen konnte
+            if not window_name:
+                print(
+                    f"[FEHLER] 'main_window' nicht in user_data gefunden! Führe alten Fallback (basierend auf Rolle) aus.")
+                role = user_data.get('role')
+                window_name = 'main_admin_window' if role in ["Admin", "SuperAdmin"] else 'main_user_window'
+                user_data['main_window'] = window_name  # Sicherstellen, dass es für den Rest der App da ist
+
+            # 3. Fensterklasse aus Mapping (in __init__ definiert) holen
+            TargetWindow = self.window_class_map.get(window_name)
+
+            # 4. Fenster instanziieren
+            if TargetWindow:
+                print(f"[Boot Loader] Lade Fenster: {window_name} ({TargetWindow.__name__})...")
+                self.main_window = TargetWindow(self, user_data, self)
             else:
-                print("[Boot Loader] Lade Benutzer-Fenster...")
+                # Fallback (Regel 1), falls DB einen Namen liefert, den wir (noch) nicht kennen
+                print(
+                    f"[WARNUNG] Unbekanntes Hauptfenster '{window_name}' in DB! Führe Fallback auf 'main_user_window' aus.")
                 self.main_window = MainUserWindow(self, user_data, self)
+            # --- ENDE ANPASSUNG ---
 
             self.main_window.wait_visibility()
             self.main_window.update_idletasks()
