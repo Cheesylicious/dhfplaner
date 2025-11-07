@@ -1,398 +1,420 @@
+# gui/dialogs/role_management_dialog.py
 import tkinter as tk
-from tkinter import ttk, messagebox
-import json
+from tkinter import ttk, messagebox, simpledialog
+from tkinter.colorchooser import askcolor
+import json  # Wird hier nicht direkt benötigt, aber db_roles verwendet es
 
-# DB-Funktionen (verwenden jetzt die neuen 'details'-Funktionen)
 from database.db_roles import (
     get_all_roles_details, create_role, delete_role,
     save_roles_details, ALL_ADMIN_TABS
 )
 
-# Import der Drag-and-Drop-Liste (aus vorherigem Schritt)
-from .role_hierarchy_list import RoleHierarchyList
 
-# --- NEU (Zentralisierung): Import aus dem Window Manager (Regel 4) ---
-try:
-    from gui.window_manager import get_window_options_for_roles
-except ImportError:
-    print("[FEHLER] window_manager.py nicht gefunden. Verwende Fallback für Fenster-Optionen.")
-
-
-    # (Regel 1) Fallback, falls Import fehlschlägt
-    def get_window_options_for_roles():
-        return {
-            'Benutzer-Fenster': 'main_user_window',
-            'Admin-Fenster': 'main_admin_window',
-            'Zuteilungs-Fenster': 'main_zuteilung_window'
-        }
-
-
-# --- ENDE NEU ---
+# (Stellen Sie sicher, dass db_roles.py (von oben) gespeichert ist)
 
 
 class RoleManagementDialog(tk.Toplevel):
+    """
+    Ein Toplevel-Fenster (Dialog) zur Verwaltung von Rollen,
+    Hierarchien, Berechtigungen und Farben (INNOVATION Regel 2 & 4).
+    """
+
     def __init__(self, master, on_close_callback=None):
         super().__init__(master)
-        self.title("Rollen- und Berechtigungsverwaltung")
-        self.geometry("750x600")  # Größer für mehr Inhalt
+        self.title("Rollenverwaltung")
+        self.geometry("900x700")
         self.transient(master)
         self.grab_set()
 
         self.on_close_callback = on_close_callback
-        self.all_roles_data = []  # Speichert alle Rollen-Dicts
-        self.current_selected_role_id = None
 
-        # UI-Variablen für die Checkboxen
-        self.permission_vars = {}  # Speichert {tab_name: tk.BooleanVar}
+        # Daten-Cache für den Dialog
+        self.roles_data = []
 
-        # --- ANPASSUNG (Schema): Variable für Hauptfenster ---
-        # Standardwert ist jetzt der DB-Wert
-        self.window_type_var = tk.StringVar(value='main_user_window')
+        # UI-Komponenten
+        self.notebook = ttk.Notebook(self)
 
-        # Definiert die Anzeigenamen und die DB-Werte (gemäß db_schema.py)
-        # --- KORREKTUR (Regel 4): Lädt Optionen jetzt aus zentralem Manager ---
-        self.window_type_options = get_window_options_for_roles()
+        # --- Tab 1: Rollen & Farben (NEU) ---
+        self.tab1 = ttk.Frame(self.notebook, padding=10)
+        self.notebook.add(self.tab1, text="Rollen & Farben")
+        self._create_roles_tab()
+
+        # --- Tab 2: Hierarchie & Berechtigungen ---
+        self.tab2 = ttk.Frame(self.notebook, padding=10)
+        self.notebook.add(self.tab2, text="Hierarchie & Berechtigungen")
+        self._create_permissions_tab()
+
+        self.notebook.pack(expand=True, fill="both", pady=5, padx=5)
+
+        # --- Speicher-Button ---
+        btn_frame = ttk.Frame(self)
+        btn_frame.pack(fill="x", side="bottom", pady=10, padx=10)
+
+        ttk.Label(btn_frame, text="Änderungen werden erst nach Klick auf 'Speichern' aktiv.").pack(side="left", padx=5)
+        ttk.Button(btn_frame, text="Speichern & Schließen", command=self.save_and_close, style="Accent.TButton").pack(
+            side="right", padx=5)
+        ttk.Button(btn_frame, text="Abbrechen", command=self.on_dialog_close).pack(side="right", padx=5)
+
+        # Daten laden
+        self.load_data()
+
+        # Beim Schließen (X) den Callback ausführen
+        self.protocol("WM_DELETE_WINDOW", self.on_dialog_close)
+
+    def on_dialog_close(self):
+        """Wird aufgerufen, wenn das Fenster geschlossen wird (z.B. über das 'X' oder Abbrechen)."""
+        # (Wir rufen den Callback immer auf, damit die Farben im Hauptfenster neu geladen werden)
+        if self.on_close_callback:
+            self.on_close_callback()
+        self.destroy()
+
+    def load_data(self):
+        """Lädt die Rollendaten aus der DB in den internen Cache."""
+        try:
+            self.roles_data = get_all_roles_details()
+            # Fülle beide Tabs mit den neuen Daten
+            self._populate_roles_tab()
+            self._populate_permissions_tab()
+        except Exception as e:
+            messagebox.showerror("Fehler", f"Rollen konnten nicht geladen werden: {e}", parent=self)
+            self.roles_data = []
+
+    # --- Logik für Tab 1: Rollen & Farben ---
+
+    def _create_roles_tab(self):
+        main_frame = ttk.Frame(self.tab1)
+        main_frame.pack(expand=True, fill="both")
+
+        main_frame.grid_columnconfigure(0, weight=1)
+        main_frame.grid_rowconfigure(0, weight=1)
+
+        # Linke Seite: Liste der Rollen
+        list_frame = ttk.Frame(main_frame, padding=5)
+        list_frame.grid(row=0, column=0, sticky="nsew", padx=(0, 5))
+        list_frame.grid_rowconfigure(1, weight=1)
+        list_frame.grid_columnconfigure(0, weight=1)
+
+        ttk.Label(list_frame, text="Vorhandene Rollen", style="Headline.TLabel").pack(anchor="w", pady=5)
+
+        # --- KORREKTUR (Regel 1): show="headings" -> show="tree" ---
+        # (Damit wird die #0-Spalte (Baum-Spalte) angezeigt, in der die Namen stehen)
+        self.roles_tree = ttk.Treeview(list_frame, columns=(), show="tree")
+        self.roles_tree.heading("#0", text="Rollenname (Vorschau)")
         # --- ENDE KORREKTUR ---
 
-        # --- Styles ---
-        style = ttk.Style(self)
+        self.roles_tree.pack(expand=True, fill="both")
+
+        self.roles_tree.bind("<<TreeviewSelect>>", self._on_role_select)
+
+        # Rechte Seite: Aktionen
+        action_frame = ttk.Frame(main_frame, padding=5)
+        action_frame.grid(row=0, column=1, sticky="nw")
+
+        ttk.Label(action_frame, text="Aktionen", style="Headline.TLabel").pack(anchor="w", pady=5)
+
+        self.new_role_entry = ttk.Entry(action_frame, width=30)
+        self.new_role_entry.pack(fill="x", pady=(5, 2))
+        ttk.Button(action_frame, text="Neue Rolle erstellen", command=self._create_new_role).pack(fill="x",
+                                                                                                  pady=(0, 10))
+
+        ttk.Separator(action_frame, orient="horizontal").pack(fill="x", pady=10)
+
+        # Details für ausgewählte Rolle
+        self.details_frame = ttk.Frame(action_frame)
+        self.details_frame.pack(fill="x", pady=5)
+        self.details_label = ttk.Label(self.details_frame, text="Wählen Sie eine Rolle...", style="Italic.TLabel")
+        self.details_label.pack()
+
+        # (Verwende tk.Frame statt ttk.Frame für 'background')
+        self.color_frame = tk.Frame(self.details_frame, height=30, width=100, relief="sunken", borderwidth=1)
+
+        self.color_button = ttk.Button(self.details_frame, text="Farbe ändern", command=self._change_role_color,
+                                       state="disabled")
+        self.delete_button = ttk.Button(self.details_frame, text="Rolle löschen", command=self._delete_selected_role,
+                                        state="disabled")
+
+    def _populate_roles_tab(self):
+        """Füllt die Treeview im Rollen-Tab."""
+        self.roles_tree.delete(*self.roles_tree.get_children())
+        for role in self.roles_data:
+            role_id = role['id']
+            role_name = role['name']
+            role_color = role.get('color', '#FFFFFF')
+
+            # Definiere einen Tag für die Farbe (dient als Vorschau)
+            tag_name = f"role_{role_id}"
+            self.roles_tree.tag_configure(tag_name, background=role_color)
+
+            # Füge Eintrag hinzu (text=... füllt die #0-Spalte)
+            self.roles_tree.insert("", "end", iid=role_id, text=f" {role_name}", tags=(tag_name,))
+
+    def _on_role_select(self, event=None):
+        """Aktualisiert die Detail-Ansicht, wenn eine Rolle ausgewählt wird."""
+        selected_item = self.roles_tree.focus()
+        if not selected_item:
+            self._show_role_details(None)
+            return
+
+        role_id = int(selected_item)
+        role = next((r for r in self.roles_data if r['id'] == role_id), None)
+        self._show_role_details(role)
+
+    def _show_role_details(self, role):
+        """Zeigt die Aktionen für die ausgewählte Rolle an."""
+        # Lösche alte Widgets
+        for w in [self.details_label, self.color_frame, self.color_button, self.delete_button]:
+            w.pack_forget()
+
+        if role:
+            self.details_label.configure(text=f"Bearbeite: {role['name']}", style="Bold.TLabel")
+
+            # (tk.Frame)
+            self.color_frame.configure(background=role.get('color', '#FFFFFF'))
+
+            self.color_button.configure(state="normal")
+
+            # Standardrollen nicht löschbar machen
+            if role['id'] in [1, 2, 3, 4]:
+                self.delete_button.configure(state="disabled")
+            else:
+                self.delete_button.configure(state="normal")
+
+            self.details_label.pack(fill="x")
+            self.color_frame.pack(fill="x", pady=5)
+            self.color_button.pack(fill="x", pady=5)
+            self.delete_button.pack(fill="x", pady=(10, 5))
+        else:
+            self.details_label.configure(text="Wählen Sie eine Rolle...", style="Italic.TLabel")
+            self.color_button.configure(state="disabled")
+            self.delete_button.configure(state="disabled")
+            self.details_label.pack()
+
+    def _create_new_role(self):
+        role_name = self.new_role_entry.get().strip()
+        if not role_name:
+            messagebox.showwarning("Fehler", "Rollenname darf nicht leer sein.", parent=self)
+            return
+        if any(r['name'].lower() == role_name.lower() for r in self.roles_data):
+            messagebox.showwarning("Fehler", "Eine Rolle mit diesem Namen existiert bereits.", parent=self)
+            return
+
+        if create_role(role_name):
+            messagebox.showinfo("Erfolg", f"Rolle '{role_name}' erstellt. (Farbe/Rechte in Tabs anpassen)",
+                                parent=self)
+            self.new_role_entry.delete(0, "end")
+            self.load_data()  # Daten neu laden, um IDs/Farben zu haben
+        else:
+            messagebox.showerror("Fehler", "Rolle konnte nicht erstellt werden (DB-Fehler).", parent=self)
+
+    def _change_role_color(self):
+        selected_item = self.roles_tree.focus()
+        if not selected_item: return
+        role_id = int(selected_item)
+
+        role = next((r for r in self.roles_data if r['id'] == role_id), None)
+        if not role: return
+
+        # Öffne Farbwähler (Dies ist der visuelle Dialog)
+        color_code = askcolor(title="Farbe wählen", initialcolor=role.get('color', '#FFFFFF'))
+
+        if color_code and color_code[1]:  # (RGB-Tupel, Hex-String)
+            new_color_hex = color_code[1]
+
+            # 1. Aktualisiere den lokalen Cache
+            role['color'] = new_color_hex
+
+            # 2. Aktualisiere die GUI (Treeview und Vorschau)
+            tag_name = f"role_{role_id}"
+            self.roles_tree.tag_configure(tag_name, background=new_color_hex)
+
+            # (Workaround - jetzt korrekt für tk.Frame)
+            self.color_frame.configure(background=new_color_hex)
+
+            print(f"Farbe für {role['name']} geändert zu {new_color_hex} (im Cache).")
+            # HINWEIS: Speichern erfolgt erst beim Klick auf "Speichern & Schließen"
+
+    def _delete_selected_role(self):
+        selected_item = self.roles_tree.focus()
+        if not selected_item: return
+        role_id = int(selected_item)
+        role = next((r for r in self.roles_data if r['id'] == role_id), None)
+        if not role: return
+
+        if messagebox.askyesno("Löschen",
+                               f"Möchten Sie die Rolle '{role['name']}' wirklich löschen?\n\n(Nur möglich, wenn kein Benutzer diese Rolle hat)",
+                               parent=self):
+            success, msg = delete_role(role_id)
+            if success:
+                messagebox.showinfo("Erfolg", msg, parent=self)
+                self.load_data()  # Daten neu laden
+                self._show_role_details(None)
+            else:
+                messagebox.showerror("Fehler", msg, parent=self)
+
+    # --- Logik für Tab 2: Hierarchie & Berechtigungen ---
+
+    def _create_permissions_tab(self):
+        main_frame = ttk.Frame(self.tab2)
+        main_frame.pack(expand=True, fill="both")
+        main_frame.grid_columnconfigure(1, weight=1)
+        main_frame.grid_rowconfigure(0, weight=1)
+
+        # Links: Hierarchie
+        h_frame = ttk.Frame(main_frame, padding=5)
+        h_frame.grid(row=0, column=0, sticky="nsew", padx=(0, 5))
+        h_frame.grid_rowconfigure(1, weight=1)
+
+        ttk.Label(h_frame, text="Hierarchie (Wichtigste oben)", style="Headline.TLabel").pack(anchor="w", pady=5)
+        self.hierarchy_list = tk.Listbox(h_frame, width=30, selectmode="browse")
+        self.hierarchy_list.pack(side="left", fill="y", expand=True)
+        self.hierarchy_list.bind("<<ListboxSelect>>", self._on_hierarchy_select)
+
+        btn_h_frame = ttk.Frame(h_frame)
+        btn_h_frame.pack(side="left", fill="y", padx=5)
+        self.h_up_btn = ttk.Button(btn_h_frame, text="▲ Nach Oben", command=self._move_hierarchy_up, state="disabled")
+        self.h_up_btn.pack(pady=2)
+        self.h_down_btn = ttk.Button(btn_h_frame, text="▼ Nach Unten", command=self._move_hierarchy_down,
+                                     state="disabled")
+        self.h_down_btn.pack(pady=2)
+
+        # Rechts: Berechtigungen
+        self.p_frame = ttk.Frame(main_frame, padding=5)
+        self.p_frame.grid(row=0, column=1, sticky="nsew")
+
+        ttk.Label(self.p_frame, text="Berechtigungen", style="Headline.TLabel").pack(anchor="w", pady=5)
+
+        # Canvas und Scrollbar für Checkboxen
+        self.p_canvas = tk.Canvas(self.p_frame, borderwidth=0)
+        self.p_scroll_frame = ttk.Frame(self.p_canvas)
+        self.p_vsb = ttk.Scrollbar(self.p_frame, orient="vertical", command=self.p_canvas.yview)
+        self.p_canvas.configure(yscrollcommand=self.p_vsb.set)
+
+        self.p_vsb.pack(side="right", fill="y")
+        self.p_canvas.pack(side="left", fill="both", expand=True)
+        self.p_canvas.create_window((4, 4), window=self.p_scroll_frame, anchor="nw")
+
+        self.p_scroll_frame.bind("<Configure>",
+                                 lambda e: self.p_canvas.configure(scrollregion=self.p_canvas.bbox("all")))
+
+        # Checkbox-Variablen
+        self.perm_vars = {}
+        self.perm_checks = {}
+
+        # Erstelle die Checkboxen (einmalig)
+        for tab_name in ALL_ADMIN_TABS:
+            var = tk.BooleanVar()
+            cb = ttk.Checkbutton(self.p_scroll_frame, text=tab_name, variable=var, state="disabled",
+                                 command=lambda v=var, t=tab_name: self._on_perm_change(t, v))
+            cb.pack(anchor="w", padx=5)
+            self.perm_vars[tab_name] = var
+            self.perm_checks[tab_name] = cb
+
+        # Platzhalter, wenn keine Rolle gewählt ist
+        self.p_label = ttk.Label(self.p_scroll_frame, text="Bitte Rolle in Hierarchie-Liste auswählen.",
+                                 style="Italic.TLabel")
+        self.p_label.pack(pady=20)
+
+    def _populate_permissions_tab(self):
+        """Füllt die Hierarchie-Liste (Daten sind bereits in self.roles_data)."""
+        self.hierarchy_list.delete(0, "end")
+        # Sortiert nach Hierarchie (ist bereits in roles_data)
+        for role in self.roles_data:
+            self.hierarchy_list.insert("end", role['name'])
+
+    def _on_hierarchy_select(self, event=None):
+        """Lädt die Berechtigungen für die links ausgewählte Rolle."""
         try:
-            style.configure("Danger.TButton", foreground="red")
-            style.map("Danger.TButton",
-                      foreground=[('active', 'white')],
-                      background=[('active', 'red')])
-        except tk.ToplevelError:
+            selected_index = self.hierarchy_list.curselection()[0]
+        except IndexError:
+            self._update_permission_checks(None)
+            self.h_up_btn.config(state="disabled")
+            self.h_down_btn.config(state="disabled")
+            return
+
+        role_name = self.hierarchy_list.get(selected_index)
+        role = next((r for r in self.roles_data if r['name'] == role_name), None)
+        self._update_permission_checks(role)
+
+        # Buttons (Hoch/Runter) aktivieren
+        self.h_up_btn.config(state="normal" if selected_index > 0 else "disabled")
+        self.h_down_btn.config(state="normal" if selected_index < (self.hierarchy_list.size() - 1) else "disabled")
+
+    def _update_permission_checks(self, role):
+        """Aktualisiert die Checkboxen rechts."""
+        if role:
+            self.p_label.pack_forget()
+            permissions = role.get('permissions', {})
+            for tab_name in ALL_ADMIN_TABS:
+                is_allowed = permissions.get(tab_name, False)
+                self.perm_vars[tab_name].set(is_allowed)
+                self.perm_checks[tab_name].config(state="normal")
+        else:
+            # Keine Rolle ausgewählt
+            self.p_label.pack(pady=20)
+            for tab_name in ALL_ADMIN_TABS:
+                self.perm_vars[tab_name].set(False)
+                self.perm_checks[tab_name].config(state="disabled")
+
+    def _on_perm_change(self, tab_name, var):
+        """Speichert die geänderte Berechtigung im lokalen Cache."""
+        try:
+            selected_index = self.hierarchy_list.curselection()[0]
+            role = self.roles_data[selected_index]  # Verlässt sich auf Sortierung
+            role['permissions'][tab_name] = var.get()
+            print(f"Berechtigung {tab_name} für {role['name']} geändert (im Cache).")
+        except IndexError:
+            print(f"Fehler: Berechtigung {tab_name} geändert, aber keine Rolle ausgewählt.")
+
+    def _move_hierarchy_up(self):
+        try:
+            idx = self.hierarchy_list.curselection()[0]
+            if idx == 0: return
+
+            # Tausche im Cache (self.roles_data)
+            self.roles_data[idx], self.roles_data[idx - 1] = self.roles_data[idx - 1], self.roles_data[idx]
+
+            # Fülle UI neu
+            self._populate_permissions_tab()
+            self.hierarchy_list.selection_set(idx - 1)
+            self._on_hierarchy_select()
+        except IndexError:
             pass
 
-        # --- Haupt-Layout (PanedWindow für Größenänderung) ---
-        main_pane = ttk.PanedWindow(self, orient=tk.HORIZONTAL)
-        main_pane.pack(fill='both', expand=True, padx=10, pady=10)
+    def _move_hierarchy_down(self):
+        try:
+            idx = self.hierarchy_list.curselection()[0]
+            if idx == self.hierarchy_list.size() - 1: return
 
-        # --- Linke Seite: Hierarchie-Liste ---
-        left_frame = ttk.Frame(main_pane, padding=5)
-        left_frame.columnconfigure(0, weight=1)
-        left_frame.rowconfigure(1, weight=1)
-        main_pane.add(left_frame, weight=1)
+            # Tausche im Cache (self.roles_data)
+            self.roles_data[idx], self.roles_data[idx + 1] = self.roles_data[idx + 1], self.roles_data[idx]
 
-        ttk.Label(left_frame, text="Rollen-Hierarchie (Ziehen zum Sortieren)",
-                  font=("Segoe UI", 10, "bold")).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 5))
+            # Fülle UI neu
+            self._populate_permissions_tab()
+            self.hierarchy_list.selection_set(idx + 1)
+            self._on_hierarchy_select()
+        except IndexError:
+            pass
 
-        # Neue Drag-Drop-Liste
-        self.hierarchy_list = RoleHierarchyList(left_frame)
-        self.hierarchy_list.grid(row=1, column=0, columnspan=2, sticky="nsew")
-
-        # Callback, wenn Auswahl sich ändert -> Lade Berechtigungen rechts
-        self.hierarchy_list.bind_selection_changed(self.on_role_selected)
-
-        # Buttons unter der Liste (Erstellen/Löschen)
-        list_btn_frame = ttk.Frame(left_frame)
-        list_btn_frame.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(5, 0))
-        list_btn_frame.columnconfigure(0, weight=1)
-
-        self.new_role_entry = ttk.Entry(list_btn_frame)
-        self.new_role_entry.grid(row=0, column=0, sticky="ew", padx=(0, 5))
-
-        create_btn = ttk.Button(list_btn_frame, text="Erstellen", width=10, command=self.add_new_role)
-        create_btn.grid(row=0, column=1, sticky="e")
-
-        delete_btn = ttk.Button(left_frame, text="Auswahl löschen",
-                                style="Danger.TButton", command=self.delete_selected_role)
-        delete_btn.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(5, 0))
-
-        # --- Rechte Seite: Berechtigungen ---
-        self.right_frame = ttk.Labelframe(main_pane, text="Berechtigungen für: [Bitte Rolle wählen]", padding=15)
-        self.right_frame.columnconfigure(0, weight=1)
-        main_pane.add(self.right_frame, weight=2)
-
-        # --- Frame für Hauptfenster ---
-        window_type_frame = ttk.Frame(self.right_frame)
-        window_type_frame.pack(fill='x', pady=(0, 15))
-
-        ttk.Label(window_type_frame, text="Fenster nach Login:", font=("Segoe UI", 10, "bold")).pack(side="left",
-                                                                                                     padx=(0, 10))
-
-        self.window_type_combo = ttk.Combobox(
-            window_type_frame,
-            textvariable=self.window_type_var,
-            values=list(self.window_type_options.keys()),  # Werte kommen jetzt vom Manager
-            state='disabled'  # Startet deaktiviert
-        )
-        self.window_type_combo.pack(side="left", fill="x", expand=True)
-        # Bindet die Änderung an eine neue Funktion
-        self.window_type_combo.bind("<<ComboboxSelected>>", self.on_window_type_changed)
-        # --- ENDE ---
-
-        ttk.Separator(self.right_frame, orient='horizontal').pack(fill='x', pady=(0, 10))
-
-        # Checkboxen-Container
-        self.permissions_frame = ttk.Frame(self.right_frame)
-        self.permissions_frame.pack(fill='both', expand=True)
-
-        # Erstelle die Checkboxen (anfangs deaktiviert)
-        self.create_permission_checkboxes()
-        self.set_permission_widgets_state(tk.DISABLED)
-
-        # --- Untere Button-Leiste (Speichern/Schließen) ---
-        bottom_frame = ttk.Frame(self, padding=(10, 0, 10, 10))
-        bottom_frame.pack(fill='x', side='bottom')
-
-        self.status_label = ttk.Label(bottom_frame, text="")
-        self.status_label.pack(side="left", padx=5)
-
-        close_btn = ttk.Button(bottom_frame, text="Schließen", command=self.close_dialog)
-        close_btn.pack(side="right")
-
-        save_btn = ttk.Button(bottom_frame, text="Speichern & Schließen", command=self.save_and_close)
-        save_btn.pack(side="right", padx=5)
-
-        # --- Initiale Daten laden ---
-        self.load_roles()
-
-        self.protocol("WM_DELETE_WINDOW", self.close_dialog)
-
-    def create_permission_checkboxes(self):
-        """Erstellt die Checkbox-Widgets für alle Admin-Tabs."""
-        num_cols = 2
-
-        # Sortierte Liste für konsistente Anzeige
-        sorted_tab_names = sorted(ALL_ADMIN_TABS)
-
-        for i, tab_name in enumerate(sorted_tab_names):
-            var = tk.BooleanVar(value=False)
-            self.permission_vars[tab_name] = var
-
-            cb = ttk.Checkbutton(self.permissions_frame, text=tab_name, variable=var,
-                                 command=self.on_permission_changed)
-
-            row = i // num_cols
-            col = i % num_cols
-            cb.grid(row=row, column=col, sticky="w", padx=10, pady=5)
-            if col == 0:
-                self.permissions_frame.columnconfigure(0, weight=1)
-            if col == 1:
-                self.permissions_frame.columnconfigure(1, weight=1)
-
-    def set_permission_widgets_state(self, state):
-        """Aktiviert oder deaktiviert alle Checkboxen UND die Combobox."""
-        # 'disabled' oder 'readonly' für die Combobox
-        combo_state = 'readonly' if state == tk.NORMAL else 'disabled'
-        self.window_type_combo.config(state=combo_state)  # Angepasst
-
-        for child in self.permissions_frame.winfo_children():
-            if isinstance(child, ttk.Checkbutton):
-                child.config(state=state)
-
-    def load_roles(self):
-        """Lädt alle Rollen (inkl. Details) und füllt die Hierarchie-Liste."""
-        self.all_roles_data = get_all_roles_details()
-        self.hierarchy_list.populate(self.all_roles_data)
-        self.clear_permission_display()
-
-    def on_role_selected(self, event=None):
-        """
-        Wird aufgerufen, wenn eine Rolle in der Hierarchie-Liste ausgewählt wird.
-        Lädt die Berechtigungen UND den Fenstertyp dieser Rolle.
-        """
-        role_data = self.hierarchy_list.get_selected_role_data()
-
-        if not role_data:
-            self.clear_permission_display()
-            return
-
-        self.current_selected_role_id = role_data['id']
-        self.right_frame.config(text=f"Berechtigungen für: {role_data['name']}")
-
-        # --- ANPASSUNG (Schema): Hauptfenster laden ---
-        # (Regel 1) Fallback auf 'main_user_window'
-        db_window_value = role_data.get('main_window', 'main_user_window')
-
-        # Finde den Anzeigenamen (z.B. 'Admin-Fenster')
-        display_name = 'Benutzer-Fenster'  # Fallback
-
-        # (Regel 1): Diese Schleife findet jetzt auch 'Zuteilungs-Fenster'
-        # da self.window_type_options vom Manager geladen wird.
-        for key, value in self.window_type_options.items():
-            if value == db_window_value:
-                display_name = key
-                break
-        self.window_type_var.set(display_name)
-        # --- ENDE ANPASSUNG ---
-
-        # 3. Berechtigungen laden
-        role_permissions = role_data.get('permissions', {})
-
-        # 4. Checkboxen füllen
-        is_master_role = role_data['name'] in ['Admin', 'SuperAdmin']
-        for tab_name, var in self.permission_vars.items():
-            # Standard: True, wenn die Rolle 'Admin'/'SuperAdmin' ist, sonst False
-            var.set(role_permissions.get(tab_name, is_master_role))
-
-        # 5. Checkboxen aktivieren (außer für Master-Rollen)
-        if is_master_role:
-            # Checkboxen deaktivieren
-            for child in self.permissions_frame.winfo_children():
-                if isinstance(child, ttk.Checkbutton):
-                    child.config(state=tk.DISABLED)
-            # Combobox ERLAUBEN (Regel 1: Admins müssen ihr Fenster ändern können)
-            self.window_type_combo.config(state='readonly')
-            self.status_label.config(text=f"Info: '{role_data['name']}' hat immer alle Tab-Rechte.")
-        else:
-            self.set_permission_widgets_state(tk.NORMAL)  # Aktiviert alles
-            self.status_label.config(text="")
-
-    def _find_role_data_in_cache(self, role_id):
-        """Hilfsfunktion: Findet die Rolle im Haupt-Cache."""
-        role_data = next((r for r in self.all_roles_data if r['id'] == role_id), None)
-        if not role_data:
-            list_data = self.hierarchy_list.get_ordered_data()
-            role_data = next((r for r in list_data if r['id'] == role_id), None)
-        return role_data
-
-    def on_window_type_changed(self, event=None):
-        """
-        Wird aufgerufen, wenn die Combobox geändert wird.
-        Speichert den neuen Wert (z.B. 'main_admin_window') im Daten-Cache (self.all_roles_data).
-        """
-        if self.current_selected_role_id is None:
-            return
-
-        role_data = self._find_role_data_in_cache(self.current_selected_role_id)
-
-        if role_data:
-            display_name = self.window_type_var.get()  # z.B. 'Zuteilungs-Fenster'
-            # --- ANPASSUNG (Schema): Korrekten DB-Wert und Fallback holen ---
-            db_value = self.window_type_options.get(display_name, 'main_user_window')  # z.B. 'main_zuteilung_window'
-
-            # Speichere die Änderung im Haupt-Cache
-            role_data['main_window'] = db_value
-            print(f"Cache für Rolle ID {role_data['id']} auf main_window='{db_value}' gesetzt.")
-            # --- ENDE ANPASSUNG ---
-
-    def on_permission_changed(self):
-        """
-        Speichert geänderte Checkbox-Werte im Daten-Cache (self.all_roles_data).
-        """
-        if self.current_selected_role_id is None:
-            return
-
-        role_data = self._find_role_data_in_cache(self.current_selected_role_id)
-
-        if role_data:
-            if 'permissions' not in role_data:
-                role_data['permissions'] = {}
-            for tab_name, var in self.permission_vars.items():
-                role_data['permissions'][tab_name] = var.get()
-
-    def clear_permission_display(self):
-        """Setzt die rechte Seite zurück."""
-        self.right_frame.config(text="Berechtigungen für: [Bitte Rolle wählen]")
-        self.current_selected_role_id = None
-
-        # (Regel 1) Setzt den Fallback-Wert (erster Wert aus der Liste)
-        fallback_display_name = list(self.window_type_options.keys())[0] if self.window_type_options else ""
-        self.window_type_var.set(fallback_display_name)
-
-        for var in self.permission_vars.values():
-            var.set(False)
-        self.set_permission_widgets_state(tk.DISABLED)
-        self.status_label.config(text="")
-
-    def add_new_role(self):
-        role_name = self.new_role_entry.get()
-        if not role_name:
-            messagebox.showwarning("Eingabe fehlt", "Bitte einen Rollennamen eingeben.", parent=self)
-            return
-
-        # (Regel 1) Wir nutzen die create_role Funktion aus db_roles.py,
-        # die automatisch das korrekte Standard-Fenster ('main_user_window') setzt.
-        if create_role(role_name):
-            messagebox.showinfo("Erfolg", f"Rolle '{role_name}' wurde erstellt.", parent=self)
-            self.new_role_entry.delete(0, 'end')
-            self.load_roles()  # Liste neu laden
-        else:
-            messagebox.showerror("Fehler",
-                                 f"Rolle '{role_name}' konnte nicht erstellt werden (existiert evtl. schon?).",
-                                 parent=self)
-
-    def delete_selected_role(self):
-        role_data = self.hierarchy_list.get_selected_role_data()
-        if not role_data:
-            messagebox.showwarning("Keine Auswahl", "Bitte eine Rolle zum Löschen auswählen.", parent=self)
-            return
-
-        role_id = role_data['id']
-        role_name = role_data['name']
-
-        # (Regel 1) Wir nutzen die delete_role Funktion aus db_roles.py,
-        # die die Prüfung auf Standardrollen (IDs 1-4) und Benutzerzuweisung
-        # bereits serverseitig durchführt.
-
-        # Lokale Prüfung (doppelt, aber User-freundlich)
-        if role_id in [1, 2, 3, 4]:
-            messagebox.showerror("Gesperrt",
-                                 "Die Standardrollen (Admin, Mitarbeiter, Gast, SuperAdmin) können nicht gelöscht werden.",
-                                 parent=self)
-            return
-
-        if not messagebox.askyesno("Bestätigen",
-                                   f"Sind Sie sicher, dass Sie die Rolle '{role_name}' löschen wollen?\n\nDies ist nur möglich, wenn kein Benutzer dieser Rolle zugewiesen ist.",
-                                   parent=self):
-            return
-
-        success, message = delete_role(role_id)
-        if success:
-            messagebox.showinfo("Erfolg", f"Rolle '{role_name}' wurde gelöscht.", parent=self)
-            self.load_roles()  # Liste neu laden
-        else:
-            messagebox.showerror("Fehler", f"Rolle '{role_name}' konnte nicht gelöscht werden.\n({message})",
-                                 parent=self)
+    # --- Speichern & Schließen ---
 
     def save_and_close(self):
-        """Speichert Hierarchie, Berechtigungen UND Hauptfenster."""
+        """
+        Speichert ALLE Daten (Hierarchie, Berechtigungen, Farben)
+        aus dem lokalen Cache (self.roles_data) in die DB.
+        """
 
-        # 1. Hole die sortierten Daten (aus der Drag-Drop-Liste)
-        ordered_list_data = self.hierarchy_list.get_ordered_data()
+        # 1. Aktualisiere die Hierarchie-Ebene im Cache, falls sie
+        #    durch Hoch/Runter verschoben wurde
+        for index, role in enumerate(self.roles_data):
+            role['hierarchy_level'] = index + 1
 
-        # 2. Stelle sicher, dass die Daten in ordered_list_data
-        #    die Änderungen aus dem Cache (self.all_roles_data) enthalten
-        #    (Das sollte durch on_permission_changed und on_window_type_changed
-        #    bereits der Fall sein, da beide Listen auf dieselben Dicts zeigen)
-
-        cache_dict = {r['id']: r for r in self.all_roles_data}
-        final_data_to_save = []
-        for list_role in ordered_list_data:
-            if list_role['id'] in cache_dict:
-                # Nimm die Daten aus dem Haupt-Cache (die Änderungen enthalten)
-                final_data_to_save.append(cache_dict[list_role['id']])
+        # 2. Rufe die (modifizierte) DB-Funktion auf
+        try:
+            success, msg = save_roles_details(self.roles_data)
+            if success:
+                messagebox.showinfo("Erfolg", "Alle Rollen-Einstellungen gespeichert.", parent=self)
+                self.on_dialog_close()  # Führt Callback aus und schließt
             else:
-                final_data_to_save.append(list_role)
-
-        # 3. Speichere in DB (Regel 1)
-        # Wir rufen save_roles_details auf,
-        # das 'main_window' speichert.
-        success, message = save_roles_details(final_data_to_save)
-
-        if success:
-            messagebox.showinfo("Gespeichert", message, parent=self)
-            self.close_dialog()  # Ruft auch Callback auf
-        else:
-            messagebox.showerror("Fehler", message, parent=self)
-
-    def close_dialog(self):
-        # (Funktion bleibt unverändert)
-        if self.on_close_callback:
-            if hasattr(self.on_close_callback, '__name__') and self.on_close_callback.__name__ == 'refresh_data':
-                self.on_close_callback()
-            else:
-                self.on_close_callback()
-
-            try:
-                # master -> user_management_tab -> admin_window (self.admin_window)
-                admin_window = self.master.admin_window
-                if admin_window and hasattr(admin_window, 'tab_manager'):
-                    print("Info: Berechtigungen geändert. Tabs werden neu evaluiert.")
-                    admin_window.tab_manager.reevaluate_tab_permissions()
-            except Exception as e:
-                print(f"Warnung: Konnte TabManager nicht über Rechteänderung informieren: {e}")
-
-        self.destroy()
+                messagebox.showerror("Fehler beim Speichern", msg, parent=self)
+        except Exception as e:
+            messagebox.showerror("Fehler", f"Speichern fehlgeschlagen: {e}", parent=self)

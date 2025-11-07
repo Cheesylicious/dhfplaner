@@ -14,8 +14,9 @@ from ..user_edit_window import UserEditWindow
 
 # --- NEUE IMPORTE FÜR ROLLENVERWALTUNG ---
 from ..dialogs.role_management_dialog import RoleManagementDialog
+# --- INNOVATION (Regel 2 & 4): Lade Rollen-Definitionen ---
+from database.db_roles import get_all_roles_details
 
-# (db_roles wird nur vom Dialog selbst benötigt)
 # -------------------------------------------
 
 USER_MGMT_VISIBLE_COLUMNS_KEY = "USER_MGMT_VISIBLE_COLUMNS"
@@ -76,7 +77,17 @@ class UserManagementTab(ttk.Frame):
         self._sort_by = 'name'
         self._sort_desc = False
 
+        # --- INNOVATION (Regel 2 & 4): Dynamische Rollenfarben ---
+        # (Palette entfernt, wird jetzt in DB gespeichert)
+        # Speichert die Zuordnung von Rollenname (klein) zu Tag-Name
+        self.role_color_map = {}
+        # --- ENDE INNOVATION ---
+
         self._create_widgets()
+
+        # --- INNOVATION: Lade und konfiguriere Rollenfarben ---
+        self._load_and_configure_role_colors()
+        # --- ENDE INNOVATION ---
 
         # --- INNOVATION (Regel 1 & 2) ---
         # Daten entweder aus dem Cache laden oder (als Fallback) aus der DB holen.
@@ -116,6 +127,48 @@ class UserManagementTab(ttk.Frame):
 
     # --- ENDE NEUE INNOVATION ---
 
+    # --- INNOVATION (Regel 2 & 4): Rollenfarben dynamisch laden ---
+    def _load_and_configure_role_colors(self):
+        """
+        Lädt alle Rollen aus der DB, liest die gespeicherte FARBE
+        und konfiguriert die Treeview-Tags.
+        """
+        print("[UserMgmtTab] Lade und konfiguriere Rollenfarben...")
+        try:
+            # (Diese Funktion ruft jetzt die Farbe aus der DB ab)
+            roles = get_all_roles_details()
+            self.role_color_map.clear()
+
+            for index, role in enumerate(roles):
+                # Verwende 'name' (wie von get_all_roles_details zurückgegeben)
+                role_name_key = str(role.get('name', '')).lower()
+                if not role_name_key:
+                    continue
+
+                # --- INNOVATION (Regel 2): Lese Farbe aus DB ---
+                color = role.get('color', '#FFFFFF')  # Fallback Weiß
+                # --- ENDE INNOVATION ---
+
+                # Tag-Name basierend auf Rollen-ID (eindeutig)
+                tag_name = f"role_tag_{role.get('id', index)}"
+
+                try:
+                    # Konfiguriere Tag in der Treeview (Hintergrundfarbe)
+                    self.tree.tag_configure(tag_name, background=color)
+
+                    # Speichere die Zuordnung (Rollenname -> Tag)
+                    self.role_color_map[role_name_key] = tag_name
+
+                except tk.TclError:
+                    print(f"Warnung: Konnte Tag {tag_name} nicht konfigurieren.")
+
+        except Exception as e:
+            print(f"Fehler beim Laden der Rollenfarben: {e}")
+            # Fallback: leere Map
+            self.role_color_map = {}
+
+    # --- ENDE INNOVATION ---
+
     def _create_widgets(self):
         top_frame = ttk.Frame(self)
         top_frame.pack(fill="x", pady=10, padx=10)
@@ -152,6 +205,7 @@ class UserManagementTab(ttk.Frame):
             minwidth = 30 if is_displayed and col_key != "id" else 0
             stretch = tk.YES if is_displayed and col_key != "id" else tk.NO
             heading_options = {'text': col_name}
+            # HINWEIS: Sortierung (Request 1) wird hier bereits für alle Spalten aktiviert
             if is_displayed: heading_options['command'] = lambda _col=col_key: self.sort_column(_col)
             self.tree.heading(col_key, **heading_options)
             self.tree.column(col_key, width=width, minwidth=minwidth, stretch=stretch, anchor=tk.W)
@@ -183,6 +237,7 @@ class UserManagementTab(ttk.Frame):
         # (Farben können hier angepasst werden)
         self.tree.tag_configure('archived', foreground='#808080')  # Grau für Archivierte
         self.tree.tag_configure('pending', foreground='#E67E22')  # Orange für Nicht-Freigegebene
+        # (Rollenfarben werden jetzt in _load_and_configure_role_colors() konfiguriert)
         # --- ENDE NEU ---
 
     def _load_users_from_cache(self):
@@ -199,39 +254,69 @@ class UserManagementTab(ttk.Frame):
         if not self.all_users_data:
             return
 
+        # --- START FEHLERBEHEBUNG (TypeError bei Sortierung) ---
+        # (Regel 1 & 2: Innovativere Sortierfunktion, die Typenkonflikte vermeidet)
         def sort_key(user_item):
             value = user_item.get(self._sort_by)
-            if value is None or value == "":
-                is_date_col = self._sort_by in ['entry_date', 'last_ausbildung', 'last_schiessen', 'archived_date',
-                                                'geburtstag', 'last_seen', 'activation_date']
-                if self._sort_desc:
-                    return date.min if is_date_col else ""
-                else:
-                    return date.max if is_date_col else "~~~~"
-            if isinstance(value, str): return value.lower()
-            if self._sort_by in ['entry_date', 'last_ausbildung', 'last_schiessen', 'archived_date', 'geburtstag',
-                                 'activation_date']:
+
+            # Definiere Spaltentypen
+            date_cols = ['entry_date', 'last_ausbildung', 'last_schiessen', 'archived_date', 'geburtstag',
+                         'activation_date']
+            datetime_cols = ['last_seen']
+            numeric_cols = ['id', 'urlaub_gesamt', 'urlaub_rest', 'is_approved', 'is_archived']
+
+            # 1. Handle Datums-Spalten
+            if self._sort_by in date_cols:
+                if value is None or value == "":
+                    # Sende leere Werte ans Ende (aufsteigend) oder Anfang (absteigend)
+                    return date.max if not self._sort_desc else date.min
                 try:
                     if isinstance(value, datetime): return value.date()
                     if isinstance(value, date): return value
-                    # Das Datenbankformat YYYY-MM-DD muss für das Parsen beibehalten werden
-                    return datetime.strptime(str(value), '%Y-%m-%d').date()
-                except:
-                    return date.min
-            if self._sort_by == 'last_seen':
+                    # Handle DB-String-Format (YYYY-MM-DD)
+                    return datetime.strptime(str(value).split(' ')[0], '%Y-%m-%d').date()
+                except (ValueError, TypeError):
+                    return date.max if not self._sort_desc else date.min
+
+            # 2. Handle DateTime-Spalten
+            elif self._sort_by in datetime_cols:
+                if value is None or value == "":
+                    return datetime.max if not self._sort_desc else datetime.min
                 try:
                     if isinstance(value, datetime): return value
                     if isinstance(value, date): return datetime.combine(value, datetime.min.time())
+                    # Handle DB-String-Format (YYYY-MM-DD HH:MM:SS)
                     return datetime.strptime(str(value), '%Y-%m-%d %H:%M:%S')
+                except (ValueError, TypeError):
+                    return datetime.max if not self._sort_desc else datetime.min
+
+            # 3. Handle Numerische-Spalten
+            elif self._sort_by in numeric_cols:
+                if value is None or value == "":
+                    # Sende leere Werte ans Ende (aufsteigend) oder Anfang (absteigend)
+                    return float('inf') if not self._sort_desc else float('-inf')
+                try:
+                    return float(value)
+                except (ValueError, TypeError):
+                    return float('inf') if not self._sort_desc else float('-inf')
+
+            # 4. Handle String-Spalten (Default)
+            else:
+                if value is None:
+                    value = ""
+                try:
+                    # Leere Strings ans Ende (aufsteigend) oder Anfang (absteigend) schieben
+                    val_str = str(value).lower()
+                    if val_str == "":
+                        return "~~~~~" if not self._sort_desc else ""
+                    return val_str
                 except:
-                    return datetime.min
-            try:
-                if isinstance(value, (int, float)): return value
-                return float(value)
-            except:
-                return float('-inf')
+                    return "~~~~~" if not self._sort_desc else ""
+
+        # --- ENDE FEHLERBEHEBUNG ---
 
         sorted_users = sorted(self.all_users_data, key=sort_key, reverse=self._sort_desc)
+
         current_tree_columns = list(self.tree['columns'])
         if not current_tree_columns: current_tree_columns = list(self.all_columns.keys())
 
@@ -261,20 +346,35 @@ class UserManagementTab(ttk.Frame):
                         value = ""  # Leere Strings bei fehlendem/ungültigem Datum
                     # --- ENDE KORRIGIERTER CODEBLOCK ---
                 elif col_key == 'last_seen':
+                    DATE_TIME_FORMAT = '%d.%m.%Y %H:%M'
                     if isinstance(value, datetime):
                         # Auch hier das Datumsformat anpassen
-                        value = value.strftime('%d.%m.%Y %H:%M')
+                        value = value.strftime(DATE_TIME_FORMAT)
+                    elif isinstance(value, str) and value:
+                        try:
+                            # Parsen mit DB-Format ('%Y-%m-%d %H:%M:%S'), Formatieren mit Anzeige-Format
+                            parsed_dt = datetime.strptime(value, '%Y-%m-%d %H:%M:%S')
+                            value = parsed_dt.strftime(DATE_TIME_FORMAT)
+                        except:
+                            value = ""  # Fallback
                     else:
                         value = ""
                 values_to_insert.append(value)
 
-            # --- NEU: Tags für Hervorhebung bestimmen ---
+            # --- MODIFIZIERT: Tags für Hervorhebung bestimmen (inkl. Rollen) ---
             user_tags = []
             if user.get('is_archived') == 1:
                 user_tags.append('archived')
             elif user.get('is_approved') == 0:
                 user_tags.append('pending')
-            # --- ENDE NEU ---
+            else:
+                # --- INNOVATION (Regel 2 & 4): Wende dynamische Rollenfarbe an ---
+                user_role = str(user.get('role', '')).lower()
+                if user_role in self.role_color_map:
+                    # Weise den vorkonfigurierten Tag-Namen zu
+                    user_tags.append(self.role_color_map[user_role])
+                # --- ENDE INNOVATION ---
+            # --- ENDE MODIFIKATION ---
 
             try:
                 # --- MODIFIZIERT: tags=tuple(user_tags) hinzugefügt ---
@@ -614,21 +714,27 @@ class UserManagementTab(ttk.Frame):
         except Exception as e:
             messagebox.showerror("Fehler", f"Fehler beim Prüfen der Freischaltungen:\n{e}", parent=self)
 
+    # --- INNOVATION (Regel 2 & 4): Neuer Callback ---
+    def on_roles_changed(self):
+        """
+        Wird aufgerufen, wenn der Rollen-Dialog geschlossen wird.
+        Lädt die Rollenfarben neu (aus der DB) UND aktualisiert
+        die Benutzerliste. (Regel 1 & 2)
+        """
+        print("[UserMgmtTab] Rollenverwaltung geschlossen. Lade Farben und Daten neu.")
+        self._load_and_configure_role_colors()
+        self.refresh_data()
+
+    # --- ENDE INNOVATION ---
+
     # --- NEUE METHODE FÜR ROLLENVERWALTUNG (Regel 4) ---
     def open_role_management(self):
         """
         Öffnet den Dialog zur Rollenverwaltung.
-        Als Callback wird self.refresh_data übergeben, damit die
-        Treeview (mit Rollennamen) und die Rollenliste für den
-        UserEditWindow-Dialog (über get_allowed_roles) aktualisiert werden.
         """
-        # HINWEIS: Wir rufen self.refresh_data als Callback auf.
-        # Dies lädt die Benutzerliste neu (Regel 1, falls sich Rollennamen ändern).
-        # Es löst KEIN Neuladen der Rollen in self.admin_window.get_allowed_roles() aus.
-        # Dies ist eine strukturelle Schwäche im alten Code.
-        # Wir gehen davon aus, dass get_allowed_roles() die Daten bei JEDEM Aufruf
-        # neu aus der DB lädt.
-        RoleManagementDialog(self, on_close_callback=self.refresh_data)
+        # --- INNOVATION (Regel 2 & 4): Ruft neuen Callback auf ---
+        # (Verwendet die NEUE Datei role_management_dialog.py)
+        RoleManagementDialog(self, on_close_callback=self.on_roles_changed)
     # --- ENDE NEUE METHODE ---
 
 
@@ -675,3 +781,4 @@ class ColumnChooser(tk.Toplevel):
                 new_visible.append(key)
         self.callback(new_visible);
         self.destroy()
+

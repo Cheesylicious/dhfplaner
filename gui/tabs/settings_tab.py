@@ -1,15 +1,19 @@
+# gui/tabs/settings_tab.py
 import tkinter as tk
 from tkinter import ttk, messagebox, simpledialog
 # --- NEUE IMPORTE ---
 from database.db_core import (
     run_db_update_v1, run_db_update_is_approved,
     load_config_json, save_config_json, VACATION_RULES_CONFIG_KEY,
-    run_db_update_activation_date,  # NEUER IMPORT
+    run_db_update_activation_date,
 
     # --- NEUE IMPORTE FÜR ROLLEN-MIGRATIONEN (Regel 4) ---
     run_db_migration_add_role_permissions,
-    run_db_migration_add_role_window_type
-    # --- ENDE NEU ---
+    run_db_migration_add_role_window_type,
+
+    # --- INNOVATION (Regel 2 & 4): Import für Farb-Migration ---
+    run_db_migration_add_role_color
+    # --- ENDE INNOVATION ---
 )
 from database.db_users import admin_batch_update_vacation_entitlements
 
@@ -70,7 +74,7 @@ class SettingsTab(ttk.Frame):
 
         ttk.Button(general_frame,
                    text="DB Update: 'Rollen-Fenstertyp' Spalte hinzufügen",
-                   command=self.run_role_window_type_migration,  # NEUE FUNKTION
+                   command=self.run_role_window_type_migration,
                    style='Success.TButton').pack(fill='x', padx=5, pady=5)
         # --- ENDE NEU ---
 
@@ -81,9 +85,20 @@ class SettingsTab(ttk.Frame):
 
         ttk.Button(general_frame,
                    text="DB Update: 'Rollen-Berechtigungen' Spalten hinzufügen",
-                   command=self.run_role_migration,  # NEUE FUNKTION
+                   command=self.run_role_migration,
                    style='Success.TButton').pack(fill='x', padx=5, pady=5)
         # --- ENDE NEU ---
+
+        # --- INNOVATION (Regel 2 & 4): Button für Rollen-Farben ---
+        ttk.Label(general_frame,
+                  text="Funktion für Rollen-Farben hinzufügen:",
+                  font=('Segoe UI', 10, 'bold')).pack(anchor='w', pady=(10, 5))
+
+        ttk.Button(general_frame,
+                   text="DB Update: 'Rollen-Farbe' (color_hex) Spalte hinzufügen",
+                   command=self.run_role_color_migration,  # NEUE FUNKTION
+                   style='Info.TButton').pack(fill='x', padx=5, pady=5)
+        # --- ENDE INNOVATION ---
 
         # Separator
         ttk.Separator(general_frame, orient='horizontal').pack(fill='x', pady=15)
@@ -105,7 +120,7 @@ class SettingsTab(ttk.Frame):
 
         ttk.Button(general_frame,
                    text="DB Update: 'Aktivierungsdatum' Spalte hinzufügen",
-                   command=self.run_update_activation_date,  # NEUE FUNKTION
+                   command=self.run_update_activation_date,
                    style='Danger.TButton').pack(fill='x', padx=5, pady=5)
         # --- ENDE NEU ---
 
@@ -212,6 +227,23 @@ class SettingsTab(ttk.Frame):
             messagebox.showerror("Fehler", f"Update fehlgeschlagen:\n{message}", parent=self)
 
     # --- ENDE NEU ---
+
+    # --- INNOVATION (Regel 2 & 4): Handler für Farb-Migration ---
+    def run_role_color_migration(self):
+        """Löst das Update für die Rollen-Farben-Spalte aus."""
+        if not messagebox.askyesno("Update bestätigen",
+                                   "Möchten Sie die Datenbank-Migration für die Rollen-Farben (color_hex) jetzt ausführen?\n\n"
+                                   "Dieser Vorgang ist sicher und fügt die Spalte nur hinzu, wenn sie fehlt.",
+                                   parent=self):
+            return
+
+        success, message = run_db_migration_add_role_color()
+        if success:
+            messagebox.showinfo("Erfolg", message, parent=self)
+        else:
+            messagebox.showerror("Fehler", f"Update fehlgeschlagen:\n{message}", parent=self)
+
+    # --- ENDE INNOVATION ---
 
     def run_update_is_approved(self):
         """Löst das Update für die is_approved Spalte aus."""
