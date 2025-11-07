@@ -98,8 +98,11 @@ try:
         run_db_migration_add_role_permissions,  # (aus vorherigem Schritt)
 
         # --- NEUER EXPORT (Regel 4) ---
-        run_db_migration_add_role_window_type
-        # --- ENDE NEU ---
+        run_db_migration_add_role_window_type,
+
+        # --- INNOVATION (Regel 2 & 4): Export für Farb-Migration ---
+        run_db_migration_add_role_color
+        # --- ENDE INNOVATION ---
     )
 except ImportError as e:
     print(f"FEHLER beim Re-Import von db_migration_fixes: {e}")

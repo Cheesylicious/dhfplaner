@@ -14,7 +14,8 @@ ALL_ADMIN_TABS = [
 
 def get_all_roles_details():
     """
-    Ruft alle Rollen inkl. Hierarchie, Berechtigungen UND HAUPTFENSTER ab.
+    Ruft alle Rollen inkl. Hierarchie, Berechtigungen, HAUPTFENSTER
+    UND FARBE ab. (INNOVATION Regel 2)
     KORRIGIERT: Verwendet 'role_name' (gemäß DB-Schema).
     """
     conn = create_connection()
@@ -26,12 +27,13 @@ def get_all_roles_details():
         cursor = conn.cursor(dictionary=True)
 
         # --- KORREKTUR (Fehlerbehebung): 'name' -> 'role_name' ---
+        # --- INNOVATION (Regel 2): 'color_hex' hinzugefügt ---
         cursor.execute(
-            "SELECT `id`, `role_name`, `hierarchy_level`, `permissions`, `main_window` "
+            "SELECT `id`, `role_name`, `hierarchy_level`, `permissions`, `main_window`, `color_hex` "
             "FROM `roles` "
             "ORDER BY `hierarchy_level` ASC, `role_name` COLLATE utf8mb4_unicode_ci"
         )
-        # --- ENDE KORREKTUR ---
+        # --- ENDE KORREKTUR & INNOVATION ---
 
         roles_from_db = cursor.fetchall()
 
@@ -51,14 +53,17 @@ def get_all_roles_details():
                 "hierarchy_level": role.get('hierarchy_level', 99),
                 "permissions": permissions_dict,
                 # (main_window ist korrekt)
-                "main_window": role.get('main_window', 'main_user_window')
+                "main_window": role.get('main_window', 'main_user_window'),
+                # --- INNOVATION (Regel 2): Farbe aus DB lesen, Fallback Hellgrün ---
+                "color": role.get('color_hex', '#E8F5E9')
+                # --- ENDE INNOVATION ---
             })
 
         return roles_for_gui
 
     except Exception as e:
-        if "Unknown column" in str(e):
-            print(f"DB FEHLER: {e}. Haben Sie die Migrationen (db_schema.py) durchgeführt?")
+        if "Unknown column" in str(e) or "no such column" in str(e):
+            print(f"DB FEHLER: {e}. Haben Sie die Migrationen (Schritt 1) durchgeführt? (ALTER TABLE ... ADD COLUMN color_hex)")
             # --- KORREKTUR (Fehlerbehebung): Fallback ruft sich selbst auf (korrekt) ---
             return get_all_roles_legacy()  # Fallback
             # --- ENDE KORREKTUR ---
@@ -92,7 +97,9 @@ def get_all_roles_legacy():
             "name": role['role_name'],
             "hierarchy_level": 99,
             "permissions": {},
-            "main_window": 'main_admin_window' if role['id'] in admin_ids else 'main_user_window'
+            "main_window": 'main_admin_window' if role['id'] in admin_ids else 'main_user_window',
+            # --- INNOVATION (Regel 2): Fallback-Farbe ---
+            "color": "#E8F5E9"
         } for role in roles_from_db]
 
     except Exception as e:
@@ -107,7 +114,8 @@ def get_all_roles_legacy():
 def create_role(role_name_input):
     """
     Erstellt eine neue Rolle mit Standard-Hierarchie (99),
-    leeren Berechtigungen und Standard-Hauptfenster ('main_user_window').
+    leeren Berechtigungen, Standard-Hauptfenster ('main_user_window')
+    UND Standardfarbe (INNOVATION Regel 2).
     KORRIGIERT: Verwendet 'role_name'.
     """
     if not role_name_input or len(role_name_input.strip()) == 0:
@@ -125,13 +133,17 @@ def create_role(role_name_input):
         default_permissions = json.dumps({})
         default_hierarchy = 99
         default_window = 'main_user_window'
+        # --- INNOVATION (Regel 2): Standardfarbe beim Erstellen ---
+        default_color = '#E8F5E9'  # Hellgrün
+        # --- ENDE INNOVATION ---
 
         # --- KORREKTUR (Fehlerbehebung): 'name' -> 'role_name' ---
+        # --- INNOVATION (Regel 2): 'color_hex' hinzugefügt ---
         cursor.execute(
-            "INSERT INTO `roles` (`role_name`, `hierarchy_level`, `permissions`, `main_window`) VALUES (%s, %s, %s, %s)",
-            (role_name_input.strip(), default_hierarchy, default_permissions, default_window)
+            "INSERT INTO `roles` (`role_name`, `hierarchy_level`, `permissions`, `main_window`, `color_hex`) VALUES (%s, %s, %s, %s, %s)",
+            (role_name_input.strip(), default_hierarchy, default_permissions, default_window, default_color)
         )
-        # --- ENDE KORREKTUR ---
+        # --- ENDE KORREKTUR & INNOVATION ---
 
         conn.commit()
         return True
@@ -195,9 +207,8 @@ def delete_role(role_id):
 
 def save_roles_details(roles_data_list):
     """
-    Speichert die komplette Hierarchie, Berechtigungen UND HAUPTFENSTER.
-    (Diese Funktion war bereits korrekt, da sie 'name' nicht verwendet hat,
-     sondern nur 'hierarchy_level', 'permissions' und 'main_window' schreibt.)
+    Speichert die komplette Hierarchie, Berechtigungen, HAUPTFENSTER
+    UND FARBE (INNOVATION Regel 2).
     """
     conn = create_connection()
     if not conn:
@@ -213,18 +224,24 @@ def save_roles_details(roles_data_list):
             new_level = index + 1
             permissions_json = json.dumps(role_data.get('permissions', {}))
             main_window = role_data.get('main_window', 'main_user_window')
+            # --- INNOVATION (Regel 2): Farbe mitspeichern ---
+            color_hex = role_data.get('color', '#E8F5E9')
+            # --- ENDE INNOVATION ---
 
             update_queries.append(
-                (new_level, permissions_json, main_window, role_id)
+                # --- INNOVATION (Regel 2): color_hex hinzugefügt ---
+                (new_level, permissions_json, main_window, color_hex, role_id)
             )
 
         cursor.executemany(
-            "UPDATE `roles` SET `hierarchy_level` = %s, `permissions` = %s, `main_window` = %s WHERE `id` = %s",
+            # --- INNOVATION (Regel 2): color_hex hinzugefügt ---
+            "UPDATE `roles` SET `hierarchy_level` = %s, `permissions` = %s, `main_window` = %s, `color_hex` = %s WHERE `id` = %s",
             update_queries
         )
+        # --- ENDE INNOVATION ---
 
         conn.commit()
-        return True, "Hierarchie, Berechtigungen und Hauptfenster gespeichert."
+        return True, "Hierarchie, Berechtigungen und Farben gespeichert."
 
     except Exception as e:
         msg = f"Fehler beim Speichern der Rollendetails: {e}"

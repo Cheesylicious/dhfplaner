@@ -223,3 +223,40 @@ def run_db_migration_add_role_window_type():
         if conn and conn.is_connected():
             conn.close()
 # --- ENDE NEUE FUNKTION ---
+
+# --- INNOVATION (Regel 2 & 4): NEUE FUNKTION FÜR ROLLEN-FARBEN ---
+def run_db_migration_add_role_color():
+    """
+    (INNOVATION Regel 2 & 4)
+    Fügt die Spalte 'color_hex' zur 'roles'-Tabelle hinzu,
+    um die UI-Farbe für Rollen zu speichern.
+    Verwendet die gleiche "SHOW COLUMNS"-Logik wie die anderen Funktionen in dieser Datei.
+    """
+    conn = create_connection()
+    if not conn:
+        return False, "Keine DB-Verbindung."
+
+    try:
+        cursor = conn.cursor()
+        messages = []
+
+        # 1. Prüfen und Hinzufügen von 'color_hex'
+        cursor.execute("SHOW COLUMNS FROM `roles` LIKE 'color_hex'")
+        if not cursor.fetchone():
+            # Standard Hellgrün (kann hier geändert werden)
+            cursor.execute("ALTER TABLE `roles` ADD COLUMN `color_hex` VARCHAR(7) DEFAULT '#E8F5E9'")
+            messages.append("'color_hex' Spalte hinzugefügt.")
+        else:
+            messages.append("'color_hex' existiert bereits.")
+
+        conn.commit()
+        return True, "Rollen-Farb-Migration erfolgreich. " + " ".join(messages)
+
+    except Exception as e:
+        conn.rollback()
+        traceback.print_exc()
+        return False, f"Fehler bei Rollen-Farb-Migration: {e}"
+    finally:
+        if conn and conn.is_connected():
+            conn.close()
+# --- ENDE INNOVATION ---
