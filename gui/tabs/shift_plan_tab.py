@@ -9,6 +9,13 @@
 # Das Fehlen dieser Property hat dazu geführt, dass der
 # ActionUpdateHandler die Ist-Stunden beim Hinzufügen
 # einer Schicht genullt hat (Cache-Problem).
+#
+# --- INNOVATION (Regel 2): Latenz in 'refresh_plan' behoben ---
+# Die Methode 'refresh_plan' wurde so geändert, dass sie nicht mehr
+# synchron die Daten lädt, sondern den Cache invalidiert und
+# den asynchronen Ladevorgang 'build_shift_plan_grid(data_ready=False)'
+# anstößt. Dies verhindert das Einfrieren der UI, wenn andere Tabs
+# ein Neuladen anfordern.
 
 import tkinter as tk
 from tkinter import ttk, messagebox
@@ -172,6 +179,8 @@ class ShiftPlanTab(ttk.Frame):
         self.update_idletasks()
 
         # Starte den eigentlichen Zeichenvorgang im Renderer
+        # HINWEIS: Wir übergeben 'is_sync_refresh=False' (oder nichts),
+        # damit der Renderer die Standard-Methode '_finalize_ui_after_render' aufruft.
         self.renderer.build_shift_plan_grid(year, month, data_ready=True)
 
         # Hinweis: self.renderer.build_shift_plan_grid ruft jetzt
@@ -271,42 +280,45 @@ class ShiftPlanTab(ttk.Frame):
             messagebox.showerror("Fehler bei Generierung", error_message, parent=self)
 
         # Plan in jedem Fall neu laden, um Ergebnisse (oder Fehlerzustand) anzuzeigen
-        self.build_shift_plan_grid(year, month)
+        # (Startet den asynchronen Lader mit Ladebalken)
+        self.build_shift_plan_grid(year, month, data_ready=False)
 
-    # --- Synchrones Refresh (wird von außen aufgerufen, z.B. MainAdminWindow) ---
+    # --- KORRIGIERT (Regel 2): Asynchrones Refresh ---
 
     def refresh_plan(self):
         """
-        Erzwingt ein synchrones Neuladen und Neuzeichnen der Daten.
+        Erzwingt ein ASYNCHRONES Neuladen und Neuzeichnen der Daten.
         (Wird oft von anderen Tabs aufgerufen, wenn sich Daten ändern)
+
+        INNOVATION (Regel 2):
+        Lädt nicht mehr synchron, sondern invalidiert den Cache und
+        ruft den Standard-Ladevorgang 'build_shift_plan_grid' auf,
+        der den Ladebalken anzeigt und im Hintergrund lädt.
         """
-        print("[ShiftPlanTab] Starte synchronen Refresh...")
+        print("[ShiftPlanTab] Starte asynchronen Refresh (von extern getriggert)...")
         year, month = self.app.current_display_date.year, self.app.current_display_date.month
-        try:
-            print("   -> Lade Daten synchron für Refresh...")
-            # (Kein Ladebalken-Callback hier)
-            self.data_manager.load_and_process_data(year, month)
-            print("   -> Daten für Refresh geladen.")
-        except Exception as e:
-            messagebox.showerror("Fehler", f"Fehler beim Aktualisieren der Plandaten: {e}", parent=self)
-            return
 
-        if self.renderer:
-            print("   -> Zeichne Grid neu für Refresh...")
-            # (Renderer ruft _finalize_ui_after_render_sync auf)
-            self.renderer.build_shift_plan_grid(year, month, data_ready=True, is_sync_refresh=True)
-            print("   -> Grid für Refresh neu gezeichnet.")
+        # 1. P5-Cache invalidieren (WICHTIG!)
+        # Stellt sicher, dass die Daten WIRKLICH neu von der DB geladen werden.
+        if hasattr(self, 'data_manager') and hasattr(self.data_manager, 'invalidate_month_cache'):
+            print(f"   -> Invalidiere DM-Cache für {year}-{month} für Refresh.")
+            self.data_manager.invalidate_month_cache(year, month)
         else:
-            print("[FEHLER] Renderer nicht verfügbar für Refresh.")
+            print("   -> [WARNUNG] DataManager oder invalidate_month_cache nicht gefunden. Cache nicht invalidiert.")
 
-    def _finalize_ui_after_render_sync(self):
-        """
-        Wird vom Renderer nach einem SYNCHRONEN Refresh aufgerufen.
-        (Aktualisiert nur die Scrollregion, versteckt keinen Ladebalken)
-        """
-        if self.ui.inner_frame.winfo_exists() and self.ui.canvas.winfo_exists():
-            self.ui.inner_frame.update_idletasks()
-            self.ui.canvas.config(scrollregion=self.ui.canvas.bbox("all"))
+        # 2. Standard-Ladevorgang (asynchron) aufrufen
+        # 'data_ready=False' erzwingt das Neuladen im Thread und zeigt den Ladebalken.
+        print("   -> Rufe build_shift_plan_grid(data_ready=False) auf.")
+        self.build_shift_plan_grid(year, month, data_ready=False)
+
+        print("[ShiftPlanTab] Asynchroner Refresh-Auftrag gestartet.")
+
+    # --- ENTFERNT (Regel 4): Nicht mehr benötigt ---
+    # def _finalize_ui_after_render_sync(self):
+    # (Diese Methode wurde nur vom alten, synchronen refresh_plan verwendet.
+    # Der neue asynchrone Refresh nutzt den Standard-Pfad, der
+    # '_finalize_ui_after_render' aufruft, um den Ladebalken zu verstecken.)
+    # --- ENDE ENTFERNT ---
 
     # --- NEU: Kompatibilitäts-Properties (Fix für Regel 1) ---
     # Diese fangen alte Zugriffe (z.B. self.inner_frame) ab und

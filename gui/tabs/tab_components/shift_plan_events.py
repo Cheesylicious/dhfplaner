@@ -1,4 +1,16 @@
 # gui/tabs/tab_components/shift_plan_events.py
+# KORRIGIERT: Behebt, dass "Schichtplan prüfen" Schichten ignoriert hat (z.B. "6"),
+#             obwohl diese als unterbesetzt (rot) markiert wurden.
+#             Die Prüfung iteriert jetzt über die SOLL-Stärken (min_staffing)
+#             statt über die DB-Liste (get_ordered_shift_abbrevs).
+#
+# --- INNOVATION (Regel 2): Latenz bei Shortcuts behoben ---
+# Die synchrone, blockierende Konfliktprüfung (get_conflicts_for_shift)
+# in der '_on_key_press'-Methode wurde entfernt. Shortcuts rufen jetzt
+# sofort den asynchronen 'save_shift_entry_and_refresh'-Handler auf,
+# was die Latenz eliminiert. Visuelle Konflikte werden (wie gewünscht)
+# NACH der Eingabe angezeigt.
+
 import tkinter as tk
 from tkinter import ttk, messagebox, simpledialog
 from datetime import date, timedelta, datetime, time
@@ -8,7 +20,7 @@ import threading
 # Importiere die Helfer-Module
 from database.db_users import get_ordered_users_for_schedule
 from gui.request_lock_manager import RequestLockManager
-from database.db_shifts import get_ordered_shift_abbrevs
+from database.db_shifts import get_ordered_shift_abbrevs  # Bleibt für andere Funktionen (z.B. Generator)
 from ...dialogs.generator_settings_window import \
     GeneratorSettingsWindow
 # --- Import des Generators ---
@@ -73,6 +85,7 @@ class ShiftPlanEvents:
                                 parent=self.tab)
             return
         try:
+            # Ruft den (jetzt asynchronen) Admin-Handler auf
             self.tab.action_handler.delete_shift_plan_by_admin(year, month)
         except Exception as e:
             messagebox.showerror("Schwerer Fehler", f"Ein unerwarteter Fehler ist aufgetreten:\n{e}",
@@ -89,6 +102,7 @@ class ShiftPlanEvents:
         if not messagebox.askyesno("WARNUNG: Alle Sicherungen aufheben", msg, icon='warning', parent=self.tab):
             return
         try:
+            # Ruft den (jetzt asynchronen) Admin-Handler auf
             self.tab.action_handler.unlock_all_shifts_for_month(year, month)
         except Exception as e:
             messagebox.showerror("Schwerer Fehler", f"Ein unerwarteter Fehler ist aufgetreten:\n{e}",
@@ -163,9 +177,7 @@ class ShiftPlanEvents:
                                  "Tageszählungen (daily_counts) nicht im DataManager gefunden.\nBitte warten Sie, bis der Plan geladen ist.",
                                  parent=self.tab)
             return
-        shifts_to_check_data = get_ordered_shift_abbrevs(include_hidden=False)
-        shifts_to_check = [item['abbreviation'] for item in shifts_to_check_data if
-                           item.get('check_for_understaffing')]
+
         understaffing_found = False
 
         # UI-Element aus der ui-Instanz holen
@@ -176,8 +188,9 @@ class ShiftPlanEvents:
             current_date = date(year, month, day)
             date_str = current_date.strftime('%Y-%m-%d')
             min_staffing = self.tab.data_manager.get_min_staffing_for_date(current_date)
-            for shift in shifts_to_check:
-                min_req = min_staffing.get(shift)
+
+            for shift, min_req in min_staffing.items():
+
                 if min_req is not None and min_req > 0:
                     count = daily_counts.get(date_str, {}).get(shift, 0)
                     if count < min_req:
@@ -186,6 +199,7 @@ class ShiftPlanEvents:
                         ttk.Label(result_frame,
                                   text=f"Unterbesetzung am {current_date.strftime('%d.%m.%Y')}: Schicht '{shift_name}' ({shift}) - {count} von {min_req} anwesend.",
                                   foreground="red", font=("Segoe UI", 10)).pack(anchor="w")
+
         if not understaffing_found:
             ttk.Label(result_frame, text="Keine Unterbesetzungen gefunden.",
                       foreground="green", font=("Segoe UI", 10, "bold")).pack(anchor="w")
@@ -236,6 +250,7 @@ class ShiftPlanEvents:
 
             if lock_status:
                 print(f"[Shortcut] Entsichere: U:{user_id} D:{day}")
+                # Ruft den (jetzt asynchronen) ActionHandler auf
                 self.tab.action_handler.unlock_shift(user_id, date_str)
             else:
                 securable_shifts = ["T.", "N.", "6"]
@@ -243,6 +258,7 @@ class ShiftPlanEvents:
                                                                                                "EU", "WF", "U?"]
                 if is_securable_or_fixed and current_shift:
                     print(f"[Shortcut] Sichere: U:{user_id} D:{day} -> '{current_shift}'")
+                    # Ruft den (jetzt asynchronen) ActionHandler auf
                     self.tab.action_handler.secure_shift(user_id, date_str, current_shift)
                 else:
                     self.tab.bell()
@@ -252,19 +268,24 @@ class ShiftPlanEvents:
         if key in self.tab.shortcut_map:
             target_shift_abbrev = self.tab.shortcut_map[key]
 
-            # Gültigkeit PRÜFEN (Regel 2: Keine DB-Latenz!)
-            if not hasattr(self.tab.data_manager, 'get_conflicts_for_shift'):
-                print("[FEHLER] PlanningAssistant-Funktion nicht im DataManager gefunden.")
-                return
+            # --- INNOVATION (Regel 2): Blockierende Prüfung entfernt ---
+            # Die synchrone Konfliktprüfung wurde entfernt, um die Latenz
+            # bei der Shortcut-Nutzung zu beseitigen.
+            #
+            # ALTE (BLOCKIERENDE) PRÜFUNG:
+            # if not hasattr(self.tab.data_manager, 'get_conflicts_for_shift'):
+            #     print("[FEHLER] PlanningAssistant-Funktion nicht im DataManager gefunden.")
+            #     return
+            #
+            # conflicts = self.tab.data_manager.get_conflicts_for_shift(user_id, date_obj, target_shift_abbrev)
+            #
+            # if conflicts:
+            #     print(f"Shortcut blockiert: {conflicts[0]}")
+            #     self.tab.bell()
+            #     return
+            # --- ENDE INNOVATION ---
 
-            conflicts = self.tab.data_manager.get_conflicts_for_shift(user_id, date_obj, target_shift_abbrev)
-
-            if conflicts:
-                print(f"Shortcut blockiert: {conflicts[0]}")
-                self.tab.bell()
-                return
-
-            # Aktion AUSFÜHREN
+            # Aktion AUSFÜHREN (ruft den asynchronen Handler auf)
             print(f"[Shortcut] Weise zu: U:{user_id} D:{day} -> '{target_shift_abbrev}'")
             self.tab.action_handler.save_shift_entry_and_refresh(
                 user_id,
@@ -393,8 +414,8 @@ class ShiftPlanEvents:
                     if hasattr(self.tab.app, 'trigger_shift_plan_preload'):
                         self.tab.app.trigger_shift_plan_preload(new_year, new_month)
 
-                    # Starte das Neuladen im Haupt-Tab
-                    self.tab.build_shift_plan_grid(new_year, new_month)
+                    # Starte das Neuladen im Haupt-Tab (asynchron)
+                    self.tab.build_shift_plan_grid(new_year, new_month, data_ready=False)
 
                 dialog.destroy()
 

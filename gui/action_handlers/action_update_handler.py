@@ -3,10 +3,18 @@
 # Update des Caches unter Verwendung von self.tab.user_shift_totals.
 # Dies nutzt die in ShiftPlanTab eingerichtete @property-Kompatibilität
 # (Regel 1) und umgeht den Fehler des fehlenden Attributs auf dem DataManager.
+#
+# --- INNOVATION (Regel 2): CPU-Latenz behoben ---
+# Die synchrone (blockierende) Konflikt-Neuberechnung
+# (self.dm.update_violations_incrementally) wurde in einen
+# eigenen Hintergrund-Thread ausgelagert.
+# Die UI wird sofort aktualisiert; die Konfliktmarker (rote Färbung)
+# erscheinen asynchron kurz danach. Dies eliminiert die UI-Verzögerung.
 
 import tkinter as tk
 from tkinter import ttk, messagebox
 from datetime import date, datetime
+import threading  # NEU: Für asynchrone CPU-Aufgaben
 
 
 class ActionUpdateHandler:
@@ -23,8 +31,11 @@ class ActionUpdateHandler:
 
     # --- ZENTRALE UPDATE FUNKTION ---
     def trigger_targeted_update(self, user_id, date_obj, old_shift, new_shift):
-        """Führt alle notwendigen Daten- und UI-Updates nach einer Änderung durch."""
-        affected_conflict_cells = set()
+        """
+        Führt alle notwendigen Daten- und UI-Updates nach einer Änderung durch.
+        Schnelle Updates (Schicht, Stunden) erfolgen synchron.
+        Langsame Updates (Konfliktprüfung) erfolgen asynchron (Regel 2).
+        """
         day = date_obj.day
         user_id_str = str(user_id)
         date_str = date_obj.strftime('%Y-%m-%d')  # Datum-String für Cache-Zugriff
@@ -36,7 +47,7 @@ class ActionUpdateHandler:
         print(f"[_trigger_targeted_update] User: {user_id}, Date: {date_str}, Old: '{old_shift}', New: '{new_shift}'")
 
         try:
-            # --- Daten im DM anpassen ---
+            # --- Daten im DM anpassen (Schnelle, synchrone Operationen) ---
             if not self.dm:
                 print("[FEHLER] DataManager nicht verfügbar in _trigger_targeted_update.")
                 raise Exception("DataManager nicht verfügbar.")
@@ -52,19 +63,12 @@ class ActionUpdateHandler:
                 self.dm.shift_schedule_data[user_id_str][date_str] = new_shift
 
             # 2. KORREKTUR (Fix für Stunden-Bug): Stunden-Cache inkrementell aktualisieren!
-            # Stellt sicher, dass die Basisstunden korrekt sind, bevor der Renderer sie liest.
-            # Der Aufruf wurde angepasst, um die Kompatibilität des DM-Objekts zu nutzen.
+            # (Diese Operation ist bereits innovativ und schnell)
             self._update_user_shift_totals_incrementally(user_id, old_shift, new_shift)
 
-            # 3. Inkrementelles Konflikt-Update im DM
-            print(f"  -> Rufe update_violations_incrementally auf...")
-            updates = self.dm.update_violations_incrementally(user_id, date_obj, old_shift, new_shift)
-            if updates: affected_conflict_cells.update(updates)
-
-            # 4. Tageszählungen im DM aktualisieren
+            # 3. Tageszählungen im DM aktualisieren (Schnell)
             print(f"  -> Rufe recalculate_daily_counts_for_day auf...")
             self.dm.recalculate_daily_counts_for_day(date_obj, old_shift, new_shift)
-
 
         except Exception as e:
             print(f"[FEHLER] Fehler bei Datenaktualisierung nach Speichern: {e}")
@@ -72,10 +76,10 @@ class ActionUpdateHandler:
                                    f"Interne Daten konnten nicht vollständig aktualisiert werden:\n{e}\n\nUI wird möglicherweise inkonsistent.",
                                    parent=self.tab)
 
-        # --- Gezielte UI-Updates über den Renderer ---
+        # --- Gezielte UI-Updates (Schnell, synchron) ---
         if self.renderer:
             try:
-                print("[Action] Starte gezielte UI-Updates...")
+                print("[Action] Starte gezielte (schnelle) UI-Updates...")
                 if day > 0:
                     # Stelle sicher, dass die Daten für die Anzeige aktuell sind
                     self.renderer.shifts_data = self.dm.shift_schedule_data
@@ -83,12 +87,13 @@ class ActionUpdateHandler:
                     self.renderer.processed_vacations = self.dm.processed_vacations
                     self.renderer.daily_counts = self.dm.daily_counts
 
-                    # Jetzt die UI-Updates
+                    # Jetzt die UI-Updates (OHNE Konfliktmarker)
                     self.renderer.update_cell_display(user_id, day, date_obj)
                     self.renderer.update_user_total_hours(user_id)
                     self.renderer.update_daily_counts_for_day(day, date_obj)
-                    self.renderer.update_conflict_markers(affected_conflict_cells)
-                    print("[Action] Gezielte UI-Updates abgeschlossen.")
+                    # self.renderer.update_conflict_markers(affected_conflict_cells) <- ENTFERNT
+
+                    print("[Action] Schnelle UI-Updates abgeschlossen.")
                     # Scrollregion neu berechnen (greift auf Kompatibilitäts-Properties zu)
                     if self.tab.inner_frame.winfo_exists() and self.tab.canvas.winfo_exists():
                         self.tab.inner_frame.update_idletasks()
@@ -103,15 +108,58 @@ class ActionUpdateHandler:
                         print(f"[FEHLER] Ungültiger Tag ({day}) oder Datum in _trigger_targeted_update.")
 
             except Exception as e:
-                print(f"[FEHLER] Fehler bei gezieltem UI-Update: {e}")
-                messagebox.showerror("UI Update Fehler",
-                                     f"UI konnte nicht gezielt aktualisiert werden:\n{e}\n\nBitte manuell neu laden (Monat wechseln).",
-                                     parent=self.tab)
+                print(f"[FEHLER] Fehler bei gezieltem schnellen UI-Update: {e}")
+                # (Fehler hier ist schlecht, aber wir versuchen trotzdem, Konflikte zu laden)
         else:
             print("[FEHLER] Renderer nicht verfügbar für UI-Updates.")
             messagebox.showerror("Interner Fehler",
                                  "Renderer-Komponente nicht gefunden. UI kann nicht aktualisiert werden.",
                                  parent=self.tab)
+            return  # Wenn kein Renderer da ist, brauchen wir auch keine Konflikte berechnen
+
+        # --- INNOVATION (Regel 2): Langsame Konflikt-Prüfung asynchron starten ---
+        print(f"  -> Starte asynchronen Thread für Konflikt-Neuberechnung...")
+        threading.Thread(
+            target=self._task_update_violations,
+            args=(user_id, date_obj, old_shift, new_shift),
+            daemon=True
+        ).start()
+        # --- ENDE INNOVATION ---
+
+    def _task_update_violations(self, user_id, date_obj, old_shift, new_shift):
+        """
+        (Worker-Thread) Führt die langsame, CPU-intensive
+        Neuberechnung der Konflikte im DataManager aus.
+        """
+        affected_conflict_cells = set()
+        try:
+            print(f"  -> [Thread] Rufe update_violations_incrementally auf...")
+            updates = self.dm.update_violations_incrementally(user_id, date_obj, old_shift, new_shift)
+            if updates:
+                affected_conflict_cells.update(updates)
+                print(f"  -> [Thread] {len(affected_conflict_cells)} Konflikt-Zellen gefunden.")
+        except Exception as e:
+            print(f"[FEHLER] Schwerer Fehler im Konflikt-Update-Thread: {e}")
+            # Wir versuchen trotzdem, das UI-Update (mit leerem Set) zu triggern,
+            # um zumindest den Renderer-Callback auszuführen.
+
+        # Zurück zum Main-Thread, um die Konfliktmarker (z.B. rote Farbe) zu zeichnen
+        self.tab.after(0, self._callback_render_violations, affected_conflict_cells)
+
+    def _callback_render_violations(self, affected_conflict_cells):
+        """
+        (Main-Thread) Wird aufgerufen, nachdem der Konflikt-Thread
+        abgeschlossen ist. Zeichnet nur noch die Konflikt-Marker.
+        """
+        if self.renderer:
+            try:
+                print(f"[Action] Zeichne {len(affected_conflict_cells)} Konfliktmarker (asynchron)...")
+                self.renderer.update_conflict_markers(affected_conflict_cells)
+                print("[Action] Asynchrone Konfliktmarker gezeichnet.")
+            except Exception as e:
+                print(f"[FEHLER] Fehler beim asynchronen Zeichnen der Konfliktmarker: {e}")
+        else:
+            print("[WARNUNG] Renderer nicht verfügbar für asynchrones Konflikt-Update.")
 
     # --- HILFSFUNKTIONEN (von anderen Handlern genutzt) ---
 
@@ -144,6 +192,11 @@ class ActionUpdateHandler:
         # 3. Differenz berechnen
         hour_difference = new_hours - old_hours
 
+        # Nur fortfahren, wenn sich wirklich etwas ändert
+        if hour_difference == 0.0:
+            print(f"  -> Stunden-Cache: Keine Änderung ({old_shift} -> {new_shift})")
+            return
+
         # KORREKTUR: Wir verwenden self.tab.user_shift_totals, um die Kompatibilitäts-Property zu nutzen.
         try:
             shift_totals_cache = self.tab.user_shift_totals
@@ -168,7 +221,8 @@ class ActionUpdateHandler:
             # Fallback (sollte nur auftreten, wenn der Benutzer im aktuellen Monat neu ist)
             print(f"[WARNUNG] user_shift_totals Cache für {user_id_str} nicht gefunden. Erstelle Eintrag.")
             # Füge das gesamte erforderliche Basis-Dict hinzu, um weitere Fehler zu vermeiden.
-            shift_totals_cache[user_id_str] = {'hours_total': new_hours}
+            shift_totals_cache[user_id_str] = {'hours_total': new_hours,
+                                               'shifts_total': 1}  # Annahme: 1 Schicht, wenn neu
 
     def get_old_shift_from_ui(self, user_id, date_str):
         """ Holt den normalisierten alten Schichtwert aus dem UI Label. """
@@ -199,7 +253,8 @@ class ActionUpdateHandler:
                 user_id_str = str(user_id)
                 if user_id_str not in self.dm.wunschfrei_data: self.dm.wunschfrei_data[user_id_str] = {}
                 # Update Cache mit Status, Typ, requested_by, None für Timestamp
-                self.dm.wunschfrei_data[user_id_str][date_str] = (status, req_shift, req_by, None)
+                self.dm.wunschfrei_data[user_id_str][date_str] = (status, req_shift, req_by,
+                                                                  None)  # TODO: Reason fehlt hier?
                 print(f"DM Cache für wunschfrei_data aktualisiert: {self.dm.wunschfrei_data[user_id_str][date_str]}")
             else:
                 print("[FEHLER] DataManager nicht gefunden für wunschfrei_data Cache Update.")

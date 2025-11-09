@@ -1,9 +1,17 @@
 # gui/action_handlers/action_request_handler.py
 # NEU: Ausgelagerte Logik für die Bearbeitung von Wunschanfragen (Regel 4)
+#
+# --- INNOVATION (Regel 2): Latenz behoben ---
+# Alle DB-Aktionen (admin_add, accept, reject, delete, reset)
+# wurden auf asynchrone "Optimistic Updates" umgestellt.
+# Die UI wird sofort aktualisiert (Cache + Renderer),
+# während die DB-Aufrufe im Hintergrund laufen.
+# Dies eliminiert das "Einfrieren" der UI bei langsamen Verbindungen.
 
 import tkinter as tk
 from tkinter import ttk, messagebox
 from datetime import date, datetime
+import threading  # NEU: Für asynchrone Operationen
 
 # DB-Importe für Wünsche
 from database.db_requests import (admin_submit_request,
@@ -32,7 +40,15 @@ class ActionRequestHandler:
         self.updater = update_handler  # Referenz auf den ActionUpdateHandler
 
     def show_wunschfrei_context_menu(self, event, user_id, date_str):
-        """Zeigt das Admin-Kontextmenü für Wunschanfragen."""
+        """
+        Zeigt das Admin-Kontextmenü für Wunschanfragen.
+        (Diese Funktion bleibt synchron, da sie nur DB-Lesezugriffe
+         oder den Aufbau des Menüs selbst durchführt)
+        """
+        # HINWEIS: get_wunschfrei_request_by_user_and_date ist ein DB-Lesezugriff.
+        # Wenn dieser bei langsamer Verbindung spürbar > 100ms dauert,
+        # müsste *sogar das Anzeigen des Menüs* asynchronisiert werden.
+        # Aktuell gehen wir davon aus, dass Lesezugriffe schnell genug sind.
         request = get_wunschfrei_request_by_user_and_date(user_id, date_str);
         context_menu = tk.Menu(self.tab, tearoff=0)
 
@@ -46,6 +62,7 @@ class ActionRequestHandler:
             request_id = request['id'];
             status = request['status'];
             requested_shift = request['requested_shift']
+            # HINWEIS: get_user_by_id ist ebenfalls ein DB-Lesezugriff
             user_info = get_user_by_id(user_id);
             user_name = f"{user_info['vorname']} {user_info['name']}" if user_info else f"User ID {user_id}"
 
@@ -87,210 +104,373 @@ class ActionRequestHandler:
 
         context_menu.tk_popup(event.x_root, event.y_root)
 
+    # --- 1. AKZEPTIEREN (X) (ASYNCHRON, REGEL 2) ---
+
     def handle_request_accept_x(self, request_id, user_id, date_str):
-        """Setzt Schicht auf 'X', aktualisiert Status und UI gezielt."""
-        success, msg = update_wunschfrei_status(request_id, "Akzeptiert")
-        if success:
-            # Aktualisiere wunschfrei_data Cache im DM (via updater)
-            self.updater.update_dm_wunschfrei_cache(user_id, date_str, "Akzeptiert", "WF", 'user')
+        """Setzt Schicht auf 'X' (Optimistic Update) und speichert asynchron."""
 
+        try:
+            date_obj = datetime.strptime(date_str, '%Y-%m-%d').date()
             old_shift_abbrev = self.updater.get_old_shift_from_ui(user_id, date_str)
-            save_success, save_msg = save_shift_entry(user_id, date_str, "X", keep_request_record=True)
+            new_shift_abbrev = "X"
+            new_status = "Akzeptiert"
 
-            if save_success:
-                try:
-                    date_obj = datetime.strptime(date_str, '%Y-%m-%d').date()
-                    self.updater.trigger_targeted_update(user_id, date_obj, old_shift_abbrev, "X")
-                except ValueError:
-                    messagebox.showerror("Fehler", "Datumsfehler.", parent=self.tab)
+            # 1. OPTIMISTIC UI UPDATE
+            self.updater.update_dm_wunschfrei_cache(user_id, date_str, new_status, "WF", 'user')
+            self.updater.trigger_targeted_update(user_id, date_obj, old_shift_abbrev, new_shift_abbrev)
+            self._update_app_frequency(old_shift_abbrev, new_shift_abbrev)
+            self._refresh_requests_tab_if_loaded()
 
-                # App-Frequenz-Update
-                if old_shift_abbrev and old_shift_abbrev in self.app.shift_frequency:
-                    self.app.shift_frequency[old_shift_abbrev] = max(0, self.app.shift_frequency[old_shift_abbrev] - 1)
-                if "X" not in self.app.shift_frequency: self.app.shift_frequency["X"] = 0
-                if "X" in self.app.shift_types_data: self.app.shift_frequency["X"] += 1
+            # 2. ASYNCHRONES SPEICHERN
+            threading.Thread(
+                target=self._task_accept_x,
+                args=(request_id, user_id, date_str, date_obj, old_shift_abbrev, new_shift_abbrev, new_status),
+                daemon=True
+            ).start()
 
-                self._refresh_requests_tab_if_loaded()
-            else:
-                messagebox.showerror("Fehler", f"Setzen auf 'X' fehlgeschlagen: {save_msg}", parent=self.tab)
-        else:
-            messagebox.showerror("Fehler", f"Status Update fehlgeschlagen: {msg}", parent=self.tab)
+        except Exception as e:
+            messagebox.showerror("Fehler", f"Fehler im Optimistic Update (Accept X): {e}", parent=self.tab)
+
+    def _task_accept_x(self, request_id, user_id, date_str, date_obj, old_shift, new_shift, new_status):
+        """ (Worker-Thread) Führt die DB-Aufrufe für 'Accept X' aus. """
+        success, msg = update_wunschfrei_status(request_id, new_status)
+        if not success:
+            self.tab.after(0, self._handle_request_failure, user_id, date_obj, new_shift, old_shift, new_status,
+                           "Ausstehend", msg)
+            return
+
+        save_success, save_msg = save_shift_entry(user_id, date_str, new_shift, keep_request_record=True)
+        if not save_success:
+            # Versuche, den Status-Update rückgängig zu machen (Best Effort)
+            update_wunschfrei_status(request_id, "Ausstehend")
+            self.tab.after(0, self._handle_request_failure, user_id, date_obj, new_shift, old_shift, new_status,
+                           "Ausstehend", save_msg)
+
+    # --- 2. AKZEPTIEREN (SCHICHT) (ASYNCHRON, REGEL 2) ---
 
     def handle_request_accept_shift(self, request_id, user_id, date_str, shift_to_set):
-        """Setzt Schicht, aktualisiert Status und UI gezielt."""
-        success, msg = update_wunschfrei_status(request_id, "Genehmigt")
-        if success:
-            self.updater.update_dm_wunschfrei_cache(user_id, date_str, "Genehmigt", shift_to_set, 'admin')
+        """Setzt Schicht (Optimistic Update) und speichert asynchron."""
 
+        try:
+            date_obj = datetime.strptime(date_str, '%Y-%m-%d').date()
             old_shift_abbrev = self.updater.get_old_shift_from_ui(user_id, date_str)
-            save_success, save_msg = save_shift_entry(user_id, date_str, shift_to_set, keep_request_record=True)
+            new_shift_abbrev = shift_to_set
+            new_status = "Genehmigt"
 
-            if save_success:
-                try:
-                    date_obj = datetime.strptime(date_str, '%Y-%m-%d').date()
-                    self.updater.trigger_targeted_update(user_id, date_obj, old_shift_abbrev, shift_to_set)
-                except ValueError:
-                    messagebox.showerror("Fehler", "Datumsfehler.", parent=self.tab)
+            # 1. OPTIMISTIC UI UPDATE
+            self.updater.update_dm_wunschfrei_cache(user_id, date_str, new_status, new_shift_abbrev, 'admin')
+            self.updater.trigger_targeted_update(user_id, date_obj, old_shift_abbrev, new_shift_abbrev)
+            self._update_app_frequency(old_shift_abbrev, new_shift_abbrev)
+            self._refresh_requests_tab_if_loaded()
 
-                if old_shift_abbrev and old_shift_abbrev in self.app.shift_frequency:
-                    self.app.shift_frequency[old_shift_abbrev] = max(0, self.app.shift_frequency[old_shift_abbrev] - 1)
-                if shift_to_set not in self.app.shift_frequency: self.app.shift_frequency[shift_to_set] = 0
-                if shift_to_set in self.app.shift_types_data: self.app.shift_frequency[shift_to_set] += 1
+            # 2. ASYNCHRONES SPEICHERN
+            threading.Thread(
+                target=self._task_accept_shift,
+                args=(request_id, user_id, date_str, date_obj, old_shift_abbrev, new_shift_abbrev, new_status),
+                daemon=True
+            ).start()
 
-                self._refresh_requests_tab_if_loaded()
-            else:
-                messagebox.showerror("Fehler", f"Setzen auf '{shift_to_set}' fehlgeschlagen: {save_msg}",
-                                     parent=self.tab)
-        else:
-            messagebox.showerror("Fehler", f"Status Update fehlgeschlagen: {msg}", parent=self.tab)
+        except Exception as e:
+            messagebox.showerror("Fehler", f"Fehler im Optimistic Update (Accept Shift): {e}", parent=self.tab)
+
+    def _task_accept_shift(self, request_id, user_id, date_str, date_obj, old_shift, new_shift, new_status):
+        """ (Worker-Thread) Führt die DB-Aufrufe für 'Accept Shift' aus. """
+        success, msg = update_wunschfrei_status(request_id, new_status)
+        if not success:
+            self.tab.after(0, self._handle_request_failure, user_id, date_obj, new_shift, old_shift, new_status,
+                           "Ausstehend", msg)
+            return
+
+        save_success, save_msg = save_shift_entry(user_id, date_str, new_shift, keep_request_record=True)
+        if not save_success:
+            update_wunschfrei_status(request_id, "Ausstehend")  # Rollback
+            self.tab.after(0, self._handle_request_failure, user_id, date_obj, new_shift, old_shift, new_status,
+                           "Ausstehend", save_msg)
+
+    # --- 3. ABLEHNEN (ASYNCHRON, REGEL 2) ---
 
     def handle_request_reject(self, request_id, user_id, date_str):
-        """Aktualisiert Status auf Abgelehnt, setzt Zelle auf Frei und aktualisiert UI gezielt."""
+        """Aktualisiert Status auf Abgelehnt (Optimistic Update) und speichert asynchron."""
+
         dialog = RejectionReasonDialog(self.tab);
         reason = dialog.reason
-        if reason is not None:
-            req_data = get_wunschfrei_request_by_id(request_id)
-            req_type = req_data.get('requested_shift', 'WF') if req_data else 'WF'
-            req_by = req_data.get('requested_by', 'user') if req_data else 'user'
+        if reason is None:
+            return  # Abbruch durch Benutzer
 
-            success, msg = update_wunschfrei_status(request_id, "Abgelehnt", reason)
-            if success:
-                self.updater.update_dm_wunschfrei_cache(user_id, date_str, "Abgelehnt", req_type, req_by, reason)
+        req_data = get_wunschfrei_request_by_id(request_id)  # (Bleibt synchron für Rollback-Daten)
+        req_type = req_data.get('requested_shift', 'WF') if req_data else 'WF'
+        req_by = req_data.get('requested_by', 'user') if req_data else 'user'
 
-                old_shift_abbrev = self.updater.get_old_shift_from_ui(user_id, date_str)
-                save_success, save_msg = save_shift_entry(user_id, date_str, "",
-                                                          keep_request_record=True)  # Setze auf Frei
-                if save_success:
-                    try:
-                        date_obj = datetime.strptime(date_str, '%Y-%m-%d').date()
-                        self.updater.trigger_targeted_update(user_id, date_obj, old_shift_abbrev, "")  # Neuer Wert ""
-                    except ValueError:
-                        messagebox.showerror("Fehler", "Datumsfehler.", parent=self.tab)
+        try:
+            date_obj = datetime.strptime(date_str, '%Y-%m-%d').date()
+            old_shift_abbrev = self.updater.get_old_shift_from_ui(user_id, date_str)
+            new_shift_abbrev = ""  # Setze auf Frei
+            new_status = "Abgelehnt"
 
-                    if old_shift_abbrev and old_shift_abbrev in self.app.shift_frequency:
-                        self.app.shift_frequency[old_shift_abbrev] = max(0,
-                                                                         self.app.shift_frequency[old_shift_abbrev] - 1)
+            # 1. OPTIMISTIC UI UPDATE
+            self.updater.update_dm_wunschfrei_cache(user_id, date_str, new_status, req_type, req_by, reason)
+            self.updater.trigger_targeted_update(user_id, date_obj, old_shift_abbrev, new_shift_abbrev)
+            self._update_app_frequency(old_shift_abbrev, new_shift_abbrev)
+            self._refresh_requests_tab_if_loaded()
 
-                    self._refresh_requests_tab_if_loaded()
-                else:
-                    messagebox.showerror("Fehler", f"Status aktualisiert, Zelle leeren fehlgeschlagen: {save_msg}",
-                                         parent=self.tab)
-            else:
-                messagebox.showerror("Fehler", f"Status Update fehlgeschlagen: {msg}", parent=self.tab)
+            # 2. ASYNCHRONES SPEICHERN
+            threading.Thread(
+                target=self._task_reject,
+                args=(request_id, user_id, date_str, date_obj, old_shift_abbrev, new_shift_abbrev, new_status, reason,
+                      req_type, req_by),
+                daemon=True
+            ).start()
+
+        except Exception as e:
+            messagebox.showerror("Fehler", f"Fehler im Optimistic Update (Reject): {e}", parent=self.tab)
+
+    def _task_reject(self, request_id, user_id, date_str, date_obj, old_shift, new_shift, new_status, reason, req_type,
+                     req_by):
+        """ (Worker-Thread) Führt die DB-Aufrufe für 'Reject' aus. """
+        success, msg = update_wunschfrei_status(request_id, new_status, reason)
+        if not success:
+            self.tab.after(0, self._handle_request_failure, user_id, date_obj, new_shift, old_shift, new_status,
+                           "Ausstehend", msg, req_type, req_by)
+            return
+
+        save_success, save_msg = save_shift_entry(user_id, date_str, new_shift, keep_request_record=True)
+        if not save_success:
+            update_wunschfrei_status(request_id, "Ausstehend")  # Rollback
+            self.tab.after(0, self._handle_request_failure, user_id, date_obj, new_shift, old_shift, new_status,
+                           "Ausstehend", save_msg, req_type, req_by)
+
+    # --- 4. LÖSCHEN (ASYNCHRON, REGEL 2) ---
 
     def handle_request_delete(self, request_id, user_id):
-        """Löscht/Zieht einen Wunschfrei-Antrag zurück und aktualisiert UI gezielt."""
-        if messagebox.askyesno("Löschen/Zurückziehen bestätigen",
-                               "Möchten Sie diesen Antrag wirklich löschen oder zurückziehen?", parent=self.tab):
-            request_data = get_wunschfrei_request_by_id(request_id)
-            if not request_data: print(f"Antrag {request_id} nicht gefunden.")
+        """Löscht/Zieht einen Wunschfrei-Antrag zurück (Optimistic Update) und speichert asynchron."""
 
-            success, msg = withdraw_wunschfrei_request(request_id, user_id)
-            if success:
-                shift_that_was_removed = ""
-                date_str = request_data.get('request_date') if request_data else None
+        if not messagebox.askyesno("Löschen/Zurückziehen bestätigen",
+                                   "Möchten Sie diesen Antrag wirklich löschen oder zurückziehen?", parent=self.tab):
+            return
 
-                # Entferne Eintrag aus wunschfrei_data Cache im DM
-                if date_str and self.dm:
-                    user_id_str = str(user_id)
-                    if user_id_str in self.dm.wunschfrei_data and \
-                            date_str in self.dm.wunschfrei_data[user_id_str]:
-                        del self.dm.wunschfrei_data[user_id_str][date_str]
-                        print(f"DM Cache für wunschfrei_data am {date_str} entfernt.")
+        request_data = get_wunschfrei_request_by_id(request_id)  # (Synchron für Rollback-Daten)
+        if not request_data:
+            print(f"Antrag {request_id} nicht gefunden.")
+            messagebox.showerror("Fehler", f"Antrag {request_id} nicht gefunden.", parent=self.tab)
+            return
 
-                if request_data and (
-                        "Akzeptiert" in request_data.get('status', '') or "Genehmigt" in request_data.get('status',
-                                                                                                          '')):
-                    accepted_shift = request_data['requested_shift']
-                    shift_that_was_removed = "X" if accepted_shift == "WF" else accepted_shift
+        date_str = request_data.get('request_date')
+        old_status = request_data.get('status', 'Ausstehend')
+        old_req_type = request_data.get('requested_shift', 'WF')
+        old_req_by = request_data.get('requested_by', 'user')
+        old_reason = request_data.get('reason')
 
-                if date_str:
-                    try:
-                        date_obj = datetime.strptime(date_str, '%Y-%m-%d').date()
-                        self.updater.trigger_targeted_update(user_id, date_obj, shift_that_was_removed, "")
-                    except ValueError:
-                        print(f"[FEHLER] Ungültiges Datum (delete): {date_str}")
-                    except Exception as e:
-                        print(f"Fehler bei UI Update nach Delete: {e}")
-                else:
-                    self.tab.refresh_plan()
+        try:
+            date_obj = datetime.strptime(date_str, '%Y-%m-%d').date()
+            shift_that_was_removed = ""
+            if "Akzeptiert" in old_status or "Genehmigt" in old_status:
+                shift_that_was_removed = "X" if old_req_type == "WF" else old_req_type
 
-                self._refresh_requests_tab_if_loaded()
-                messagebox.showinfo("Erfolg", msg, parent=self.tab)
-            else:
-                messagebox.showerror("Fehler", f"Antrag löschen/zurückziehen fehlgeschlagen: {msg}", parent=self.tab)
+            # 1. OPTIMISTIC UI UPDATE
+            # Entferne Eintrag aus wunschfrei_data Cache im DM
+            if self.dm:
+                user_id_str = str(user_id)
+                if user_id_str in self.dm.wunschfrei_data and \
+                        date_str in self.dm.wunschfrei_data[user_id_str]:
+                    del self.dm.wunschfrei_data[user_id_str][date_str]
+                    print(f"DM Cache für wunschfrei_data am {date_str} entfernt.")
+
+            self.updater.trigger_targeted_update(user_id, date_obj, shift_that_was_removed, "")
+            self._update_app_frequency(shift_that_was_removed, "")
+            self._refresh_requests_tab_if_loaded()
+
+            # 2. ASYNCHRONES SPEICHERN
+            threading.Thread(
+                target=self._task_delete,
+                args=(request_id, user_id, date_obj, shift_that_was_removed, old_status, old_req_type, old_req_by,
+                      old_reason),
+                daemon=True
+            ).start()
+
+        except Exception as e:
+            messagebox.showerror("Fehler", f"Fehler im Optimistic Update (Delete): {e}", parent=self.tab)
+
+    def _task_delete(self, request_id, user_id, date_obj, old_shift, old_status, old_req_type, old_req_by, old_reason):
+        """ (Worker-Thread) Führt den DB-Aufruf für 'Delete' aus. """
+        success, msg = withdraw_wunschfrei_request(request_id, user_id)
+
+        if not success:
+            # Rollback (Datenbank)
+            # (Schwer, da admin_submit_request und update_wunschfrei_status benötigt werden,
+            #  um den alten Zustand wiederherzustellen. Wir machen ein UI-Rollback)
+            self.tab.after(0, self._handle_request_failure, user_id, date_obj, "", old_shift, "Gelöscht", old_status,
+                           msg, old_req_type, old_req_by, old_reason)
+        else:
+            # (Nur Info im Main-Thread anzeigen, wenn erfolgreich)
+            self.tab.after(0, lambda: messagebox.showinfo("Erfolg", "Antrag erfolgreich gelöscht/zurückgezogen.",
+                                                          parent=self.tab))
+
+    # --- 5. ZURÜCKSETZEN (ASYNCHRON, REGEL 2) ---
 
     def reset_request_status(self, request_id):
-        """Setzt Status zurück, entfernt ggf. Schicht und aktualisiert UI gezielt."""
+        """Setzt Status zurück (Optimistic Update) und speichert asynchron."""
+
         request_data = get_wunschfrei_request_by_id(request_id)
         if not request_data:
             messagebox.showerror("Fehler", "Antrag nicht gefunden.", parent=self.tab);
             return
 
-        success, msg = update_wunschfrei_status(request_id, "Ausstehend", None)
-        if success:
+        user_id = request_data['user_id'];
+        date_str = request_data['request_date']
+        old_status = request_data.get('status', 'Ausstehend')
+        req_type = request_data.get('requested_shift', 'WF')
+        req_by = request_data.get('requested_by', 'user')
+        new_status = "Ausstehend"
+
+        try:
+            date_obj = datetime.strptime(date_str, '%Y-%m-%d').date()
             shift_that_was_removed = ""
-            user_id = request_data['user_id'];
-            date_str = request_data['request_date']
-            req_type = request_data.get('requested_shift', 'WF')
-            req_by = request_data.get('requested_by', 'user')
+            if "Akzeptiert" in old_status or "Genehmigt" in old_status:
+                shift_that_was_removed = "X" if req_type == "WF" else req_type
 
-            self.updater.update_dm_wunschfrei_cache(user_id, date_str, "Ausstehend", req_type, req_by)
-
-            if "Akzeptiert" in request_data.get('status', '') or "Genehmigt" in request_data.get('status', ''):
-                accepted_shift = request_data['requested_shift']
-                shift_that_was_removed = "X" if accepted_shift == "WF" else accepted_shift
-                save_success, save_msg = save_shift_entry(user_id, date_str, "")  # Setze auf Frei
-                if not save_success:
-                    messagebox.showwarning("Fehler",
-                                           f"Status zurückgesetzt, Schicht entfernen fehlgeschlagen: {save_msg}",
-                                           parent=self.tab)
-
-            try:
-                date_obj = datetime.strptime(date_str, '%Y-%m-%d').date()
-                self.updater.trigger_targeted_update(user_id, date_obj, shift_that_was_removed, "")
-            except ValueError:
-                print(f"[FEHLER] Ungültiges Datum (reset): {date_str}")
-            except Exception as e:
-                print(f"Fehler bei UI Update nach Reset: {e}")
-
+            # 1. OPTIMISTIC UI UPDATE
+            self.updater.update_dm_wunschfrei_cache(user_id, date_str, new_status, req_type, req_by)
+            self.updater.trigger_targeted_update(user_id, date_obj, shift_that_was_removed, "")
+            self._update_app_frequency(shift_that_was_removed, "")
             self._refresh_requests_tab_if_loaded()
-        else:
-            messagebox.showerror("Fehler", f"Status zurücksetzen fehlgeschlagen: {msg}", parent=self.tab)
+
+            # 2. ASYNCHRONES SPEICHERN
+            threading.Thread(
+                target=self._task_reset,
+                args=(request_id, user_id, date_str, date_obj, shift_that_was_removed, new_status, old_status, req_type,
+                      req_by),
+                daemon=True
+            ).start()
+
+        except Exception as e:
+            messagebox.showerror("Fehler", f"Fehler im Optimistic Update (Reset): {e}", parent=self.tab)
+
+    def _task_reset(self, request_id, user_id, date_str, date_obj, old_shift, new_status, old_status, req_type, req_by):
+        """ (Worker-Thread) Führt die DB-Aufrufe für 'Reset' aus. """
+        success, msg = update_wunschfrei_status(request_id, new_status, None)
+        if not success:
+            self.tab.after(0, self._handle_request_failure, user_id, date_obj, "", old_shift, new_status, old_status,
+                           msg, req_type, req_by)
+            return
+
+        if "Akzeptiert" in old_status or "Genehmigt" in old_status:
+            save_success, save_msg = save_shift_entry(user_id, date_str, "")  # Setze auf Frei
+            if not save_success:
+                update_wunschfrei_status(request_id, old_status)  # Rollback
+                self.tab.after(0, self._handle_request_failure, user_id, date_obj, "", old_shift, new_status,
+                               old_status, save_msg, req_type, req_by)
+
+    # --- 6. ADMIN WUNSCH HINZUFÜGEN (ASYNCHRON, REGEL 2) ---
 
     def admin_add_wunschfrei(self, user_id, date_str, request_type):
-        """ Erstellt Admin-Wunschfrei-Antrag und aktualisiert UI gezielt. """
+        """ Erstellt Admin-Wunschfrei-Antrag (Optimistic Update) und speichert asynchron. """
         print(f"Admin fügt Wunsch hinzu: User {user_id}, Datum {date_str}, Typ {request_type}")
-        success, msg = admin_submit_request(user_id, date_str, request_type)
-        if success:
-            try:
-                date_obj = datetime.strptime(date_str, '%Y-%m-%d').date()
-                if self.renderer:
-                    self.updater.update_dm_wunschfrei_cache(user_id, date_str, "Ausstehend", request_type, 'admin')
-                    old_shift = self.updater.get_old_shift_from_ui(user_id, date_str)
 
-                    # Trigger Update (setzt Text auf "(A)?"), aber ohne Schichtänderung
-                    self.updater.trigger_targeted_update(user_id, date_obj, old_shift, "")
+        try:
+            date_obj = datetime.strptime(date_str, '%Y-%m-%d').date()
 
-                else:
-                    self.tab.refresh_plan()
-            except Exception as e:
-                print(f"Fehler bei UI Update nach admin_add_wunschfrei: {e}")
-                self.tab.refresh_plan()
+            # 1. OPTIMISTIC UI UPDATE
+            if self.renderer:
+                self.updater.update_dm_wunschfrei_cache(user_id, date_str, "Ausstehend", request_type, 'admin')
+                old_shift = self.updater.get_old_shift_from_ui(user_id, date_str)
+                # Nur UI neu zeichnen, Schicht nicht ändern
+                self.updater.trigger_targeted_update(user_id, date_obj, old_shift, old_shift)
+            else:
+                self.tab.refresh_plan()  # Fallback
 
             self._refresh_requests_tab_if_loaded()
-        else:
-            messagebox.showerror("Fehler", f"Wunschfrei-Anfrage speichern fehlgeschlagen: {msg}", parent=self.tab)
+
+            # 2. ASYNCHRONES SPEICHERN
+            threading.Thread(
+                target=self._task_admin_add_wunsch,
+                args=(user_id, date_str, request_type, date_obj, old_shift),
+                daemon=True
+            ).start()
+
+        except Exception as e:
+            print(f"Fehler bei UI Update nach admin_add_wunschfrei: {e}")
+            messagebox.showerror("Fehler", f"UI-Fehler vor dem Speichern: {e}", parent=self.tab)
+
+    def _task_admin_add_wunsch(self, user_id, date_str, request_type, date_obj, old_shift):
+        """ (Worker-Thread) Speichert den Admin-Wunsch in der DB. """
+        success, msg = admin_submit_request(user_id, date_str, request_type)
+
+        if not success:
+            self.tab.after(0, self._handle_admin_add_wunsch_failure, user_id, date_str, date_obj, old_shift, msg)
+
+    def _handle_admin_add_wunsch_failure(self, user_id, date_str, date_obj, old_shift, error_message):
+        """ (Main-Thread) Rollback für fehlgeschlagenes Hinzufügen eines Admin-Wunsches. """
+        print(f"ROLLBACK: Admin-Wunsch für {user_id}@{date_str} fehlgeschlagen.")
+        messagebox.showerror("Speicherfehler (Rollback)",
+                             f"Der Admin-Wunsch konnte nicht gespeichert werden.\n"
+                             f"Fehler: {error_message}\n\n"
+                             "Die Ansicht wird zurückgesetzt.",
+                             parent=self.tab)
+        try:
+            if self.dm:
+                user_id_str = str(user_id)
+                if user_id_str in self.dm.wunschfrei_data and date_str in self.dm.wunschfrei_data[user_id_str]:
+                    del self.dm.wunschfrei_data[user_id_str][date_str]
+
+            self.updater.trigger_targeted_update(user_id, date_obj, old_shift, old_shift)
+            self._refresh_requests_tab_if_loaded()
+        except Exception as e:
+            print(f"Kritischer Fehler im Admin-Wunsch-Rollback: {e}")
+
+    # --- 7. GLOBALE HELFER ---
 
     def _refresh_requests_tab_if_loaded(self):
         """Aktualisiert den RequestsTab, falls geladen."""
         if hasattr(self.app, 'refresh_specific_tab'):
             self.app.refresh_specific_tab("Wunschanfragen")
-        else:
-            if hasattr(self.tab, 'master') and hasattr(self.tab.master, 'master') and hasattr(self.tab.master.master,
-                                                                                              'loaded_tabs'):
-                notebook = self.tab.master.master
-                if "Wunschanfragen" in notebook.loaded_tabs:
-                    requests_tab = notebook.tab_frames.get("Wunschanfragen")
-                    if requests_tab and hasattr(requests_tab, 'refresh_data'):
-                        requests_tab.refresh_data()
+        # (Der Fallback-Code war sehr komplex und potenziell fehleranfällig,
+        #  die app.refresh_specific_tab-Methode ist der saubere Weg)
+
+    def _update_app_frequency(self, old_shift, new_shift):
+        """ Hilfsfunktion zur Aktualisierung des Schicht-Frequenz-Caches in der Haupt-App. """
+        try:
+            if old_shift and old_shift in self.app.shift_frequency:
+                self.app.shift_frequency[old_shift] = max(0, self.app.shift_frequency[old_shift] - 1)
+
+            if new_shift and new_shift in self.app.app.shift_types_data and new_shift not in ['U', 'X', 'EU']:
+                if new_shift not in self.app.shift_frequency:
+                    self.app.shift_frequency[new_shift] = 0
+                self.app.shift_frequency[new_shift] += 1
+        except Exception as e:
+            print(f"Fehler beim Aktualisieren der App-Frequenz: {e}")
+
+    def _handle_request_failure(self, user_id, date_obj, failed_new_shift, old_shift,
+                                failed_new_status, old_status, error_message,
+                                old_req_type=None, old_req_by=None, old_reason=None):
+        """
+        (Main-Thread) Zentrale Rollback-Funktion für alle fehlgeschlagenen
+        Akzeptier-, Ablehn- oder Reset-Aktionen.
+        """
+        print(f"ROLLBACK wird ausgeführt für {user_id}@{date_obj.strftime('%Y-%m-%d')}")
+        messagebox.showerror("Speicherfehler (Rollback)",
+                             f"Die Aktion ({failed_new_status}) konnte nicht gespeichert werden.\n"
+                             f"Fehler: {error_message}\n\n"
+                             f"Die Ansicht wird auf '{old_shift}' (Status: {old_status}) zurückgesetzt.",
+                             parent=self.tab)
+
+        try:
+            # 1. UI-Schicht zurücksetzen
+            self.updater.trigger_targeted_update(user_id, date_obj, failed_new_shift, old_shift)
+
+            # 2. App-Frequenz zurücksetzen
+            self._update_app_frequency(failed_new_shift, old_shift)
+
+            # 3. DM-Wunsch-Cache zurücksetzen
+            self.updater.update_dm_wunschfrei_cache(user_id, date_obj.strftime('%Y-%m-%d'),
+                                                    old_status, old_req_type, old_req_by, old_reason)
+
+            # 4. Anderen Tab aktualisieren
+            self._refresh_requests_tab_if_loaded()
+
+        except Exception as e:
+            print(f"[FEHLER] KRITISCHER FEHLER im Request-Rollback: {e}")
+            messagebox.showerror("Kritischer Rollback-Fehler",
+                                 f"Das Rollback ist fehlgeschlagen: {e}\n"
+                                 "Die Ansicht ist möglicherweise nicht mehr synchron mit der Datenbank.\n"
+                                 "Bitte laden Sie den Monat neu (z.B. Monat wechseln).",
+                                 parent=self.tab)

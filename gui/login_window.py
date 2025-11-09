@@ -2,6 +2,9 @@
 import tkinter as tk
 from tkinter import ttk, messagebox
 from database.db_users import authenticate_user, get_user_count, log_user_login
+# --- NEU (Schritt 4): Import der Rollen-DB-Funktion ---
+from database.db_roles import get_main_window_for_role
+# --- ENDE NEU ---
 from .registration_window import RegistrationWindow
 from .password_reset_window import PasswordResetWindow
 import webbrowser  # Beibehalten
@@ -250,7 +253,32 @@ class LoginWindow(tk.Toplevel):
         user_data = authenticate_user(vorname, name, password)
 
         if user_data:
+
+            # --- NEU (Schritt 4): Dynamisches Hauptfenster ermitteln (Regel 2 & 4) ---
+            try:
+                # Die Rolle des Benutzers holen (z.B. "Admin")
+                user_role = user_data.get('role')
+
+                # Die DB fragen, welches Fenster (z.B. "main_admin_window")
+                # (Regel 1) get_main_window_for_role hat einen eingebauten Fallback,
+                # falls die Rolle (z.B. "SuperAdmin") noch nicht in der 'roles'-Tabelle
+                # eingetragen ist, aber im ENUM existiert.
+                main_window_name = get_main_window_for_role(user_role)
+
+                # Den Fensternamen zum user_data-Dict hinzufügen
+                user_data['main_window'] = main_window_name
+                print(f"[DEBUG] LoginWindow: Rolle '{user_role}' -> Fenster '{main_window_name}' zugewiesen.")
+
+            except Exception as e:
+                print(f"[FEHLER] LoginWindow: Konnte Hauptfenster für Rolle '{user_role}' nicht ermitteln: {e}")
+                # (Regel 1) Fallback, falls get_main_window_for_role selbst fehlschlägt
+                user_data['main_window'] = 'main_admin_window' if user_role in ["Admin",
+                                                                                "SuperAdmin"] else 'main_user_window'
+            # --- ENDE NEU ---
+
             log_user_login(user_data['id'], user_data['vorname'], user_data['name'])
+
+            # boot_loader.py (self.app) erhält jetzt user_data inkl. 'main_window'
             self.app.on_login_success(self, user_data)
         else:
             messagebox.showerror("Login fehlgeschlagen", "Benutzername oder Passwort falsch.", parent=self)
