@@ -1,4 +1,3 @@
-# gui/login_window.py
 import tkinter as tk
 from tkinter import ttk, messagebox
 from database.db_users import authenticate_user, get_user_count, log_user_login
@@ -19,6 +18,9 @@ class LoginWindow(tk.Toplevel):
         """
         Nimmt jetzt den 'prewarm_thread' UND den 'preload_thread' entgegen,
         um den Verbindungsaufbau UND das Daten-Caching zu überwachen.
+
+        WICHTIG: Dieses Fenster wird versteckt initialisiert ('self.withdraw()')
+        und von boot_loader.py (via 'show_login_window') angezeigt.
         """
         print("[DEBUG] LoginWindow.__init__: Wird initialisiert.")
         super().__init__(master)
@@ -37,12 +39,14 @@ class LoginWindow(tk.Toplevel):
 
         self.local_version = "0.0.0"
 
-        self.withdraw()
+        # --- MODIFIZIERT (M): 'self.withdraw()' bleibt, 'deiconify()' wird entfernt ---
+        self.withdraw()  # WICHTIG: Fenster versteckt starten
         self.title("DHF-Planer - Login")
         self.configure(bg='#2c3e50')
 
         style = ttk.Style(self)
         style.theme_use('clam')
+        # ... (restliche Styles bleiben unverändert) ...
         style.configure('TFrame', background='#2c3e50')
         style.configure('TLabel', background='#2c3e50', foreground='white', font=('Segoe UI', 10))
         style.configure('TButton', background='#3498db', foreground='white', font=('Segoe UI', 10, 'bold'),
@@ -71,10 +75,12 @@ class LoginWindow(tk.Toplevel):
         self.protocol("WM_DELETE_WINDOW", self.app.on_app_close)
         self.create_widgets(style)
 
-        self.attributes('-fullscreen', True)
-        self.deiconify()
-        self.lift()
-        self.focus_force()
+        # --- MODIFIZIERT (R): Sichtbarkeits-Logik entfernt ---
+        # self.attributes('-fullscreen', True) # Entfernt -> Verschieben in on_splash_screen_finished
+        # self.deiconify()                     # Entfernt -> Gesteuert von boot_loader
+        # self.lift()                          # Entfernt -> Gesteuert von boot_loader
+        # self.focus_force()                   # Entfernt -> Gesteuert von boot_loader
+        # --- ENDE MODIFIZIERT ---
 
         # --- INNOVATION: Starte den Checker für die Pre-Loading-Threads ---
         if self.prewarm_thread and self.preload_thread:
@@ -88,9 +94,10 @@ class LoginWindow(tk.Toplevel):
             self.login_button_enabled = True
         # -------------------------------------------------------------
 
-        print("[DEBUG] LoginWindow.__init__: Initialisierung abgeschlossen, Fenster sichtbar.")
+        print("[DEBUG] LoginWindow.__init__: Initialisierung abgeschlossen (Fenster bleibt versteckt).")
 
     def create_widgets(self, style):
+        # ... (unverändert) ...
         container = ttk.Frame(self, style='TFrame')
         container.pack(fill="both", expand=True)
 
@@ -169,6 +176,7 @@ class LoginWindow(tk.Toplevel):
         Prüft, ob die Pre-Loading-Threads (DB-Pool UND Daten-Cache) fertig sind
         und aktualisiert die Ladebalken SIMULTAN.
         """
+        # ... (Funktion bleibt unverändert) ...
         if not self.winfo_exists():
             return
 
@@ -237,7 +245,24 @@ class LoginWindow(tk.Toplevel):
             # Warte kurz, damit der Benutzer den Erfolg sieht, dann blende aus
             self.after(500, self.pre_login_loading_frame.pack_forget)
 
+    # --- NEUE FUNKTION: Wird von boot_loader.py aufgerufen, NACHDEM das Fenster sichtbar ist ---
+    def on_splash_screen_finished(self):
+        """
+        Wendet Attribute an, die erst nach dem 'deiconify'
+        (gesteuert durch main.py/boot_loader.py) gesetzt werden sollen.
+        """
+        print("[DEBUG] LoginWindow.on_splash_screen_finished: Setze -fullscreen.")
+        try:
+            self.attributes('-fullscreen', True)
+        except tk.TclError as e:
+            print(f"[WARNUNG] LoginWindow: Setzen von -fullscreen fehlgeschlagen: {e}")
+            # Fallback für den Fall, dass -fullscreen Probleme macht
+            self.geometry(f"{self.winfo_screenwidth()}x{self.winfo_screenheight()}+0+0")
+
+    # --- ENDE NEUE FUNKTION ---
+
     def attempt_login(self, event=None):
+        # ... (Funktion bleibt unverändert) ...
         if not self.login_button_enabled:
             print("[DEBUG] Login-Versuch abgeblockt (DB noch nicht bereit).")
             return
@@ -284,6 +309,7 @@ class LoginWindow(tk.Toplevel):
             messagebox.showerror("Login fehlgeschlagen", "Benutzername oder Passwort falsch.", parent=self)
 
     def show_loading_ui(self):
+        # ... (Funktion bleibt unverändert) ...
         """
         Versteckt das Login-Formular und zeigt die Lade-Animation (POST-Login).
         """
@@ -298,6 +324,7 @@ class LoginWindow(tk.Toplevel):
         self.progress_bar.start(15)
 
     def show_login_ui(self):
+        # ... (Funktion bleibt unverändert) ...
         """
         Versteckt die Lade-Animation (POST-Login) und zeigt das Login-Formular wieder an.
         (Wird vom boot_loader bei einem Fehler beim Laden des Hauptfensters aufgerufen)
