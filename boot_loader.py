@@ -72,6 +72,10 @@ class Application:
         self.main_window = None
         self.login_window = None  # (M) Wird jetzt in start_data_preloading_thread erstellt
 
+        # --- NEU (Regel 2): Referenz auf den Splash-Screen (wird von main.py gesetzt) ---
+        self.splash = None
+        # --- ENDE NEU ---
+
         # --- NEU (Schritt 5): Fenster-Klassen-Mapping (Regel 2 & 4) ---
         # Definiert, welcher String aus der DB welche Fensterklasse öffnet
         self.window_class_map = {
@@ -151,17 +155,35 @@ class Application:
         """
         Macht das (bereits erstellte) Login-Fenster sichtbar.
         Wird von main.py nach Ablauf des Splash-Screen-Timers aufgerufen.
+        (Regel 2) Startet den nahtlosen Übergang.
         """
         if self.login_window and self.login_window.winfo_exists():
             print("[DEBUG] Application.show_login_window: Mache LoginWindow sichtbar...")
-            self.login_window.deiconify()  # (M) Zeigt das Fenster an
-            self.login_window.lift()
-            self.login_window.focus_force()
 
-            # (N) Informiert das Login-Fenster, dass der Splash fertig ist,
-            #     falls es seinen Lade-Spinner jetzt aktualisieren muss.
-            if hasattr(self.login_window, 'on_splash_screen_finished'):
-                self.login_window.on_splash_screen_finished()
+            # --- MODIFIZIERT FÜR NAHTLOSEN ÜBERGANG (Regel 2) ---
+            if self.splash and hasattr(self.splash, 'start_transition_and_close'):
+                print("[Boot Loader] Starte Splash-Screen-Übergang...")
+                # Diese Funktion (in splash_screen.py) übernimmt das Anzeigen
+                # und Initialisieren (on_splash_screen_finished) des LoginWindow.
+                self.splash.start_transition_and_close(self.login_window)
+                self.splash = None  # Referenz entfernen
+            else:
+                # Fallback, falls Splash nicht vorhanden oder Funktion fehlt (Regel 1)
+                print("[Boot Loader] Fallback: Zeige Login-Fenster direkt an.")
+                if self.splash:
+                    self.splash.close_splash()  # Alte Methode
+                    self.splash = None
+
+                self.login_window.deiconify()  # (M) Zeigt das Fenster an
+                self.login_window.lift()
+                self.login_window.focus_force()
+
+                # (N) Informiert das Login-Fenster, dass der Splash fertig ist,
+                #     falls es seinen Lade-Spinner jetzt aktualisieren muss.
+                if hasattr(self.login_window, 'on_splash_screen_finished'):
+                    self.login_window.on_splash_screen_finished()
+            # --- ENDE MODIFIKATION ---
+
         else:
             print("[FEHLER] show_login_window: LoginWindow-Instanz nicht gefunden!")
             messagebox.showerror("Kritischer GUI-Fehler",
@@ -484,6 +506,11 @@ class Application:
         # --- MODIFIZIERT (M): Ruft die neuen Start-Funktionen auf ---
         # (Kein Splash-Screen beim Logout, Fenster wird sofort angezeigt)
         self.start_data_preloading_thread()
+
+        # --- MODIFIZIERT (Regel 2): Fallback für Logout ---
+        # Beim Logout wollen wir *keine* Übergangs-Animation,
+        # da self.splash = None sein sollte (wurde beim 1. Mal verbraucht).
+        # Der Code in show_login_window() behandelt dies bereits (Regel 1).
         self.show_login_window()
 
     def on_app_close(self):

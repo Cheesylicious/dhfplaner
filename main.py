@@ -29,7 +29,7 @@ from boot_loader import Application
 # --------------------
 
 # Konstante für die minimale Anzeigezeit des Splash-Screens (in Millisekunden)
-MIN_SPLASH_TIME_MS = 5000
+MIN_SPLASH_TIME_MS = 7500
 
 
 def main():
@@ -73,6 +73,10 @@ def main():
         app = Application(root)
         print("[DEBUG] main.py: Application-Instanz erstellt.")
 
+        # --- MODIFIZIERT (Regel 2): Übergibt die Splash-Referenz an den Boot-Loader ---
+        app.splash = splash
+        # --- ENDE MODIFIKATION ---
+
         # 5. Starte das Daten-Vorladen in einem separaten Thread (Regel 2)
         #    Wir rufen eine (neue) Methode in 'Application' auf,
         #    die den Lade-Thread startet.
@@ -89,14 +93,17 @@ def main():
             """
             print(f"[DEBUG] main.py: {MIN_SPLASH_TIME_MS}ms Timer abgelaufen.")
 
-            if splash:
-                splash.close_splash()
-                print("[DEBUG] main.py: Splash-Screen geschlossen.")
+            # --- MODIFIZIERT (Regel 2): Splash wird jetzt vom Boot-Loader gesteuert ---
+            # if splash:
+            #    splash.close_splash() # <-- ENTFERNT
+            #    print("[DEBUG] main.py: Splash-Screen geschlossen.")
+            # --- ENDE MODIFIKATION ---
 
             # Zeige das Login-Fenster.
             # (Diese Methode muss in boot_loader.py implementiert werden)
+            # (Der Boot-Loader startet jetzt die Übergangs-Animation)
             app.show_login_window()
-            print("[DEBUG] main.py: Login-Fenster angezeigt.")
+            print("[DEBUG] main.py: Login-Fenster angezeigt (Übergang initiiert).")
 
         # 7. Starte den Timer
         #    Nach 3000ms wird show_app_after_delay() im Haupt-Thread
