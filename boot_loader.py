@@ -33,6 +33,7 @@ from gui.main_admin_window import MainAdminWindow
 from gui.main_user_window import MainUserWindow
 # --- NEU (Zuteilungs-Fenster): Import für das Zuteilungsfenster ---
 from gui.main_zuteilung_window import MainZuteilungWindow
+
 # --- ENDE NEU ---
 
 # --- NEU: Import für Schiffsbewachungs-Fenster (Annahme des Klassennamens) ---
@@ -45,22 +46,31 @@ except ImportError:
 
 # --- NEU (P1-P4): Import des neuen Preloading-Managers (Regel 4) ---
 from gui.preloading_manager import PreloadingManager
+
+
 # --- ENDE NEU ---
 
 
-class Application(tk.Tk):
+# --- MODIFIZIERT (M): Erbt nicht mehr von tk.Tk ---
+class Application:
     """
-    Die Hauptanwendungsklasse (Bootloader), die als Root-Tkinter-Instanz dient,
-    den Start verwaltet und die Hauptfenster (Login, Admin, User) steuert.
+    Die Hauptanwendungsklasse (Bootloader), die den Start verwaltet
+    und die Hauptfenster (Login, Admin, User) steuert.
+    Sie ist NICHT mehr das root-Fenster, sondern wird vom root-Fenster (in main.py) gesteuert.
     """
 
-    def __init__(self):
-        super().__init__()
-        self.withdraw()
+    # --- MODIFIZIERT (M): Akzeptiert 'master' (das root-Fenster von main.py) ---
+    def __init__(self, master: tk.Tk):
+        # --- MODIFIZIERT (M): 'super().__init__()' entfernt ---
+
+        # (M) Speichert die Referenz auf das von main.py erstellte root-Fenster
+        self.root = master
+
+        # (R) 'self.withdraw()' entfernt (macht jetzt main.py)
 
         self.current_user_data = None
         self.main_window = None
-        self.login_window = None
+        self.login_window = None  # (M) Wird jetzt in start_data_preloading_thread erstellt
 
         # --- NEU (Schritt 5): Fenster-Klassen-Mapping (Regel 2 & 4) ---
         # Definiert, welcher String aus der DB welche Fensterklasse öffnet
@@ -84,8 +94,9 @@ class Application(tk.Tk):
         print(f"[Boot Loader] Ziel-Anzeigedatum initialisiert auf: {self.current_display_date}")
         # --- ENDE KORREKTUR ---
 
+        # (M) Threads werden nur initialisiert, nicht gestartet
         self.prewarm_thread = None
-        self.preload_thread = None  # Dieser Thread lädt P1a und P3 (Originalfunktion)
+        self.preload_thread = None
 
         # --- NEU (P1-P4): Instanz für den Post-Login Preloading-Manager (P1b, P2) ---
         self.preloading_manager = None
@@ -106,9 +117,16 @@ class Application(tk.Tk):
         self.global_open_bugs_count = 0  # Zähler für Bug-Reports
         # --- ENDE NEU ---
 
-        self.start_threads_and_show_login()
+        # --- MODIFIZIERT (R): 'self.start_threads_and_show_login()' entfernt ---
+        # (Der Start wird jetzt von main.py gesteuert)
 
-    def start_threads_and_show_login(self):
+    # --- NEUE FUNKTION (N): Wird von main.py aufgerufen ---
+    def start_data_preloading_thread(self):
+        """
+        Startet die Preloading-Threads (DB-Warmup und Daten-Cache) und
+        erstellt das Login-Fenster im versteckten Zustand (Regel 2).
+        Diese Funktion blockiert nicht.
+        """
         print("[Boot Loader] Starte DB-Pre-Warming Thread...")
         self.prewarm_thread = threading.Thread(target=db_core.prewarm_connection_pool, daemon=True)
         self.prewarm_thread.start()
@@ -117,17 +135,42 @@ class Application(tk.Tk):
         self.preload_thread = threading.Thread(target=self.preload_common_data, daemon=True)
         self.preload_thread.start()
 
-        self.show_login_window()
+        # (N) Erstellt das LoginWindow (versteckt), während die Threads laufen
+        if not (self.login_window and self.login_window.winfo_exists()):
+            print("[DEBUG] Application.start_data_preloading_thread: Erstelle LoginWindow (versteckt)...")
+            # (M) Wir übergeben self.root (das Hauptfenster) an LoginWindow,
+            #     da es jetzt der Master für dieses Toplevel-Fenster ist.
+            self.login_window = LoginWindow(self.root, self, self.prewarm_thread, self.preload_thread)
+            self.login_window.withdraw()  # WICHTIG: Sofort verstecken
 
+    # --- MODIFIZIERT (M): 'start_threads_and_show_login' entfernt ---
+    # (Logik ist jetzt in start_data_preloading_thread und show_login_window)
+
+    # --- MODIFIZIERT (M): Zeigt nur noch das Fenster an ---
     def show_login_window(self):
+        """
+        Macht das (bereits erstellte) Login-Fenster sichtbar.
+        Wird von main.py nach Ablauf des Splash-Screen-Timers aufgerufen.
+        """
         if self.login_window and self.login_window.winfo_exists():
+            print("[DEBUG] Application.show_login_window: Mache LoginWindow sichtbar...")
+            self.login_window.deiconify()  # (M) Zeigt das Fenster an
             self.login_window.lift()
             self.login_window.focus_force()
+
+            # (N) Informiert das Login-Fenster, dass der Splash fertig ist,
+            #     falls es seinen Lade-Spinner jetzt aktualisieren muss.
+            if hasattr(self.login_window, 'on_splash_screen_finished'):
+                self.login_window.on_splash_screen_finished()
         else:
-            print("[DEBUG] Application.show_login_window: Erstelle LoginWindow...")
-            self.login_window = LoginWindow(self, self, self.prewarm_thread, self.preload_thread)
+            print("[FEHLER] show_login_window: LoginWindow-Instanz nicht gefunden!")
+            messagebox.showerror("Kritischer GUI-Fehler",
+                                 "Login-Fenster konnte nicht initialisiert werden.",
+                                 parent=self.root)
+            self.on_app_close()
 
     def load_shift_types(self, force_reload=False):
+        # ... (unverändert) ...
         if not self.shift_types_data or force_reload:
             shift_types_list = get_all_shift_types()
             self.shift_types_data = {
@@ -137,6 +180,7 @@ class Application(tk.Tk):
 
     # --- KORREKTUR: Name und Logik der Funktion angepasst ---
     def load_staffing_rules(self, force_reload=False):
+        # ... (unverändert) ...
         """
         Lädt die Mindestbesetzungsregeln und validiert sie (inkl. Standardfarben),
         damit der Renderer sie beim Kaltstart verwenden kann.
@@ -184,19 +228,23 @@ class Application(tk.Tk):
 
     # --- KORREKTUR: Aufruf auf STATISCHE Methode geändert ---
     def load_holidays_for_year(self, year):
+        # ... (unverändert) ...
         """Lädt Feiertage für ein Jahr (ruft statische Methode auf)."""
         HolidayManager.get_holidays_for_year(year)
 
     def is_holiday(self, date_obj):
+        # ... (unverändert) ...
         """Prüft, ob ein Datum ein Feiertag ist (ruft statische Methode auf)."""
         return HolidayManager.is_holiday(date_obj)
 
     def load_events_for_year(self, year):
+        # ... (unverändert) ...
         """Lädt Sondertermine für ein Jahr (ruft statische Methode auf)."""
         # (Gemäß der Verwendung in db_shifts.py)
         EventManager.get_events_for_year(year)
 
     def get_event_type(self, date_obj):
+        # ... (unverändert) ...
         """Gibt den Typ eines Sondertermins zurück (oder None)."""
         # (Gemäß der Verwendung in db_shifts.py)
         # Wir müssen sicherstellen, dass die globalen Daten (jetzt im DM) geladen sind
@@ -209,6 +257,7 @@ class Application(tk.Tk):
 
     # --- NEUE FUNKTION (LÖST DEN FEHLER) ---
     def get_contrast_color(self, hex_color):
+        # ... (unverändert) ...
         """
         Gibt 'white' or 'black' zurück, je nach Kontrast zu hex_color.
         (Kopiert von AdminUtils, um für den Renderer im Bootloader verfügbar zu sein)
@@ -234,6 +283,7 @@ class Application(tk.Tk):
     # --- ENDE NEUE FUNKTION ---
 
     def preload_common_data(self):
+        # ... (unverändert) ...
         """
         THREAD-FUNKTION: Lädt alle notwendigen Anwendungsdaten parallel
         zum DB-Pre-Warming. Lädt auch den Schichtplan für den nächsten Monat vor.
@@ -322,7 +372,9 @@ class Application(tk.Tk):
         # (user_data enthält jetzt 'main_window' dank login_window.py)
         self.current_user_data = user_data
         login_window.show_loading_ui()
-        self.after(100, lambda: self._load_main_window(user_data))
+
+        # --- MODIFIZIERT (M): Nutzt self.root.after statt self.after ---
+        self.root.after(100, lambda: self._load_main_window(user_data))
 
     def _load_main_window(self, user_data):
         try:
@@ -348,13 +400,14 @@ class Application(tk.Tk):
             # 4. Fenster instanziieren
             if TargetWindow:
                 print(f"[Boot Loader] Lade Fenster: {window_name} ({TargetWindow.__name__})...")
-                self.main_window = TargetWindow(self, user_data, self)
+                # (M) Übergibt self.root als Master an das Hauptfenster
+                self.main_window = TargetWindow(self.root, user_data, self)
             else:
                 # Fallback (Regel 1), falls DB einen Namen liefert, den wir (noch) nicht kennen
                 # ODER wenn der Import (z.B. für MainSchiffsbewachungWindow) fehlschlug
                 print(
                     f"[WARNUNG] Unbekanntes Hauptfenster '{window_name}' in DB oder Import fehlgeschlagen! Führe Fallback auf 'main_user_window' aus.")
-                self.main_window = MainUserWindow(self, user_data, self)
+                self.main_window = MainUserWindow(self.root, user_data, self)
             # --- ENDE ANPASSUNG ---
 
             self.main_window.wait_visibility()
@@ -376,6 +429,7 @@ class Application(tk.Tk):
             self.preloading_manager.start_initial_preload()
 
             # Starte den Verarbeitungs-Loop für die UI-Queue (P2)
+            # (M) .after ist korrekt, da self.main_window ein Toplevel/tk-Fenster ist
             self.main_window.after(500, self.preloading_manager.process_ui_queue)
             # --- ENDE NEU ---
 
@@ -427,7 +481,10 @@ class Application(tk.Tk):
         self.global_open_bugs_count = 0
         # --- ENDE NEU ---
 
-        self.start_threads_and_show_login()
+        # --- MODIFIZIERT (M): Ruft die neuen Start-Funktionen auf ---
+        # (Kein Splash-Screen beim Logout, Fenster wird sofort angezeigt)
+        self.start_data_preloading_thread()
+        self.show_login_window()
 
     def on_app_close(self):
         print("[Boot Loader] Anwendung wird beendet.")
@@ -446,8 +503,8 @@ class Application(tk.Tk):
         except Exception as e:
             print(f"Fehler beim Schließen der Fenster: {e}")
         finally:
-            self.quit()
+            # --- MODIFIZIERT (M): Ruft .quit() auf dem root-Fenster auf ---
+            self.root.quit()
 
-    def run(self):
-        print("[DEBUG] Application.run: Starte root.mainloop()...")
-        self.mainloop()
+    # --- MODIFIZIERT (R): 'run(self)' Methode entfernt ---
+    # (mainloop() wird jetzt in main.py aufgerufen)
