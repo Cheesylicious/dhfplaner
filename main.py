@@ -1,7 +1,9 @@
 # main.py
 import tkinter as tk
 from tkinter import messagebox
-# Importe hier entfernt (nach innen verschoben)
+# --- NEUER IMPORT FÜR MODERNES DESIGN ---
+import sv_ttk
+# ----------------------------------------
 import sys
 import os
 
@@ -33,6 +35,16 @@ def main():
         #    Die Application-Klasse (im boot_loader) erstellt jetzt das 'root'-Fenster
         print("[DEBUG] main.py: Erstelle Application()...")
         app = Application()
+
+        # --- NEU: Modernes Theme (sv-ttk) setzen ---
+        # Dies muss nach der Erstellung von Application() erfolgen (welche das root Tk-Fenster erstellt)
+        # und bevor app.run() die Hauptschleife startet.
+        try:
+            sv_ttk.set_theme("dark") # Alternativ "light"
+            print("[DEBUG] sv_ttk Theme 'dark' erfolgreich gesetzt.")
+        except Exception as e:
+            print(f"[WARNUNG] sv_ttk Theme konnte nicht gesetzt werden: {e}")
+        # --------------------------------------------
 
         # 2. Starte die Anwendung.
         #    app.run() kümmert sich um alles (DB-Check, Login-Fenster, Mainloop)

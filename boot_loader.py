@@ -35,10 +35,16 @@ from gui.main_user_window import MainUserWindow
 from gui.main_zuteilung_window import MainZuteilungWindow
 # --- ENDE NEU ---
 
+# --- NEU: Import für Schiffsbewachungs-Fenster (Annahme des Klassennamens) ---
+try:
+    from gui.main_schiffsbewachung_window import MainSchiffsbewachungWindow
+except ImportError:
+    print("[WARNUNG] main_schiffsbewachung_window.py nicht gefunden. Bitte erstellen Sie die Datei.")
+    MainSchiffsbewachungWindow = None  # Fallback
+# --- ENDE NEU ---
+
 # --- NEU (P1-P4): Import des neuen Preloading-Managers (Regel 4) ---
 from gui.preloading_manager import PreloadingManager
-
-
 # --- ENDE NEU ---
 
 
@@ -62,7 +68,9 @@ class Application(tk.Tk):
             "main_admin_window": MainAdminWindow,
             "main_user_window": MainUserWindow,
             # --- NEU (Zuteilungs-Fenster): Zuteilungsfenster hinzugefügt ---
-            "main_zuteilung_window": MainZuteilungWindow
+            "main_zuteilung_window": MainZuteilungWindow,
+            # --- NEU: Schiffsbewachungs-Fenster hinzugefügt ---
+            "main_schiffsbewachung_window": MainSchiffsbewachungWindow
         }
         # --- ENDE NEU ---
 
@@ -343,8 +351,9 @@ class Application(tk.Tk):
                 self.main_window = TargetWindow(self, user_data, self)
             else:
                 # Fallback (Regel 1), falls DB einen Namen liefert, den wir (noch) nicht kennen
+                # ODER wenn der Import (z.B. für MainSchiffsbewachungWindow) fehlschlug
                 print(
-                    f"[WARNUNG] Unbekanntes Hauptfenster '{window_name}' in DB! Führe Fallback auf 'main_user_window' aus.")
+                    f"[WARNUNG] Unbekanntes Hauptfenster '{window_name}' in DB oder Import fehlgeschlagen! Führe Fallback auf 'main_user_window' aus.")
                 self.main_window = MainUserWindow(self, user_data, self)
             # --- ENDE ANPASSUNG ---
 
