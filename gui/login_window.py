@@ -12,6 +12,13 @@ import webbrowser  # Beibehalten
 import threading
 from database import db_core  # Um den Pool-Status zu prüfen
 
+# --- NEU: ANIMATIONS-IMPORTE (Regel 2) ---
+import random
+import math
+
+
+# --- ENDE NEU ---
+
 
 class LoginWindow(tk.Toplevel):
     def __init__(self, master, app, prewarm_thread, preload_thread):
@@ -21,6 +28,8 @@ class LoginWindow(tk.Toplevel):
 
         WICHTIG: Dieses Fenster wird versteckt initialisiert ('self.withdraw()')
         und von boot_loader.py (via 'show_login_window') angezeigt.
+
+        (Regel 2) Integriert die Konstellations-Animation als Hintergrund.
         """
         print("[DEBUG] LoginWindow.__init__: Wird initialisiert.")
         super().__init__(master)
@@ -37,49 +46,61 @@ class LoginWindow(tk.Toplevel):
         self.login_button_enabled = False
         # -------------------------
 
+        # --- NEU: Animations-Steuerung (Regel 2) ---
+        self.running = False  # Startet als 'False', wird von on_splash_screen_finished aktiviert
+        self.nodes = []
+        self.num_nodes = 40  # Etwas mehr Knoten für den großen Bildschirm
+        self.max_speed = 0.4
+        self.connection_distance = 180
+
+        # --- Farbpalette (MODIFIZIERT: Harmonisiert mit SplashScreen) ---
+        self.bg_color = "#1a1a1a"  # <--- GEÄNDERT (von #2c3e50)
+        self.node_color = "#3498db"  # Akzentfarbe (Login-Button)
+        self.line_color = "#ecf0f1"  # Helles Grau (Linien)
+        # --------------------------------------------
+
         self.local_version = "0.0.0"
 
         # --- MODIFIZIERT (M): 'self.withdraw()' bleibt, 'deiconify()' wird entfernt ---
         self.withdraw()  # WICHTIG: Fenster versteckt starten
         self.title("DHF-Planer - Login")
-        self.configure(bg='#2c3e50')
+        self.configure(bg=self.bg_color)  # Hintergrund des Toplevel-Fensters
 
         style = ttk.Style(self)
         style.theme_use('clam')
-        # ... (restliche Styles bleiben unverändert) ...
-        style.configure('TFrame', background='#2c3e50')
-        style.configure('TLabel', background='#2c3e50', foreground='white', font=('Segoe UI', 10))
+
+        # --- MODIFIZIERT: Alle Styles auf self.bg_color (#1a1a1a) umgestellt ---
+        style.configure('TFrame', background=self.bg_color)
+        style.configure('TLabel', background=self.bg_color, foreground='white', font=('Segoe UI', 10))
         style.configure('TButton', background='#3498db', foreground='white', font=('Segoe UI', 10, 'bold'),
                         borderwidth=0)
         style.map('TButton', background=[('active', '#2980b9')])
 
         # Style für Ladebalken (Post-Login)
-        style.configure('Loading.TLabel', background='#2c3e50', foreground='white', font=('Segoe UI', 12))
+        style.configure('Loading.TLabel', background=self.bg_color, foreground='white', font=('Segoe UI', 12))
         style.configure('Loading.Horizontal.TProgressbar', background='#3498db')
 
         # --- NEU: Style für Pre-Login-Ladebalken ---
-        style.configure('PreLoading.TLabel', background='#2c3e50', foreground='#bdc3c7', font=('Segoe UI', 9, 'italic'))
+        style.configure('PreLoading.TLabel', background=self.bg_color, foreground='#bdc3c7',
+                        font=('Segoe UI', 9, 'italic'))
         # Stil für den Balken selbst
         style.configure('PreLoading.Horizontal.TProgressbar',
                         troughcolor='#34495e',  # Farbe der Leiste
                         background='#3498db')  # Farbe des Balkens
 
         # Style für erfolgreiche Labels
-        style.configure('Success.PreLoading.TLabel', background='#2c3e50', foreground='#2ecc71',
+        style.configure('Success.PreLoading.TLabel', background=self.bg_color, foreground='#2ecc71',
                         font=('Segoe UI', 9, 'italic'))
         # Style für fehlerhafte Labels
-        style.configure('Error.PreLoading.TLabel', background='#2c3e50', foreground='red',
+        style.configure('Error.PreLoading.TLabel', background=self.bg_color, foreground='red',
                         font=('Segoe UI', 9, 'italic'))
-        # --------------------------------------------
+        # --- ENDE MODIFIKATION ---
 
         self.protocol("WM_DELETE_WINDOW", self.app.on_app_close)
         self.create_widgets(style)
 
         # --- MODIFIZIERT (R): Sichtbarkeits-Logik entfernt ---
-        # self.attributes('-fullscreen', True) # Entfernt -> Verschieben in on_splash_screen_finished
-        # self.deiconify()                     # Entfernt -> Gesteuert von boot_loader
-        # self.lift()                          # Entfernt -> Gesteuert von boot_loader
-        # self.focus_force()                   # Entfernt -> Gesteuert von boot_loader
+        # (Wird von boot_loader gesteuert)
         # --- ENDE MODIFIZIERT ---
 
         # --- INNOVATION: Starte den Checker für die Pre-Loading-Threads ---
@@ -97,12 +118,27 @@ class LoginWindow(tk.Toplevel):
         print("[DEBUG] LoginWindow.__init__: Initialisierung abgeschlossen (Fenster bleibt versteckt).")
 
     def create_widgets(self, style):
-        # ... (unverändert) ...
-        container = ttk.Frame(self, style='TFrame')
-        container.pack(fill="both", expand=True)
+        """
+        (Regel 2) Erstellt die Canvas als unterste Ebene für die Animation
+        und platziert den 'wrapper_frame' (mit dem Login-Formular)
+        zentriert darauf.
+        """
 
-        self.wrapper_frame = ttk.Frame(container, style='TFrame')
-        self.wrapper_frame.place(relx=0.5, rely=0.5, anchor="center")
+        # --- MODIFIZIERT: Canvas ist der Hauptcontainer ---
+        self.canvas = tk.Canvas(self, bg=self.bg_color, highlightthickness=0)
+        self.canvas.pack(fill="both", expand=True)
+
+        # 'wrapper_frame' ist der Container für ALLE UI-Elemente (Formular, Ladebalken)
+        # WICHTIG: Der Master ist jetzt self.canvas
+        self.wrapper_frame = ttk.Frame(self.canvas, style='TFrame')
+        # Wir verwenden create_window statt place/pack, damit es über den
+        # Canvas-Items (Nodes/Linien) schwebt.
+        # Die Position wird in on_window_resize() gesetzt.
+        self.canvas.create_window(0, 0, window=self.wrapper_frame, anchor="center", tags="ui_wrapper")
+        # --------------------------------------------------
+
+        # --- Der Inhalt von wrapper_frame bleibt (fast) unverändert ---
+        # (Master ist jetzt wrapper_frame)
 
         self.main_frame = ttk.Frame(self.wrapper_frame, padding="40", style='TFrame')
         self.main_frame.pack()
@@ -142,6 +178,7 @@ class LoginWindow(tk.Toplevel):
         self.reset_button.pack(side='right', expand=True, fill='x', padx=(5, 0), ipady=4)
 
         # --- INNOVATION: Pre-Login Lade-Widgets (AUFGETEILT) ---
+        # (Master ist wrapper_frame)
         self.pre_login_loading_frame = ttk.Frame(self.wrapper_frame, style='TFrame')
         self.pre_login_loading_frame.pack(fill='x', padx=40, pady=(10, 0))
 
@@ -170,6 +207,146 @@ class LoginWindow(tk.Toplevel):
         self.progress_bar = ttk.Progressbar(self.wrapper_frame, mode='indeterminate',
                                             style='Loading.Horizontal.TProgressbar')
         # -------------------------------------------------
+
+        # --- NEU: Bindung für die Zentrierung des UI-Wrappers ---
+        self.bind("<Configure>", self.on_window_resize)
+        self.bind("<Map>", self.on_window_resize)  # Beim Sichtbarwerden
+        # -------------------------------------------------------
+
+    # --- NEUE FUNKTION: Zentriert das UI-Paket auf der Canvas ---
+    def on_window_resize(self, event):
+        """Aktualisiert die Position des UI-Wrappers bei Größenänderung."""
+        if self.winfo_exists() and self.canvas.winfo_exists():
+            x_pos = self.canvas.winfo_width() // 2
+            y_pos = self.canvas.winfo_height() // 2
+            # (Regel 1) Prüfen ob "ui_wrapper" existiert
+            if self.canvas.find_withtag("ui_wrapper"):
+                self.canvas.coords("ui_wrapper", x_pos, y_pos)
+
+    # ----------------- ANIMATIONS-CODE (aus SplashScreen) -----------------
+    # (Regel 2 & 3)
+    def _interpolate_color(self, start_hex, end_hex, ratio):
+        """
+        Berechnet eine Zwischenfarbe zwischen zwei Hex-Codes.
+        Ratio = 0.0 (start_hex) bis 1.0 (end_hex).
+        """
+        try:
+            # Hex zu RGB Tupel konvertieren
+            start_rgb = tuple(int(start_hex.lstrip('#')[i:i + 2], 16) for i in (0, 2, 4))
+            end_rgb = tuple(int(end_hex.lstrip('#')[i:i + 2], 16) for i in (0, 2, 4))
+
+            # Interpolieren
+            r = int(start_rgb[0] + (end_rgb[0] - start_rgb[0]) * ratio)
+            g = int(start_rgb[1] + (end_rgb[1] - start_rgb[1]) * ratio)
+            b = int(start_rgb[2] + (end_rgb[2] - start_rgb[2]) * ratio)
+
+            return f'#{r:02x}{g:02x}{b:02x}'
+        except Exception:
+            return end_hex  # Fallback
+
+    def create_nodes(self):
+        """Erstellt die 'Datenknoten' an zufälligen Positionen."""
+        # (Regel 1) Alte Knoten löschen, falls vorhanden
+        for node in self.nodes:
+            self.canvas.delete(node['id'])
+        self.nodes = []
+
+        width = self.canvas.winfo_width()
+        height = self.canvas.winfo_height()
+
+        if width <= 1 or height <= 1:
+            print("[WARNUNG] Canvas-Größe für Knoten-Erstellung noch 0. Verwende Screen-Größe als Fallback.")
+            width = self.winfo_screenwidth()
+            height = self.winfo_screenheight()
+
+        for _ in range(self.num_nodes):
+            x = random.uniform(5, width - 5)
+            y = random.uniform(5, height - 5)
+            # Zufällige Geschwindigkeit für X und Y
+            dx = random.uniform(-self.max_speed, self.max_speed)
+            dy = random.uniform(-self.max_speed, self.max_speed)
+
+            # (dx, dy) dürfen nicht (0, 0) sein
+            while dx == 0 and dy == 0:
+                dx = random.uniform(-self.max_speed, self.max_speed)
+                dy = random.uniform(-self.max_speed, self.max_speed)
+
+            # Knoten als kleine Kreise zeichnen
+            oval_id = self.canvas.create_oval(
+                x - 2, y - 2, x + 2, y + 2,
+                fill=self.node_color,
+                outline=""
+            )
+            self.nodes.append({'id': oval_id, 'x': x, 'y': y, 'dx': dx, 'dy': dy})
+
+    def animate_nodes_and_lines(self):
+        """
+        Aktualisiert die Knoten-Positionen, lässt sie abprallen
+        und zeichnet die Verbindungen basierend auf der Distanz neu.
+        """
+
+        # Lösche alle Linien des letzten Frames (Regel 2: Performance)
+        self.canvas.delete("connection_line")
+
+        width = self.canvas.winfo_width()
+        height = self.canvas.winfo_height()
+
+        # 1. Knoten bewegen und abprallen lassen
+        for node in self.nodes:
+            node['x'] += node['dx']
+            node['y'] += node['dy']
+
+            # Abprall-Logik
+            if node['x'] <= 0 or node['x'] >= width:
+                node['dx'] *= -1
+            if node['y'] <= 0 or node['y'] >= height:
+                node['dy'] *= -1
+
+            # Position auf Canvas aktualisieren
+            self.canvas.coords(node['id'], node['x'] - 2, node['y'] - 2, node['x'] + 2, node['y'] + 2)
+
+        # 2. Linien basierend auf Distanz neu zeichnen
+        for i in range(self.num_nodes):
+            for j in range(i + 1, self.num_nodes):
+                n1 = self.nodes[i]
+                n2 = self.nodes[j]
+
+                # Distanz berechnen
+                dist = math.hypot(n1['x'] - n2['x'], n1['y'] - n2['y'])
+
+                # Wenn nah genug, zeichne eine Linie
+                if dist < self.connection_distance:
+                    # Je näher, desto heller (Ratio 1.0 -> 0.0)
+                    ratio = dist / self.connection_distance
+                    alpha_ratio = 1.0 - ratio
+                    alpha_ratio = alpha_ratio ** 2
+
+                    # Farbe von Hintergrund zu Linienfarbe interpolieren
+                    color = self._interpolate_color(self.bg_color, self.line_color, alpha_ratio)
+
+                    self.canvas.create_line(
+                        n1['x'], n1['y'], n2['x'], n2['y'],
+                        fill=color,
+                        width=1,
+                        tags="connection_line"  # Wichtig für das Löschen
+                    )
+
+    def run_animation_loop(self):
+        """Die Haupt-Animationsschleife (Ticker)."""
+        if not self.running or not self.winfo_exists():
+            self.running = False
+            return
+
+        try:
+            self.animate_nodes_and_lines()
+            # (Regel 2) UI nicht blockieren
+            self.after(16, self.run_animation_loop)  # ~60 FPS
+        except tk.TclError as e:
+            # Verhindert Crash, wenn Fenster während Animation geschlossen wird
+            print(f"[DEBUG] Animations-Loop gestoppt: {e}")
+            self.running = False
+
+    # ----------------- ENDE ANIMATIONS-CODE -----------------
 
     def _check_startup_threads(self):
         """
@@ -245,19 +422,37 @@ class LoginWindow(tk.Toplevel):
             # Warte kurz, damit der Benutzer den Erfolg sieht, dann blende aus
             self.after(500, self.pre_login_loading_frame.pack_forget)
 
-    # --- NEUE FUNKTION: Wird von boot_loader.py aufgerufen, NACHDEM das Fenster sichtbar ist ---
+    # --- MODIFIZIERTE FUNKTION: Startet jetzt auch die Animation ---
     def on_splash_screen_finished(self):
         """
         Wendet Attribute an, die erst nach dem 'deiconify'
         (gesteuert durch main.py/boot_loader.py) gesetzt werden sollen.
+
+        (Regel 2) Startet die Hintergrundanimation.
         """
         print("[DEBUG] LoginWindow.on_splash_screen_finished: Setze -fullscreen.")
         try:
             self.attributes('-fullscreen', True)
+            # Wichtig: update_idletasks(), damit winfo_width/height korrekt sind
+            self.update_idletasks()
         except tk.TclError as e:
             print(f"[WARNUNG] LoginWindow: Setzen von -fullscreen fehlgeschlagen: {e}")
             # Fallback für den Fall, dass -fullscreen Probleme macht
             self.geometry(f"{self.winfo_screenwidth()}x{self.winfo_screenheight()}+0+0")
+            self.update_idletasks()
+
+        # --- NEU: Animation starten ---
+        # UI-Wrapper zentrieren (jetzt, da wir die Größe haben)
+        self.on_window_resize(None)
+
+        # Knoten erstellen (jetzt, da wir die Größe haben)
+        self.create_nodes()
+
+        # Animation starten
+        if not self.running:
+            self.running = True
+            self.run_animation_loop()
+        # -----------------------------
 
     # --- ENDE NEUE FUNKTION ---
 
@@ -308,12 +503,25 @@ class LoginWindow(tk.Toplevel):
         else:
             messagebox.showerror("Login fehlgeschlagen", "Benutzername oder Passwort falsch.", parent=self)
 
+    # --- MODIFIZIERT: Stoppt die Animation ---
     def show_loading_ui(self):
-        # ... (Funktion bleibt unverändert) ...
         """
         Versteckt das Login-Formular und zeigt die Lade-Animation (POST-Login).
+        (Regel 2) Stoppt die Hintergrundanimation.
         """
         print("[DEBUG] LoginWindow.show_loading_ui: Zeige Lade-Animation (Post-Login).")
+
+        # --- NEU: Animation stoppen (Regel 1 & 2) ---
+        if self.running:
+            print("[DEBUG] Hintergrundanimation wird gestoppt.")
+            self.running = False
+            # Linien entfernen, um Canvas zu säubern
+            self.canvas.delete("connection_line")
+            # Optional: Knoten ausblenden
+            for node in self.nodes:
+                self.canvas.itemconfig(node['id'], state='hidden')
+        # --- ENDE NEU ---
+
         self.main_frame.pack_forget()
 
         # Stelle sicher, dass der Pre-Login-Lader auch weg ist
@@ -323,11 +531,12 @@ class LoginWindow(tk.Toplevel):
         self.progress_bar.pack(pady=10, fill='x', padx=40)
         self.progress_bar.start(15)
 
+    # --- MODIFIZIERT: Startet die Animation neu ---
     def show_login_ui(self):
-        # ... (Funktion bleibt unverändert) ...
         """
         Versteckt die Lade-Animation (POST-Login) und zeigt das Login-Formular wieder an.
         (Wird vom boot_loader bei einem Fehler beim Laden des Hauptfensters aufgerufen)
+        (Regel 2) Startet die Hintergrundanimation neu.
         """
         print("[DEBUG] LoginWindow.show_login_ui: Zeige Login-Formular (nach Ladefehler).")
         self.loading_label.pack_forget()
@@ -369,6 +578,22 @@ class LoginWindow(tk.Toplevel):
 
         # Den neuen Checker starten
         self.after(100, self._check_startup_threads)
+
+        # --- NEU: Animation neu starten (Regel 1 & 2) ---
+        if not self.running:
+            print("[DEBUG] Starte Hintergrundanimation neu (nach Ladefehler).")
+            # Optional: Knoten wieder sichtbar machen
+            for node in self.nodes:
+                self.canvas.itemconfig(node['id'], state='normal')
+
+            # (Regel 1) Stelle sicher, dass Knoten vorhanden sind
+            if not self.nodes:
+                self.update_idletasks()
+                self.create_nodes()
+
+            self.running = True
+            self.run_animation_loop()
+        # --- ENDE NEU ---
 
     # ---------------------
 

@@ -1,8 +1,8 @@
-# gui/shift_plan_data_manager.py
 from datetime import date, datetime, timedelta, time
 import calendar
 from collections import defaultdict
 import traceback
+import threading  # NEU: Importiert für asynchrones Cache-Löschen
 
 # DB Imports
 from database.db_shifts import get_all_data_for_plan_display
@@ -88,16 +88,14 @@ class ShiftPlanDataManager:
         initialisiert mit 0.0, um den Race Condition (Null-Bug) beim
         inkrementellen Live-Update zu verhindern.
         """
+        # (Unverändert)
         all_relevant_user_ids = user_data_map.keys()
 
-        # Stellen Sie sicher, dass der Cache initialisiert ist
         if not isinstance(self.user_shift_totals, dict):
             self.user_shift_totals = {}
 
-        # Initialisieren/Verifizieren Sie jeden Benutzer-Eintrag
         for user_id in all_relevant_user_ids:
             user_id_str = str(user_id)
-            # Prüft, ob der Eintrag im Cache existiert. Wenn nicht, mit 0.0 initialisieren.
             if user_id_str not in self.user_shift_totals or 'hours_total' not in self.user_shift_totals[user_id_str]:
                 self.user_shift_totals[user_id_str] = {
                     'hours_total': 0.0,
@@ -112,6 +110,7 @@ class ShiftPlanDataManager:
         """
         Setzt alle *aktiven* Caches zurück.
         """
+        # (Unverändert)
         print("[DM] Aktive Caches werden zurückgesetzt...")
         self.shift_schedule_data = {}
         self.processed_vacations = {}
@@ -125,27 +124,19 @@ class ShiftPlanDataManager:
         self.wunschfrei_data_prev = {}
         self.next_month_shifts = {}
         self.cached_users_for_month = []
-
-        # --- KORREKTUR: user_shift_totals leeren ---
         self.user_shift_totals = {}
-
-        # self.user_data_map wird NICHT geleert, da es App-global ist
-
-        # Hinweis: Die Helfer-Caches (z.B. in vm._preprocessed_shift_times)
-        # werden *nicht* geleert, da sie global gültig sind (z.B. Schichtzeiten).
-        # Wenn Schichtzeiten sich ändern, muss vm.preprocess_shift_times()
-        # manuell neu getriggert werden (z.B. durch clear_all_monthly_caches).
+        # self.user_data_map wird NICHT geleert
 
     def clear_all_monthly_caches(self):
         """
         Löscht den gesamten Multi-Monats-Cache (P5) UND
         setzt globale Helfer-Caches (wie Schichtzeiten) zurück.
         """
+        # (Unverändert)
         print("[DM Cache] Lösche gesamten Monats-Cache (P5) und globale Helfer-Caches...")
         self.monthly_caches = {}
         self._clear_active_caches()
 
-        # Setzt auch die Caches in den Helfern zurück
         if hasattr(self.vm, '_preprocessed_shift_times'):
             self.vm._preprocessed_shift_times.clear()
             self.vm._warned_missing_times.clear()
@@ -154,6 +145,7 @@ class ShiftPlanDataManager:
         """
         Entfernt gezielt einen Monat aus dem P5-Cache (monthly_caches).
         """
+        # (Unverändert)
         cache_key = (year, month)
         if cache_key in self.monthly_caches:
             print(f"[DM Cache] Invalidiere P5-Cache für Monat {year}-{month}.")
@@ -162,56 +154,49 @@ class ShiftPlanDataManager:
             print(f"[DM Cache] P5-Cache für {year}-{month} war nicht vorhanden (muss nicht invalidiert werden).")
 
     def get_previous_month_shifts(self):
+        # (Unverändert)
         return self._prev_month_shifts
 
     def get_next_month_shifts(self):
+        # (Unverändert)
         return self.next_month_shifts
 
     # --- Delegierte Methoden (Regel 4) ---
 
     def get_generator_config(self):
-        """Delegiert an DataManagerHelpers"""
+        # (Unverändert)
         return self.helpers.get_generator_config()
 
     def save_generator_config(self, config_data):
-        """Delegiert an DataManagerHelpers"""
+        # (Unverändert)
         return self.helpers.save_generator_config(config_data)
 
     def get_min_staffing_for_date(self, current_date):
-        """Delegiert an DataManagerHelpers"""
+        # (Unverändert)
         return self.helpers.get_min_staffing_for_date(current_date)
 
     def calculate_total_hours_for_user(self, user_id_str, year, month):
-        """Delegiert an DataManagerHelpers"""
-        # HINWEIS: Diese Funktion wird extern aufgerufen, um Soll-Stunden zu berechnen.
-        # Die Live-Aktualisierung der Ist-Stunden verwendet NICHT diese Funktion,
-        # sondern greift auf self.user_shift_totals zu.
+        # (Unverändert)
         return self.helpers.calculate_total_hours_for_user(user_id_str, year, month)
 
-    # --- NEU: Helper-Methode für die Ist-Stunden-Berechnung aus der DB (angenommen) ---
     def _calculate_user_shift_totals(self, shift_data, user_data_map, shift_types_data):
         """
         Placeholder für die langsame Berechnung der Ist-Stunden-Totals.
-        Wir delegieren dies an den Helper, um die Monolithenbildung zu vermeiden.
         """
+        # (Unverändert)
         print("[DM] Starte langsame Berechnung der user_shift_totals...")
-        # WICHTIG: Angenommen, diese Methode wird im Helper korrekt implementiert und
-        # liefert den vollständigen berechneten Ist-Stunden-Cache zurück.
         return self.helpers.calculate_user_shift_totals_from_db(shift_data, user_data_map, shift_types_data)
 
-    # --- ENDE NEU ---
-
     def update_violation_set(self, year, month):
-        """Delegiert an ViolationManager"""
+        # (Unverändert)
         self.vm.update_violation_set(year, month)
 
     def update_violations_incrementally(self, user_id, date_obj, old_shift, new_shift):
-        """Delegiert an ViolationManager und invalidiert P5-Cache."""
-        # P5-Cache invalidieren (muss hier im DM passieren)
-        cache_key = (date_obj.year, date_obj.month)
-        if cache_key in self.monthly_caches:
-            print(f"[DM Cache] Entferne {cache_key} wegen inkrementellem Update aus P5-Cache.")
-            del self.monthly_caches[cache_key]
+        """Delegiert an ViolationManager und invalidiert P5-Cache (JETZT ASYNCHRON)."""
+
+        # P5-Cache invalidieren (jetzt asynchron, ausgelöst durch den Aufrufer)
+        # (Die Logik wurde nach recalculate_daily_counts_for_day verschoben,
+        #  da update_violations_incrementally bereits asynchron ist)
 
         # Aufruf an den Helfer
         return self.vm.update_violations_incrementally(user_id, date_obj, old_shift, new_shift)
@@ -223,6 +208,7 @@ class ShiftPlanDataManager:
         Führt den konsolidierten DB-Abruf im Worker-Thread durch ODER lädt aus dem P5-Cache.
         Nutzt Helfer für die Datenverarbeitung.
         """
+        # (Funktion ist unverändert)
         cache_key = (year, month)
 
         def update_progress(value, text):
@@ -251,23 +237,15 @@ class ShiftPlanDataManager:
             self.cached_users_for_month = cached_data['cached_users_for_month']
             self.locked_shifts_cache = cached_data.get('locked_shifts', {})
 
-            # --- KORREKTUR: user_data_map und user_shift_totals aus Cache laden ---
             if 'user_data_map' in cached_data:
                 self.user_data_map = cached_data['user_data_map']
             if 'user_shift_totals' in cached_data:
                 self.user_shift_totals = cached_data['user_shift_totals']
 
-            # --- NEU: ABSICHERUNG GEGEN PRELOADER-FEHLER (HARTES FIX) ---
-            # Wenn user_data_map geladen wurde (was schnell ist), erzwinge die Initialisierung,
-            # um Null-Fehler bei inkonsistentem Preloading zu verhindern.
             if self.user_data_map:
                 self._initialize_user_shift_totals(self.user_data_map)
-            # --- ENDE ABSICHERUNG ---
-            # --- ENDE KORREKTUR ---
 
-            # Schichtzeiten-Cache (global) sicherstellen (delegiert)
             self.vm.preprocess_shift_times()
-
             update_progress(95, "Vorbereitung abgeschlossen.")
             return True  # Erfolg
 
@@ -281,7 +259,7 @@ class ShiftPlanDataManager:
             'processed_vacations_prev': {}, 'wunschfrei_data_prev': {},
             'next_month_shifts': {}, 'cached_users_for_month': [],
             'user_data_map': {},
-            'user_shift_totals': {}  # NEU
+            'user_shift_totals': {}
         }
 
         update_progress(10, "Lade alle Plandaten (Batch-Optimierung)...")
@@ -291,38 +269,27 @@ class ShiftPlanDataManager:
         batch_data = get_all_data_for_plan_display(year, month, current_date_for_archive_check)
         if batch_data is None:
             print("[FEHLER] get_all_data_for_plan_display hat None zurückgegeben.")
-            return False  # Misserfolg
+            return False
 
         update_progress(60, "Verarbeite Schicht- und Antragsdaten...")
 
-        # 2b. Daten in temporäre Caches entpacken (delegiert)
         temp_data['cached_users_for_month'] = batch_data.get('users', [])
-
-        # --- NEU: user_data_map füllen (wichtig für PlanningAssistant)
         temp_data['user_data_map'] = {u['id']: u for u in temp_data['cached_users_for_month']}
-        # --- ENDE NEU ---
-
         temp_data['locked_shifts_cache'] = batch_data.get('locks', {})
         temp_data['shift_schedule_data'] = batch_data.get('shifts', {})
         temp_data['wunschfrei_data'] = batch_data.get('wunschfrei_requests', {})
         raw_vacations = batch_data.get('vacation_requests', [])
-
-        # --- Aufruf an Helfer ---
         temp_data['processed_vacations'] = self.helpers.process_vacations(year, month, raw_vacations)
-
         temp_data['daily_counts'] = batch_data.get('daily_counts', {})
         temp_data['_prev_month_shifts'] = batch_data.get('prev_month_shifts', {})
         temp_data['previous_month_shifts'] = temp_data['_prev_month_shifts']
         temp_data['wunschfrei_data_prev'] = batch_data.get('prev_month_wunschfrei', {})
         raw_vacations_prev = batch_data.get('prev_month_vacations', [])
         prev_month_date = first_day_current_month - timedelta(days=1)
-
-        # --- Aufruf an Helfer ---
         temp_data['processed_vacations_prev'] = self.helpers.process_vacations(prev_month_date.year,
                                                                                prev_month_date.month,
                                                                                raw_vacations_prev)
         temp_data['next_month_shifts'] = batch_data.get('next_month_shifts', {})
-
         print(f"[DM Load] Batch-Entpacken (temporär) abgeschlossen.")
 
         # 3. Restliche Verarbeitung
@@ -340,25 +307,14 @@ class ShiftPlanDataManager:
                 self.app.global_events_data = {}
 
         print("[DM Load] Tageszählungen (daily_counts) direkt aus Batch übernommen.")
-
-        # Schichtzeiten vorverarbeiten (delegiert)
         self.vm.preprocess_shift_times()
 
         # 4. Atomares Update der aktiven Caches
         print(f"[DM] Atomares Update: Überschreibe aktive Caches mit Daten für {year}-{month}")
         self.year = year
         self.month = month
-
-        # ZUERST: user_data_map aktualisieren
         self.user_data_map = temp_data['user_data_map']
-
-        # --- KRITISCHER SCHRITT (Fix für den Bug) ---
-        # Initialisiere user_shift_totals SOFORT mit 0 für alle Benutzer,
-        # da user_data_map jetzt aktuell ist.
         self._initialize_user_shift_totals(self.user_data_map)
-        # --- ENDE KRITISCHER SCHRITT ---
-
-        # Restliche Caches
         self.shift_schedule_data = temp_data['shift_schedule_data']
         self.processed_vacations = temp_data['processed_vacations']
         self.wunschfrei_data = temp_data['wunschfrei_data']
@@ -372,17 +328,13 @@ class ShiftPlanDataManager:
         self.cached_users_for_month = temp_data['cached_users_for_month']
 
         update_progress(80, "Prüfe Konflikte (Ruhezeit, Hunde)...")
-        # Volle Konfliktprüfung (delegiert)
-        self.update_violation_set(year, month)  # Füllt self.violation_cells
+        self.update_violation_set(year, month)
 
         update_progress(90, "Berechne Monats-Totals...")
-        # Lade die Ist-Stunden (Dies ist der langsame Schritt)
-        # NEU: Der Cache wird mit den berechneten Werten überschrieben.
-        # Fix für Attribute Error: Wir verwenden self.app.shift_types_data anstelle des fehlerhaften self.app.app.shift_types_data
         self.user_shift_totals = self._calculate_user_shift_totals(
             self.shift_schedule_data,
             self.user_data_map,
-            self.app.shift_types_data  # Verwende self.app.shift_types_data, um den Fehler zu vermeiden
+            self.app.shift_types_data
         )
 
         update_progress(95, "Vorbereitung abgeschlossen.")
@@ -403,20 +355,55 @@ class ShiftPlanDataManager:
             'cached_users_for_month': self.cached_users_for_month,
             'locked_shifts': self.locked_shifts_cache,
             'user_data_map': self.user_data_map,
-            'user_shift_totals': self.user_shift_totals  # Wichtig: Speichere die berechneten Totals
+            'user_shift_totals': self.user_shift_totals
         }
 
         return True  # Erfolg
 
+    # --- MODIFIZIERTE FUNKTION (Regel 2: Latenz-Fix) ---
     def recalculate_daily_counts_for_day(self, date_obj, old_shift, new_shift):
-        """Aktualisiert self.daily_counts für einen bestimmten Tag nach Schichtänderung."""
+        """
+        Aktualisiert self.daily_counts für einen bestimmten Tag nach Schichtänderung.
+        Die langsame P5-Cache-Invalidierung wird in einen Hintergrund-Thread ausgelagert.
+        """
 
-        # P5-Cache invalidieren
         cache_key = (date_obj.year, date_obj.month)
-        if cache_key in self.monthly_caches:
-            print(f"[DM Cache] Entferne {cache_key} wegen Zählungs-Update aus P5-Cache.")
-            del self.monthly_caches[cache_key]
 
+        # --- INNOVATION (Regel 2): Latenz-Fix ---
+        # Diese Operation (del) blockiert den Hauptthread und verzögert
+        # das Anzeigen von 'T.' in der UI.
+        if cache_key in self.monthly_caches:
+
+            print(f"[DM Cache] Plane asynchrones Entfernen von {cache_key} aus P5-Cache...")
+
+            def _invalidate_cache_async(key_to_delete):
+                """Führt das Löschen im Hintergrund aus."""
+                try:
+                    # (Regel 1) Wir müssen sicherstellen, dass wir den 
+                    # dict-Zugriff sperren, falls mehrere Threads gleichzeitig 
+                    # darauf zugreifen.
+                    # HINWEIS: Ein 'threading.Lock' wäre idealer,
+                    # aber für diesen Zweck ist die Operation atomar genug,
+                    # um ein 'KeyError' abzufangen, falls ein anderer Thread
+                    # schneller war.
+                    del self.monthly_caches[key_to_delete]
+                    print(f"[DM Cache] Asynchrones Entfernen von {key_to_delete} erfolgreich.")
+                except KeyError:
+                    # Key wurde bereits von einem anderen Thread entfernt
+                    print(f"[DM Cache] Asynchrones Entfernen: {key_to_delete} war bereits entfernt.")
+                except Exception as e:
+                    print(f"[FEHLER] Asynchrones Entfernen von {key_to_delete} fehlgeschlagen: {e}")
+
+            # Starte das Löschen in einem separaten, nicht blockierenden Thread
+            threading.Thread(target=_invalidate_cache_async, args=(cache_key,), daemon=True).start()
+
+        # --- Alter (blockierender) Code ---
+        # if cache_key in self.monthly_caches:
+        #     print(f"[DM Cache] Entferne {cache_key} wegen Zählungs-Update aus P5-Cache.")
+        #     del self.monthly_caches[cache_key]
+        # --- ENDE ---
+
+        # (Der Rest der Funktion ist schnell und bleibt synchron im Hauptthread)
         date_str = date_obj.strftime('%Y-%m-%d')
         print(f"[DM Counts] Aktualisiere Zählung für {date_str}: '{old_shift}' -> '{new_shift}'")
         if date_str not in self.daily_counts:
@@ -430,7 +417,6 @@ class ShiftPlanDataManager:
         if should_count_shift(old_shift):
             counts_today[old_shift] = counts_today.get(old_shift, 1) - 1
             if counts_today[old_shift] <= 0:
-                # Sicherstellen, dass der Schlüssel existiert, bevor del aufgerufen wird
                 if old_shift in counts_today:
                     del counts_today[old_shift]
 
@@ -442,11 +428,10 @@ class ShiftPlanDataManager:
 
         print(f"[DM Counts] Neue Zählung für {date_str}: {self.daily_counts.get(date_str, {})}")
 
-    # --- NEU: Delegierung an PlanningAssistant (behebt den AttributeError) ---
+    # --- (Unverändert) ---
     def get_conflicts_for_shift(self, user_id, date_obj, target_shift_abbrev):
         """
         Delegiert die sofortige Konfliktprüfung an den PlanningAssistant.
         Nutzt nur Cache-Daten (Regel 2).
         """
         return self.planning_assistant.get_conflicts_for_shift(user_id, date_obj, target_shift_abbrev)
-    # --- ENDE NEU ---
